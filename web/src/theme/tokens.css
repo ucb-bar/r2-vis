@@ -1,0 +1,181 @@
+/* Design tokens: every color, font and size of the GUI. Components and canvas code read
+   these variables; nothing else holds a color. Values from the dataviz reference palette
+   (light and dark steps validated as sets). */
+
+:root {
+  color-scheme: light;
+  /* surfaces and ink */
+  --color-page: #f9f9f7;
+  --color-surface: #fcfcfb;
+  --color-surface-raised: #ffffff;
+  --color-ink: #0b0b0b;
+  --color-ink-secondary: #52514e;
+  --color-ink-muted: #898781;
+  --color-grid: #e1e0d9;
+  --color-axis: #c3c2b7;
+  --color-border: rgba(11, 11, 11, 0.1);
+  --color-hover: rgba(11, 11, 11, 0.05);
+  --color-accent: #2a78d6;
+  --color-accent-area: rgba(42, 120, 214, 0.18);
+  --color-accent-ink: #ffffff;
+  /* text on colored bars: chosen per bar color by its luminance */
+  --color-ink-on-light: #0b0b0b;
+  --color-ink-on-dark: #ffffff;
+  --color-critical: #d03b3b;
+  --color-warning: #fab219;
+  --color-good: #0ca30c;
+  /* categorical series, fixed order */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  --series-other: #898781;
+  /* timeline line colors: fabric cool (global blue, local teal, control indigo; steps by
+     level root .. sm, bridges between), compute warm, Neutrino ports warm grey. The
+     family colors (step 2, local-0, tensor, vector) pass the dataviz validator all-pairs
+     in light mode (CVD warn tensor/vector: labelled rows); dark mode: vector is above
+     the lightness band. Steps inside a family are close by design. */
+  --line-global-0: #1f5fae;
+  --line-global-1: #2870c4;
+  --line-global-2: #3080d8;
+  --line-global-3: #4590e0;
+  --line-global-4: #58a0e6;
+  --line-local-0: #0f9a8c;
+  --line-local-1: #2aa898;
+  --line-control-0: #33339a;
+  --line-control-1: #3b3ba5;
+  --line-control-2: #4343b0;
+  --line-control-3: #5050bb;
+  --line-control-4: #5d5dc5;
+  --line-tensor: #cc3a3a;
+  --line-vector: #b97c00;
+  --line-scalar: #8f7f70;
+  /* sequential ramp (blue, light to dark): magnitude, e.g. utilization of small blocks */
+  --seq-0: #cde2fb;
+  --seq-1: #9ec5f4;
+  --seq-2: #6da7ec;
+  --seq-3: #3987e5;
+  --seq-4: #256abf;
+  --seq-5: #184f95;
+  --seq-6: #0d366b;
+
+  /* type */
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-size-xs: 11px;
+  --font-size-s: 12px;
+  --font-size-m: 13px;
+  --font-size-l: 16px;
+  --font-size-xl: 20px;
+
+  /* one spacing and radius scale */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --radius-s: 4px;
+  --radius-m: 6px;
+  --radius-l: 10px;
+  --border-width: 1px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --color-page: #0d0d0d;
+    --color-surface: #1a1a19;
+    --color-surface-raised: #232322;
+    --color-ink: #ffffff;
+    --color-ink-secondary: #c3c2b7;
+    --color-ink-muted: #898781;
+    --color-grid: #2c2c2a;
+    --color-axis: #383835;
+    --color-border: rgba(255, 255, 255, 0.1);
+    --color-hover: rgba(255, 255, 255, 0.06);
+    --color-accent: #3987e5;
+    --color-accent-area: rgba(57, 135, 229, 0.22);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+    --seq-0: #0d366b;
+    --seq-1: #104281;
+    --seq-2: #184f95;
+    --seq-3: #256abf;
+    --seq-4: #3987e5;
+    --seq-5: #6da7ec;
+    --seq-6: #9ec5f4;
+    --line-global-0: #3a7fd9;
+    --line-global-1: #4387df;
+    --line-global-2: #4a8fe6;
+    --line-global-3: #5a99e9;
+    --line-global-4: #69a3ec;
+    --line-local-0: #179a8c;
+    --line-local-1: #2aa99a;
+    --line-control-0: #4a45b8;
+    --line-control-1: #4f4abe;
+    --line-control-2: #5550c4;
+    --line-control-3: #5f5bcb;
+    --line-control-4: #6a66d2;
+    --line-tensor: #e05a5a;
+    --line-vector: #d08f10;
+    --line-scalar: #a89888;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-page: #0d0d0d;
+  --color-surface: #1a1a19;
+  --color-surface-raised: #232322;
+  --color-ink: #ffffff;
+  --color-ink-secondary: #c3c2b7;
+  --color-ink-muted: #898781;
+  --color-grid: #2c2c2a;
+  --color-axis: #383835;
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-hover: rgba(255, 255, 255, 0.06);
+  --color-accent: #3987e5;
+  --color-accent-area: rgba(57, 135, 229, 0.22);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --seq-0: #0d366b;
+  --seq-1: #104281;
+  --seq-2: #184f95;
+  --seq-3: #256abf;
+  --seq-4: #3987e5;
+  --seq-5: #6da7ec;
+  --seq-6: #9ec5f4;
+  --line-global-0: #3a7fd9;
+  --line-global-1: #4387df;
+  --line-global-2: #4a8fe6;
+  --line-global-3: #5a99e9;
+  --line-global-4: #69a3ec;
+  --line-local-0: #179a8c;
+  --line-local-1: #2aa99a;
+  --line-control-0: #4a45b8;
+  --line-control-1: #4f4abe;
+  --line-control-2: #5550c4;
+  --line-control-3: #5f5bcb;
+  --line-control-4: #6a66d2;
+  --line-tensor: #e05a5a;
+  --line-vector: #d08f10;
+  --line-scalar: #a89888;
+}

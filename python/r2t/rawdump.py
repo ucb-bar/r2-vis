@@ -1,0 +1,86 @@
+"""Reading a raw dump directory (trace-raw.md Section 2) into numpy record arrays."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from r2t import raw
+
+
+class FormatError(Exception):
+    """The dump does not follow trace-raw.md."""
+
+
+@dataclass
+class RawDump:
+    manifest: dict
+    summary: dict | None
+    strings: list[str]
+    records: dict[str, np.ndarray]
+    dropped_bytes: dict[str, int] = field(default_factory=dict)
+    absent: list[str] = field(default_factory=list)
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.manifest.get("filters", {}).get("partial"))
+
+    @property
+    def complete(self) -> bool:
+        return self.summary is not None
+
+
+def load(raw_dir: Path) -> RawDump:
+    """Reads every file of a dump. A partial last record is dropped (rule 7)."""
+    manifest = raw.load_json(raw_dir / "manifest.json")
+    if manifest is None:
+        raise FormatError(f"{raw_dir}: no manifest.json")
+    if manifest.get("format") != "r2raw":
+        raise FormatError(f"{raw_dir}: format is {manifest.get('format')!r}, not r2raw")
+    major = manifest.get("version", [None])[0]
+    if major != raw.RAW_VERSION[0]:
+        raise FormatError(f"{raw_dir}: raw version {manifest.get('version')} not supported")
+    strings_path = raw_dir / "strings.txt"
+    strings = strings_path.read_text().split("\n") if strings_path.exists() else []
+    if strings and strings[-1] == "":
+        strings.pop()
+    summary = raw.load_json(raw_dir / "summary.json")
+    dump = RawDump(manifest, summary, strings, {})
+    for name in raw.RECORD_FILES:
+        layout = manifest.get("records", {}).get(name)
+        if layout is None:
+            raise FormatError(f"manifest.records has no layout for {name}")
+        check_layout(name, layout)
+        dtype = raw.record_dtype(layout)
+        path = raw.file_path(raw_dir, name)
+        if path is None:
+            dump.absent.append(name)
+            dump.records[name] = np.zeros(0, dtype=dtype)
+            continue
+        data = raw.read_bytes(path)
+        whole = len(data) // dtype.itemsize * dtype.itemsize
+        if whole != len(data):
+            dump.dropped_bytes[name] = len(data) - whole
+        # A view of the file's bytes, without the copy that slicing would make.
+        dump.records[name] = np.frombuffer(data, dtype=dtype, count=whole // dtype.itemsize)
+    return dump
+
+
+def check_layout(name: str, layout: list[list[str]]) -> None:
+    """The manifest layout must start with the Section 4 fields; later fields are allowed."""
+    expected = raw.LAYOUTS[name]
+    if [list(f) for f in layout[: len(expected)]] != expected:
+        raise FormatError(f"layout of {name} does not match trace-raw v1.0: {layout}")
+
+
+def nullable(records: np.ndarray, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """(values, null mask) of a field; null is the maximum value of the type."""
+    values = records[name]
+    return values, values == raw.null_of(values.dtype)
+
+
+def save_json(path: Path, obj: dict) -> None:
+    path.write_text(json.dumps(obj, indent=1))

@@ -1,0 +1,17 @@
+[project]
+name = "r2t"
+version = "0.1.0"
+description = "r2-vis trace tools: synthetic raw dumps and the r2t converter"
+requires-python = ">=3.12"
+
+[project.scripts]
+r2t-convert = "r2t.convert:main"
+r2t-synth = "r2t.synth:main"
+r2t-sql = "r2t.sql:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["python"]
