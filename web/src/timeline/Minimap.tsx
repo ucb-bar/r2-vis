@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { GUTTER, type TimelineRenderer } from './renderer'
-import { laneBusy, sampleBins } from './util'
+import { laneBusy, sampleBins, sampleFabric } from './util'
 
 const HEIGHT = 52
 const EDGE_PX = 6
@@ -156,11 +156,11 @@ function renderSeries(r: TimelineRenderer, key: string | null, n: number, cpp: n
     max = info.ceiling ?? 0
     if (!(max > 0)) for (let p = 0; p < n; p++) max = Math.max(max, values[p])
   } else if (row.kind === 'fabric') {
-    // The fabric node's MAX series: per bin, the largest fraction of ceiling over its ports.
+    // The fabric node's MAX series: the busiest port's average fraction of ceiling.
     const fr = r.trace.fabricRow.get(r.source.fabrics[row.id].path)
     const fl = r.trace.levels.fabric
     if (fr === undefined || !fl) return null
-    sampleBins(fl, fr, 0, cpp, n, values, new Float64Array(n + 1))
+    sampleFabric(fl, fr, 0, cpp, n, values, new Float64Array(n + 1), null)
     max = 1
   } else if (row.kind === 'lane') {
     laneBusy(r.trace.lanes, row.id, 0, cpp, n, values)

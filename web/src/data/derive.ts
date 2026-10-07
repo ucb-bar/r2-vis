@@ -12,10 +12,16 @@ export interface BinLevels {
   fabric?: FabricLevels
 }
 
-/** Per fabric group and bin: the largest fraction of ceiling over its members, times the
- * bin width (so that sampleBins gives fractions). `arg` is the member of each `max` entry. */
-export interface FabricLevels extends BinLevels {
-  arg: Int32Array[]
+/** The MAX series of the fabric groups. Level k (bins of width * 4^k): per bin, the
+ * largest fraction of ceiling over the member ports of each port's average in that bin
+ * (`avg`), and that port (`avgArg`). `max` is the peak pyramid: per level-k bin, the
+ * largest level-0 value. Rows are fabric groups; level k has ceil(count / 4^k) bins. */
+export interface FabricLevels {
+  width: number
+  count: number
+  avg: Float32Array[]
+  avgArg: Int32Array[]
+  max: Float32Array[]
 }
 
 /** Fabric groups for buildLevels: group g has members[start[g], start[g + 1]);
@@ -74,53 +80,64 @@ export function buildLevels(resource: Int32Array, bin: Int32Array, amount: Float
 function buildFabricLevels(lv: BinLevels, g: FabricGroupArgs): FabricLevels {
   const { count, width } = lv
   const rows = g.start.length - 1
-  const base = new Float32Array(rows * count)
-  const arg0 = new Int32Array(rows * count).fill(-1)
   const src = lv.max[0]
+  const avg: Float32Array[] = []
+  const avgArg: Int32Array[] = []
+  const sizes: number[] = []
+  for (let n = count; ; n = Math.ceil(n / 4)) {
+    sizes.push(n)
+    avg.push(new Float32Array(rows * n))
+    avgArg.push(new Int32Array(rows * n).fill(-1))
+    if (n <= 1) break
+  }
+  let cur = new Float64Array(count)
+  let next = new Float64Array(count)
   for (let f = 0; f < rows; f++) {
     for (let k = g.start[f]; k < g.start[f + 1]; k++) {
       const r = g.members[k]
       const row = lv.rowOf[r]
       if (row < 0) continue
-      // The bin amount over (bin width x ceiling) is the fraction; times the bin width.
-      const scale = 1 / g.ceiling[r]
-      for (let b = 0; b < count; b++) {
-        const v = src[row * count + b] * scale
-        if (v > base[f * count + b]) { base[f * count + b] = v; arg0[f * count + b] = r }
-      }
-    }
-  }
-  const prefix = new Float64Array(rows * (count + 1))
-  for (let f = 0; f < rows; f++) {
-    let acc = 0
-    const o = f * (count + 1)
-    for (let b = 0; b < count; b++) {
-      prefix[o + b] = acc
-      acc += base[f * count + b]
-    }
-    prefix[o + count] = acc
-  }
-  const max: Float32Array[] = [base]
-  const arg: Int32Array[] = [arg0]
-  let n = count
-  while (n > 1) {
-    const m = Math.ceil(n / 4)
-    const prev = max[max.length - 1]
-    const prevArg = arg[arg.length - 1]
-    const next = new Float32Array(rows * m)
-    const nextArg = new Int32Array(rows * m).fill(-1)
-    for (let f = 0; f < rows; f++) {
-      for (let j = 0; j < m; j++) {
-        for (let k = 4 * j; k < Math.min(n, 4 * j + 4); k++) {
-          if (prev[f * n + k] > next[f * m + j]) { next[f * m + j] = prev[f * n + k]; nextArg[f * m + j] = prevArg[f * n + k] }
+      // The port's amount per bin of each level (sums of 4), as a fraction of its
+      // ceiling over the level's bin width.
+      for (let b = 0; b < count; b++) cur[b] = src[row * count + b]
+      for (let level = 0; level < sizes.length; level++) {
+        const n = sizes[level]
+        const scale = 1 / (g.ceiling[r] * width * 4 ** level)
+        const a = avg[level]
+        const arg = avgArg[level]
+        for (let j = 0; j < n; j++) {
+          const v = cur[j] * scale
+          if (v > a[f * n + j]) { a[f * n + j] = v; arg[f * n + j] = r }
+        }
+        if (level + 1 < sizes.length) {
+          const m = sizes[level + 1]
+          for (let j = 0; j < m; j++) {
+            let sum = 0
+            for (let q = 4 * j; q < Math.min(n, 4 * j + 4); q++) sum += cur[q]
+            next[j] = sum
+          }
+          ;[cur, next] = [next, cur]
         }
       }
     }
-    max.push(next)
-    arg.push(nextArg)
-    n = m
   }
-  return { width, count, resources: new Int32Array(0), rowOf: new Int32Array(0), prefix, max, arg }
+  // Peak pyramid over level 0.
+  const max: Float32Array[] = [avg[0]]
+  for (let level = 1; level < sizes.length; level++) {
+    const n = sizes[level - 1]
+    const m = sizes[level]
+    const prev = max[level - 1]
+    const out = new Float32Array(rows * m)
+    for (let f = 0; f < rows; f++) {
+      for (let j = 0; j < m; j++) {
+        let v = 0
+        for (let q = 4 * j; q < Math.min(n, 4 * j + 4); q++) v = Math.max(v, prev[f * n + q])
+        out[f * m + j] = v
+      }
+    }
+    max.push(out)
+  }
+  return { width, count, avg, avgArg, max }
 }
 
 export interface LaneIndex {

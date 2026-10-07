@@ -8,7 +8,7 @@ import type { WorkerPool } from './pool'
 import { TraceReader } from './reader'
 import type { BinLevels, LaneIndex } from './derive'
 
-export const DIM_TABLES = ['nodes', 'pes', 'lanes', 'buses', 'attachments', 'bridges', 'memories',
+export const DIM_TABLES = ['nodes', 'pes', 'lanes', 'buses', 'attachments', 'links', 'memories',
   'memory_ranges', 'resources', 'opcodes', 'message_kinds', 'dirs', 'dep_states'] as const
 export const FACT_TABLES = ['tasks', 'chunks', 'deps', 'programs', 'marks', 'phases', 'bins'] as const
 
@@ -59,7 +59,9 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   if (!manifestFile) throw new Error('no manifest.json')
   const manifest = parseManifest(await manifestFile.text())
   const reader = new TraceReader(tf.files, pool)
-  const names = [...DIM_TABLES, ...FACT_TABLES]
+  // A trace before format 1.2 has `bridges` in place of `links` (read as links below).
+  const legacy = !reader.has('links') && reader.has('bridges')
+  const names = [...DIM_TABLES, ...FACT_TABLES].map((n) => (legacy && n === 'links' ? 'bridges' : n))
   const missing = names.filter((n) => !reader.has(n))
   if (missing.length) throw new Error(`missing tables: ${missing.join(', ')}`)
 
@@ -83,7 +85,9 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   }))
   const decodeMs = performance.now() - t0
   const byName = Object.fromEntries(names.map((n, i) => [n, tables[i]])) as Record<string, Table>
+  if (legacy) byName.links = byName.bridges
   const dims = Object.fromEntries(DIM_TABLES.map((n) => [n, toRows(byName[n])])) as Record<DimName, Row[]>
+  if (legacy) bridgesAsLinks(dims)
   const facts = Object.fromEntries(FACT_TABLES.map((n) => [n, byName[n]])) as Record<FactName, Table>
 
   const t1 = performance.now()
@@ -116,4 +120,29 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   }
   const fabricRow = new Map(fg.paths.map((p, g) => [p, g]))
   return { name: tf.name, reader, manifest, dims, facts, levels, lanes, fabricRow, load }
+}
+
+/** A trace before format 1.2: its bridge rows as link rows (trace-format 4.1: from = side a,
+ * the child side; to = side b; up = ab), the bridge resources and attachments as those of
+ * links. */
+function bridgesAsLinks(dims: Record<DimName, Row[]>): void {
+  const buses = dims.buses
+  dims.links = dims.links.map((b) => {
+    const from = b.a_bus as number
+    const mem = b.type === 'cache' ? dims.memories.find((m) => m.path === b.path) : undefined
+    const ab = b.ab_resource as number | null
+    return {
+      id: b.id, path: b.path, node: buses[from].node, control: buses[from].control,
+      from_bus: from, to_bus: b.b_bus, from_attachment: b.a_attachment, to_attachment: b.b_attachment,
+      ab_resource: ab, ba_resource: b.ba_resource, up_dir: b.type === 'cache' ? null : 'ab',
+      bw_bytes: ab === null ? null : dims.resources[ab].rate, beat_bytes: null, latency: b.latency,
+      cache: mem ? mem.id : null, class: buses[from].class,
+    }
+  })
+  for (const r of dims.resources) {
+    if (r.role !== 'bridge') continue
+    r.role = 'link'
+    r.link = r.bridge
+  }
+  for (const a of dims.attachments) if (a.component_type === 'bridge') a.component_type = 'link'
 }

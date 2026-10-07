@@ -2,7 +2,7 @@
 // its nearest checked ancestor. Each shown node is a collapsible group with its own rows,
 // then its child groups. Own rows: task lanes, plain resource rows (PE arrays, Neutrino
 // scalar and completion ports, memory ports), and fabric nodes: one per bus (its ports as
-// child rows) and one per bridge (its two directions as child rows), collapsed by default.
+// child rows) and one per link (its two directions as child rows), collapsed by default.
 // The user can reorder rows inside their container (a node, or a fabric node), hide them
 // and resize them.
 import { fabricOf } from '../data/fabrics'
@@ -25,15 +25,17 @@ export interface Row {
   parent: string
 }
 
-/** A bus or a bridge: the resources of its ports or directions. */
+/** A bus or a link: the resources of its ports or directions. */
 export interface Fabric {
   id: number
   key: string
-  path: string             // bus path, or bridge path
-  kind: 'bus' | 'bridge'
+  path: string             // bus path, or link path
+  kind: 'bus' | 'link'
   members: number[]        // resource ids, in row order
   members_rows: Row[]      // their rows (shown when the fabric node is open)
 }
+
+const LINK_DIR_MARK: Record<string, string> = { up: '↑', down: '↓' }
 
 export const ROW_HEIGHT = { group: 22, lane: 18, resource: 30, fabric: 30, note: 20 } as const
 /** Height of one sub-row of a lane at the default lane height. */
@@ -42,7 +44,7 @@ export const MIN_ROW_HEIGHT = 12
 export const MAX_ROW_HEIGHT = 240
 
 const ROLE_ORDER: Record<string, number> = {
-  pe: 0, scalar: 1, complete: 2, mem_port: 3, bridge: 4, bus: 5, port: 6, other: 7,
+  pe: 0, scalar: 1, complete: 2, mem_port: 3, link: 4, bus: 5, port: 6, other: 7,
 }
 
 export interface RowModel {
@@ -180,8 +182,11 @@ export class RowSource {
           node: id, id: f.id, notRecorded: true, parent: path })
       }
       f.members.push(r.id as number)
-      f.members_rows.push({ ...row, parent: f.key,
-        label: name.startsWith(`${entity.path}.`) ? name.slice(entity.path.length + 1) : row.label })
+      // A link direction: the link's name and its hierarchy direction (up_dir), else ab / ba.
+      const fabricLabel = entity.path.startsWith(`${path}.`) ? entity.path.slice(path.length + 1) : entity.path
+      const label = entity.kind === 'link' ? `${fabricLabel} ${LINK_DIR_MARK[String(r.link_dir)] ?? r.link_dir}`
+        : name.startsWith(`${entity.path}.`) ? name.slice(entity.path.length + 1) : row.label
+      f.members_rows.push({ ...row, parent: f.key, label })
     }
     // A fabric node is "not recorded" only if all its members are.
     for (const row of out) {

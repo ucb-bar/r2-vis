@@ -1,5 +1,5 @@
 // The fabric topology for the traffic view (views-design Section 3): per node its buses,
-// its blocks (components attached to its buses) and the bridges to its parent.
+// its blocks (components attached to its buses) and its links to its parent's buses.
 import type { Trace } from '../data/trace'
 
 export type LinkClass = 'global' | 'local' | 'control'
@@ -21,13 +21,17 @@ export interface TBlock {
   atts: number[]        // its attachments (one per bus it is on)
 }
 
-export interface TBridge {
+/** A fabric link with a hierarchy direction (links.up_dir), from a node's bus to its
+ * parent's bus. */
+export interface TLink {
   id: number
   path: string
   child: number         // child node
   cls: LinkClass
-  up: number            // resource child -> parent (ab)
-  down: number          // resource parent -> child (ba)
+  up: number            // resource child -> parent
+  down: number          // resource parent -> child
+  childAtt: number      // its end attachment on the child's bus
+  parentAtt: number     // its end attachment on the parent's bus
   /** the attachment ports each direction passes: up = child bus out, parent bus in;
    * down = parent bus out, child bus in */
   upPorts: number[]
@@ -42,7 +46,7 @@ export interface TNode {
   children: number[]
   buses: TBus[]
   blocks: TBlock[]
-  bridges: TBridge[]    // the bridges of this node to its parent
+  uplinks: TLink[]      // the links of this node to its parent
 }
 
 export class TrafficModel {
@@ -50,13 +54,15 @@ export class TrafficModel {
   readonly nodes: TNode[]
   readonly depth: number          // depth of the deepest node
   readonly root: number
+  /** paths of the links the view does not draw (caches; no hierarchy direction) */
+  readonly undrawn: string[]
 
   constructor(trace: Trace) {
     this.trace = trace
     const d = trace.dims
     const nodes: TNode[] = d.nodes.map((n) => ({
       id: n.id as number, path: String(n.path), name: String(n.name), depth: n.depth as number,
-      children: [], buses: [], blocks: [], bridges: [],
+      children: [], buses: [], blocks: [], uplinks: [],
     }))
     for (const n of d.nodes) if (n.parent !== null) nodes[n.parent as number].children.push(n.id as number)
     const busById = new Map<number, TBus>()
@@ -72,7 +78,7 @@ export class TrafficModel {
       const bus = busById.get(a.bus as number)
       if (!bus) continue
       bus.atts.push(a.id as number)
-      if (a.component_type === 'bridge') continue
+      if (a.component_type === 'link') continue
       const key = String(a.component)
       let blk = blockOf.get(key)
       if (!blk) {
@@ -84,15 +90,22 @@ export class TrafficModel {
       }
       blk.atts.push(a.id as number)
     }
-    for (const br of d.bridges) {
-      if (br.type !== 'child') continue
-      const childBus = busById.get(d.attachments[br.a_attachment as number].bus as number)
+    // Links with a hierarchy direction; a cache link, or one between unrelated nodes or
+    // within one node, has no place in this layout (none in the current configurations).
+    this.undrawn = []
+    for (const l of d.links) {
+      const up = l.up_dir as string | null
+      if (l.cache !== null || (up !== 'ab' && up !== 'ba')) { this.undrawn.push(String(l.path)); continue }
+      const childAtt = (up === 'ab' ? l.from_attachment : l.to_attachment) as number
+      const parentAtt = (up === 'ab' ? l.to_attachment : l.from_attachment) as number
+      const childBus = busById.get(d.attachments[childAtt].bus as number)
       if (!childBus) continue
-      const a = d.attachments[br.a_attachment as number]   // on the child bus
-      const b = d.attachments[br.b_attachment as number]   // on the parent bus
+      const a = d.attachments[childAtt]
+      const b = d.attachments[parentAtt]
       const ports = (...rs: unknown[]) => rs.filter((r): r is number => r !== null && r !== undefined)
-      nodes[childBus.node].bridges.push({ id: br.id as number, path: String(br.path), child: childBus.node,
-        cls: childBus.cls, up: br.ab_resource as number, down: br.ba_resource as number,
+      nodes[childBus.node].uplinks.push({ id: l.id as number, path: String(l.path), child: childBus.node,
+        cls: childBus.cls, up: (up === 'ab' ? l.ab_resource : l.ba_resource) as number,
+        down: (up === 'ab' ? l.ba_resource : l.ab_resource) as number, childAtt, parentAtt,
         upPorts: ports(a.out_resource, b.in_resource), downPorts: ports(b.out_resource, a.in_resource) })
     }
     // Blocks in a fixed order: Neutrino, compute, memories.
@@ -104,7 +117,7 @@ export class TrafficModel {
   }
 
   /** All resources of the links inside a node's subtree, per class (its buses' ports and
-   * the bridges between its descendants), and the bridges from its children (cross). */
+   * the links between its descendants), and the links from its children (cross). */
   subtreeLinks(node: number): { inner: Record<LinkClass, number[]>; cross: Record<LinkClass, number[]> } {
     const inner: Record<LinkClass, number[]> = { global: [], local: [], control: [] }
     const cross: Record<LinkClass, number[]> = { global: [], local: [], control: [] }
@@ -113,11 +126,11 @@ export class TrafficModel {
       for (const bus of n.buses) {
         for (const att of bus.atts) {
           const a = this.trace.dims.attachments[att]
-          // The parent-side ports of the node's own bridges are not inside the subtree.
+          // The parent-side ports of the node's own links are not inside the subtree.
           for (const r of [a.in_resource, a.out_resource]) if (r !== null) inner[bus.cls].push(r as number)
         }
       }
-      for (const br of n.bridges) (top ? cross : inner)[br.cls].push(br.up, br.down)
+      for (const l of n.uplinks) (top ? cross : inner)[l.cls].push(l.up, l.down)
       for (const c of n.children) visit(c, false)
     }
     for (const c of this.nodes[node].children) visit(c, true)

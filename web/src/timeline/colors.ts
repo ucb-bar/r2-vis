@@ -52,7 +52,7 @@ export function taskSlots(trace: Trace): { slots: Uint8Array; legend: LegendEntr
 }
 
 /** Line color token of every resource (`--line-<slot>`): fabric in cool families, one
- * step per bus or bridge level (global blue, local teal, control indigo); memory ports in
+ * step per bus or link level (global blue, local teal, control indigo); memory ports in
  * the family of their bus side; tensor and vector arrays in warm hues; Neutrino scalar and
  * completion ports a warm grey. */
 export function lineSlots(trace: Trace): string[] {
@@ -60,7 +60,7 @@ export function lineSlots(trace: Trace): string[] {
   const depthOf = (node: number) => String(nodes[node].path).split('.').length - 1
   const buses = trace.dims.buses
   const atts = trace.dims.attachments
-  const bridges = trace.dims.bridges
+  const links = trace.dims.links
   const mems = trace.dims.memories
   const step = (d: number) => Math.max(0, Math.min(4, d))
   return trace.dims.resources.map((r) => {
@@ -78,11 +78,12 @@ export function lineSlots(trace: Trace): string[] {
       return 'local-1'
     }
     const family = cls === 'control' ? 'control' : cls === 'local' ? 'local' : 'global'
-    if (role === 'bridge') {
-      const br = bridges[r.bridge as number]
-      const child = atts[br.a_attachment as number]
-      const childNode = buses[child.bus as number].node as number
-      return family === 'local' ? 'local-0' : `${family}-${step(2 * depthOf(childNode) - 1)}`
+    if (role === 'link') {
+      // Between the levels of its two buses (the deeper end sets the step).
+      const l = links[r.link as number]
+      const deeper = Math.max(depthOf(buses[l.from_bus as number].node as number),
+        depthOf(buses[l.to_bus as number].node as number))
+      return family === 'local' ? 'local-0' : `${family}-${step(2 * deeper - 1)}`
     }
     const bus = r.bus as number | null
     if (bus === null) return `${family}-0`

@@ -30,8 +30,12 @@ export class BlockMetrics {
     const vectorOwn = byNode((r) => r.kind === 'VectorOps' && r.role === 'pe')
     this.tensorRes = this.subtree.map((ids) => ids.flatMap((id) => tensorOwn[id]))
     this.vectorRes = this.subtree.map((ids) => ids.flatMap((id) => vectorOwn[id]))
-    const links = (cls: TrafficClass) => byNode((r) => r.is_link === 1 && r.class === cls)
-    this.ownLinks = { global: links('global'), local: links('local'), control: links('control') }
+    // A node's own links: the ports of its buses and the links of its fabric (links.node).
+    const links = trace.dims.links
+    const ownerOf = (r: (typeof res)[number]) => (r.role === 'link' ? links[r.link as number].node : r.node)
+    const own = (cls: TrafficClass) => nodes.map((n) => res.filter((r) =>
+      r.is_link === 1 && r.class === cls && ownerOf(r) === n.id).map((r) => r.id as number))
+    this.ownLinks = { global: own('global'), local: own('local'), control: own('control') }
   }
 
   /** Tensor utilization: tensor ops of the subtree / tensor capacity of the subtree. */

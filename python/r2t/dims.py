@@ -11,7 +11,7 @@ UNITS = {"TensorOps": "MAC", "VectorOps": "lane-op", "ScalarOps": "instr", "Band
          "Slots": "slot"}
 DIRS = ["read", "write", "work"]
 DEP_STATES = ["not_invoked", "scoreboard", "executing", "done"]
-LINK_ROLES = {"port", "bus", "bridge"}
+LINK_ROLES = {"port", "bus", "link"}
 
 
 def table(columns: dict[str, tuple[list, pa.DataType]]) -> pa.Table:
@@ -75,10 +75,10 @@ def bus_classes(m: dict) -> list[str]:
     buses, atts = m["buses"], m["attachments"]
     data = [not b["control"] for b in buses]
     edges: dict[int, list[int]] = {}
-    for br in m["bridges"]:
-        if br["type"] != "child":
+    for link in m["links"]:
+        if link["cache"] is not None:
             continue  # caches stop the global search
-        a, b = atts[br["a"]]["bus"], atts[br["b"]]["bus"]
+        a, b = link["from_bus"], link["to_bus"]
         if data[a] and data[b]:
             edges.setdefault(a, []).append(b)
             edges.setdefault(b, []).append(a)
@@ -96,9 +96,42 @@ def bus_classes(m: dict) -> list[str]:
             for i in range(len(buses))]
 
 
+def link_up_dirs(m: dict) -> list[str | None]:
+    """Per link: the direction toward the ancestor's bus ('ab' or 'ba'), or None when the
+    two ends are on the same node or on unrelated nodes."""
+    parent = {n["id"]: n["parent"] for n in m["nodes"]}
+
+    def above(a: int, b: int) -> bool:
+        """Node a is a proper ancestor of node b."""
+        p = parent[b]
+        while p is not None:
+            if p == a:
+                return True
+            p = parent[p]
+        return False
+
+    out: list[str | None] = []
+    for link in m["links"]:
+        f, t = m["buses"][link["from_bus"]]["node"], m["buses"][link["to_bus"]]["node"]
+        out.append("ab" if above(t, f) else "ba" if above(f, t) else None)
+    return out
+
+
+def link_classes(m: dict, bus_class: list[str]) -> list[str]:
+    """Class of every link: its buses' class, or for a cache the class of its memory port
+    (trace-format Section 5, rules 4 and 5)."""
+    out = []
+    for link in m["links"]:
+        if link["cache"] is not None:
+            out.append("global" if m["memories"][link["cache"]]["type"] == "dram" else "local")
+        else:
+            out.append(bus_class[link["from_bus"]])
+    return out
+
+
 def resource_classes(m: dict, bus_class: list[str]) -> list[str | None]:
     """Class of every resource (Section 5, rules 1, 4 and 5)."""
-    atts, bridges, mems = m["attachments"], m["bridges"], m["memories"]
+    atts, links, mems = m["attachments"], m["links"], m["memories"]
     out: list[str | None] = []
     for r in m["resources"]:
         role = r["role"]
@@ -107,10 +140,10 @@ def resource_classes(m: dict, bus_class: list[str]) -> list[str | None]:
             cls = bus_class[atts[role["attachment"]]["bus"]]
         elif kind == "bus":
             cls = bus_class[role["bus"]]
-        elif kind == "bridge":
-            # A child bridge joins two buses of one class (rule 4); a control bridge joins
+        elif kind == "link":
+            # A data link joins two buses of one class (rule 4); a control link joins
             # control buses.
-            cls = bus_class[atts[bridges[role["bridge"]]["a"]]["bus"]]
+            cls = bus_class[links[role["link"]]["from_bus"]]
         elif kind == "mem_port":
             cls = "global" if mems[role["memory"]]["type"] == "dram" else "local"
         elif kind == "pe":
@@ -131,6 +164,7 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
     def role_field(r: dict, key: str):
         return r["role"].get(key)
 
+    up_dirs = link_up_dirs(m)
     bus, link_dir = [], []
     for r in res:
         role = r["role"]
@@ -140,9 +174,10 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
         elif role["type"] == "bus":
             bus.append(role["bus"])
             link_dir.append(None)
-        elif role["type"] == "bridge":
+        elif role["type"] == "link":
             bus.append(None)
-            link_dir.append("up" if role["dir"] == "ab" else "down")
+            up = up_dirs[role["link"]]
+            link_dir.append(role["dir"] if up is None else "up" if role["dir"] == up else "down")
         else:
             bus.append(None)
             link_dir.append(None)
@@ -154,11 +189,13 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
         "kind": ([r["kind"] for r in res], pa.string()),
         "unit": ([UNITS.get(r["kind"]) for r in res], pa.string()),
         "rate": (rate, pa.float64()),
+        "lanes": ([r.get("lanes") for r in res], pa.int32()),
+        "beat_bytes": ([r.get("beat_bytes") for r in res], pa.int32()),
         "ceiling": ([None if np.isnan(c) else float(c) for c in ceiling], pa.float64()),
         "role": ([r["role"]["type"] for r in res], pa.string()),
         "bus": (bus, pa.int32()),
         "attachment": ([role_field(r, "attachment") for r in res], pa.int32()),
-        "bridge": ([role_field(r, "bridge") for r in res], pa.int32()),
+        "link": ([role_field(r, "link") for r in res], pa.int32()),
         "memory": ([role_field(r, "memory") for r in res], pa.int32()),
         "pe": ([role_field(r, "pe") for r in res], pa.int32()),
         "link_dir": (link_dir, pa.string()),
@@ -171,7 +208,7 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
 
 def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
     """Every dimension table except resources and lanes."""
-    atts = m["attachments"]
+    atts, links = m["attachments"], m["links"]
     tabs = {
         "nodes": nodes_table(m["nodes"]),
         "pes": table({
@@ -200,17 +237,23 @@ def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
             "in_resource": ([a["in"] for a in atts], pa.int32()),
             "out_resource": ([a["out"] for a in atts], pa.int32()),
         }),
-        "bridges": table({
-            "id": ([b["id"] for b in m["bridges"]], pa.int32()),
-            "path": ([b["path"] for b in m["bridges"]], pa.string()),
-            "type": ([b["type"] for b in m["bridges"]], pa.string()),
-            "a_attachment": ([b["a"] for b in m["bridges"]], pa.int32()),
-            "b_attachment": ([b["b"] for b in m["bridges"]], pa.int32()),
-            "a_bus": ([atts[b["a"]]["bus"] for b in m["bridges"]], pa.int32()),
-            "b_bus": ([atts[b["b"]]["bus"] for b in m["bridges"]], pa.int32()),
-            "ab_resource": ([b["ab"] for b in m["bridges"]], pa.int32()),
-            "ba_resource": ([b["ba"] for b in m["bridges"]], pa.int32()),
-            "latency": ([b["latency"] for b in m["bridges"]], pa.int64()),
+        "links": table({
+            "id": ([x["id"] for x in links], pa.int32()),
+            "path": ([x["path"] for x in links], pa.string()),
+            "node": ([x["node"] for x in links], pa.int32()),
+            "control": ([x["control"] for x in links], pa.bool_()),
+            "from_bus": ([x["from_bus"] for x in links], pa.int32()),
+            "to_bus": ([x["to_bus"] for x in links], pa.int32()),
+            "from_attachment": ([x["from_attachment"] for x in links], pa.int32()),
+            "to_attachment": ([x["to_attachment"] for x in links], pa.int32()),
+            "ab_resource": ([x["ab"] for x in links], pa.int32()),
+            "ba_resource": ([x["ba"] for x in links], pa.int32()),
+            "up_dir": (link_up_dirs(m), pa.string()),
+            "bw_bytes": ([x["bw_bytes"] for x in links], pa.float64()),
+            "beat_bytes": ([x["beat_bytes"] for x in links], pa.int32()),
+            "latency": ([x["latency"] for x in links], pa.int64()),
+            "cache": ([x["cache"] for x in links], pa.int32()),
+            "class": (link_classes(m, bus_class), pa.string()),
         }),
         "memories": table({
             "id": ([x["id"] for x in m["memories"]], pa.int32()),

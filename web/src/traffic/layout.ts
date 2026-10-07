@@ -20,7 +20,7 @@ export interface PBus {
   cls: LinkClass
 }
 
-export type LinkKind = 'att' | 'bridge' | 'cross' | 'self'
+export type LinkKind = 'att' | 'link' | 'cross' | 'self'
 
 export interface PLink {
   key: string
@@ -33,10 +33,10 @@ export interface PLink {
   y0: number
   x1: number
   y1: number
-  /** att and bridge: the two directions (forward = block to bus, child to parent) */
+  /** att and link: the two directions (forward = block to bus, child to parent) */
   fwd: number | null
   rev: number | null
-  /** bridge: the attachment ports each direction passes (its load is the MAX) */
+  /** link: the attachment ports each direction passes (its load is the MAX) */
   fwdPorts: number[]
   revPorts: number[]
   /** cross and self: the member resources (summed) */
@@ -73,7 +73,7 @@ export interface Layout {
 // Position of a class's bus inside its bus column, and of its links inside a row.
 const BUS_DX: Record<LinkClass, number> = { control: 0.2, local: 0.5, global: 0.8 }
 const ROW_DY: Record<LinkClass, number> = { control: -0.22, local: 0, global: 0.22 }
-const BRIDGE_DY = 0.44   // bridges to the parent: at the band's center, apart per class
+const LINK_DY = 0.44     // links to the parent: at the band's center, apart per class
 
 /** Columns from the left: leaf blocks, the leaf buses, then per level up the buses and
  * the blocks of that level (blocks right of their buses: HBM next to its clsbus). */
@@ -95,7 +95,7 @@ export function layout(m: TrafficModel, level: number): Layout {
   const placeBlocks = (blocks: TBlock[], depth: number, y0: number, y1: number) => {
     const c = blockCol(depth)
     const left = depth === D
-    // Right of their buses, the blocks leave the band's center to the bridges.
+    // Right of their buses, the blocks leave the band's center to the links.
     const mid = (y0 + y1) / 2
     const gap = !left && y1 - y0 > blocks.length + 1 ? 1 : 0
     const above = Math.ceil(blocks.length / 2)
@@ -128,7 +128,7 @@ export function layout(m: TrafficModel, level: number): Layout {
     placedBuses.push(...n.buses)
     if (n.children.length && n.depth === level && level < D) {
       // Aggregated: the subtree below is one row; the node's own blocks next to its buses.
-      // Two rows more than its blocks: the row and the bridges at the center are clear.
+      // Two rows more than its blocks: the row and the links at the center are clear.
       const units = n.blocks.length + 2
       const ac = y0 + units / 2
       const ax = busCol(n.depth + 1) + 0.85
@@ -143,11 +143,11 @@ export function layout(m: TrafficModel, level: number): Layout {
         const self = inner[cls]
         const bus = n.buses.find((b) => b.cls === cls)
         if (keep.length && bus) {
-          out.links.push({ key: `x${id}${cls}`, kind: 'cross', cls, name: `${n.name}.${merged} bridges (${cls})`,
+          out.links.push({ key: `x${id}${cls}`, kind: 'cross', cls, name: `${n.name}.${merged} links (${cls})`,
             node: id, x0: ax, y0: ly, x1: busCol(n.depth) + BUS_DX[cls], y1: ly, fwd: null, rev: null, fwdPorts: [], revPorts: [], members: keep })
-          // The parent-side attachments of the children's bridges sit on this link.
-          for (const c of n.children) for (const br of m.nodes[c].bridges) {
-            if (br.cls === cls) attY.set(d.bridges[br.id].b_attachment as number, ly)
+          // The parent-side attachments of the children's links sit on this edge.
+          for (const c of n.children) for (const l of m.nodes[c].uplinks) {
+            if (l.cls === cls) attY.set(l.parentAtt, ly)
           }
         }
         if (self.length) {
@@ -164,18 +164,17 @@ export function layout(m: TrafficModel, level: number): Layout {
       for (const c of n.children) visit(c)
       if (cursor - y0 < n.blocks.length) cursor = y0 + n.blocks.length
       placeBlocks(n.blocks, n.depth, y0, cursor)
-      // Bridges of the children: from the child's bus to this node's bus, at the child's band.
+      // Links of the children: from the child's bus to this node's bus, at the child's band.
       for (const c of n.children) {
         const band = out.bands.find((b) => b.label === m.nodes[c].path)
         if (!band) continue
-        for (const br of m.nodes[c].bridges) {
-          const ly = (band.y0 + band.y1) / 2 + Math.sign(ROW_DY[br.cls]) * BRIDGE_DY
-          const db = d.bridges[br.id]
-          attY.set(db.a_attachment as number, ly)
-          attY.set(db.b_attachment as number, ly)
-          out.links.push({ key: `b${br.id}`, kind: 'bridge', cls: br.cls, name: br.path, node: c,
-            x0: busCol(n.depth + 1) + BUS_DX[br.cls], y0: ly, x1: busCol(n.depth) + BUS_DX[br.cls], y1: ly,
-            fwd: br.up, rev: br.down, fwdPorts: br.upPorts, revPorts: br.downPorts, members: [] })
+        for (const l of m.nodes[c].uplinks) {
+          const ly = (band.y0 + band.y1) / 2 + Math.sign(ROW_DY[l.cls]) * LINK_DY
+          attY.set(l.childAtt, ly)
+          attY.set(l.parentAtt, ly)
+          out.links.push({ key: `l${l.id}`, kind: 'link', cls: l.cls, name: l.path, node: c,
+            x0: busCol(n.depth + 1) + BUS_DX[l.cls], y0: ly, x1: busCol(n.depth) + BUS_DX[l.cls], y1: ly,
+            fwd: l.up, rev: l.down, fwdPorts: l.upPorts, revPorts: l.downPorts, members: [] })
         }
       }
     }

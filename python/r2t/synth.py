@@ -1,13 +1,14 @@
-"""Synthetic raw dumps (trace-raw.md v1.0) of a toy workload on the 2p topology.
+"""Synthetic raw dumps (trace-raw.md v1.2) of a toy workload on the 2p topology.
 
 The generator stands in for r2-sim until the real dump exists. A small discrete-event
 list scheduler runs a toy workload: the root program spawns one program per gpc, each
 gpc program spawns one program per SM, and each SM program runs a pipelined loop (DMA
 weights and activations into SMEM, Atlas matmul, Muon vector, DMA out through the gpc
 copy engine as a forwarded invoke). The timing is plausible, not exact: a PE runs one
-task at a time, dependencies are respected, a rated resource is a calendar without gap
-fill (its charges never overlap), and unlimited links take the interval of the chunk or
-message hop that uses them.
+task at a time, dependencies are respected, a rated resource has `lanes` lane calendars
+without gap fill (trace-raw v1.1: a transfer holds ceil(rate / lane rate) lanes over its
+span, so charges overlap up to the lane count), and unlimited links take the interval of
+the chunk or message hop that uses them.
 
     python -m r2t.synth OUT_DIR --tasks 20000 [--seed 1] [--zstd]
     python -m r2t.synth DIR --suite          # tiny, small, medium, partial, crashed, small-zstd
@@ -31,7 +32,7 @@ from typing import Callable
 import numpy as np
 
 from r2t import raw
-from r2t.topology_2p import GPCS, SMS_PER_GPC, Topology, build, own_base
+from r2t.topology_2p import GPCS, SMS_PER_GPC, Topology, build, link_name, own_base
 
 OPCODES = ["join", "spawn", "dma", "atlas.matmul", "muon.vector"]
 OP_JOIN, OP_SPAWN, OP_DMA, OP_MATMUL, OP_VECTOR = range(5)
@@ -152,7 +153,11 @@ class Engine:
     def __init__(self, topo: Topology) -> None:
         self.topo = topo
         self.rates = [topo.rate(r["id"]) for r in topo.resources]
-        self.free_at = [0] * len(topo.resources)
+        # Per resource with a rate: the time each of its lanes is free.
+        self.lane_free = [[0] * (r["lanes"] or 0) for r in topo.resources]
+        self.lanes = [r["lanes"] or 0 for r in topo.resources]
+        self.mem_port = [r["role"]["type"] == "mem_port" for r in topo.resources]
+        self.beat = [r["beat_bytes"] or 64 for r in topo.resources]
         self.heap: list[tuple] = []
         self.seq = 0
         self.now = 0
@@ -183,31 +188,53 @@ class Engine:
 
     # -- resources ----------------------------------------------------------------------
 
+    def lanes_free(self, rid: int, k: int) -> int:
+        """The first time `k` lanes of a resource are free (the k-th earliest lane)."""
+        return sorted(self.lane_free[rid])[k - 1]
+
+    def hold(self, rid: int, k: int, end: int) -> None:
+        """Holds the `k` earliest-free lanes of a resource until `end`."""
+        free = self.lane_free[rid]
+        for lane in sorted(range(len(free)), key=free.__getitem__)[:k]:
+            free[lane] = end
+
     def reserve(self, earliest: int, demands: list[Demand], key: int, latency: int,
                 msg: int | None = None) -> tuple[int, int, int | None, int | None]:
-        """Grants one chunk: a common start on every rated resource of the demands.
+        """Grants one chunk: a common start and span on every rated resource.
 
+        The span is set by the slowest resource (it holds all its lanes); every other
+        rated resource holds ceil(its effective rate / its lane rate) lanes over the same
+        span. A compute chunk (one with work) holds all lanes of its memory ports.
         Returns (start, end, culprit, queue_culprit) and records one charge per resource
         and direction.
         """
         per_res: dict[int, list[tuple[int, int]]] = {}
         for rid, d, amount in demands:
             per_res.setdefault(rid, []).append((d, amount))
-        start, queue_culprit = earliest, None
-        for rid in per_res:
-            if self.rates[rid] is not None and self.free_at[rid] > start:
-                start, queue_culprit = self.free_at[rid], rid
+        compute = any(d == raw.DIR_WORK for _, d, _ in demands)
+        totals = {rid: sum(a for _, a in parts) for rid, parts in per_res.items()}
         longest, culprit = 0, None
-        durations = {}
-        for rid, parts in per_res.items():
+        for rid, total in totals.items():
             rate = self.rates[rid]
             if rate is None:
                 continue
-            dur = max(1, math.ceil(sum(a for _, a in parts) / rate))
-            durations[rid] = dur
-            self.free_at[rid] = start + dur
+            dur = max(1, math.ceil(total / rate))
             if dur > longest:
                 longest, culprit = dur, rid
+        held = {}
+        for rid, total in totals.items():
+            rate, lanes = self.rates[rid], self.lanes[rid]
+            if rate is None:
+                continue
+            need = math.ceil(total * lanes / (longest * rate) - 1e-9)
+            held[rid] = lanes if compute and self.mem_port[rid] else min(lanes, max(1, need))
+        start, queue_culprit = earliest, None
+        for rid, k in held.items():
+            free = self.lanes_free(rid, k)
+            if free > start:
+                start, queue_culprit = free, rid
+        for rid, k in held.items():
+            self.hold(rid, k, start + longest)
         end = start + longest + latency
         charges = self.rec.charges
         msg_code = raw_null(8) if msg is None else msg
@@ -217,20 +244,20 @@ class Engine:
                 for d, amount in parts:
                     charges.append((start, amount, span, span, key, rid, d, msg_code))
                 continue
-            dur = durations[rid]
-            total = sum(a for _, a in parts)
-            left = dur
+            lane_cycles = held[rid] * longest
+            total = totals[rid]
+            left = lane_cycles
             for i, (d, amount) in enumerate(parts):
-                cyc = left if i == len(parts) - 1 else round(dur * amount / total)
+                cyc = left if i == len(parts) - 1 else round(lane_cycles * amount / total)
                 left -= cyc
-                charges.append((start, amount, dur, cyc, key, rid, d, msg_code))
+                charges.append((start, amount, longest, cyc, key, rid, d, msg_code))
         return start, end, culprit, queue_culprit
 
     def scalar_work(self, nu: int, t: int, cycles: int) -> int:
-        """Program work on the Neutrino's scalar resource; returns its end."""
+        """Program work on the Neutrino's scalar resource (one lane); returns its end."""
         rid = self.scalar[nu]
-        start = max(t, self.free_at[rid])
-        self.free_at[rid] = start + cycles
+        start = max(t, self.lanes_free(rid, 1))
+        self.hold(rid, 1, start + cycles)
         self.rec.charges.append((start, cycles, cycles, cycles, -1, rid, raw.DIR_WORK,
                                  raw_null(8)))
         return start + cycles
@@ -269,23 +296,26 @@ class Engine:
         names: list[tuple[str, int]] = [(f"{hub_of(src)}.neutrino.in", 0)]
         for child, parent in pairwise(up_chain):
             cname = nodes[child]["path"].rsplit(".", 1)[1]
-            names += [(f"{hub_of(child)}.bridge.out", 0),
-                      (f"{nodes[child]['path']}.bridge.up.ctl", latency_of(child)),
-                      (f"{hub_of(parent)}.{cname}.in", 0)]
+            link = link_name(hub_of(child), hub_of(parent))
+            names += [(f"{hub_of(child)}.{link}.out", 0),
+                      (f"{nodes[child]['path']}.{link}.ab", latency_of(child)),
+                      (f"{hub_of(parent)}.{cname}.{link}.in", 0)]
         down = list(reversed(down_chain))
         for parent, child in pairwise(down):
             cname = nodes[child]["path"].rsplit(".", 1)[1]
-            names += [(f"{hub_of(parent)}.{cname}.out", 0),
-                      (f"{nodes[child]['path']}.bridge.down.ctl", latency_of(child)),
-                      (f"{hub_of(child)}.bridge.in", 0)]
+            link = link_name(hub_of(child), hub_of(parent))
+            names += [(f"{hub_of(parent)}.{cname}.{link}.out", 0),
+                      (f"{nodes[child]['path']}.{link}.ba", latency_of(child)),
+                      (f"{hub_of(child)}.{link}.in", 0)]
         names.append((f"{hub_of(dst)}.neutrino.out", 0))
         return [(self.res[n], lat) for n, lat in names]
 
     def send(self, src: int, dst: int, kind: str, nbytes: int, t: int) -> tuple[int, int]:
         """Sends a protocol message; returns (departure on the first rated hop, arrival).
 
-        Each rated hop transmits the message once it arrived and the link is free, in
-        ceil(bytes / rate) cycles, at least 1 (whole cycles, no carry). An
+        Each rated hop transmits the message once it arrived and a lane is free: it holds
+        one lane for one cycle per beat (ceil(bytes / beat_bytes), at least 1), whatever
+        the link's lane count (as r2-sim does). An
         unlimited link takes the interval of the rated hop before it, or of the first
         rated hop if none is before it (trace-raw Section 4.4).
         """
@@ -294,26 +324,33 @@ class Engine:
         intervals: list[tuple[int, int] | None] = []
         first: tuple[int, int] | None = None
         prev: tuple[int, int] | None = None
+        held: list[int] = []
         for rid, lat in hops:
             rate = self.rates[rid]
             if rate is None:
                 intervals.append(prev)
+                held.append(0)
                 continue
-            start = max(t, self.free_at[rid])
-            dur = max(1, math.ceil(nbytes / rate))   # whole cycles, no carry (r2-sim 2026-10-02)
-            self.free_at[rid] = start + dur
+            # As r2-sim: one lane, one cycle per beat, whatever the link's lane count.
+            k = 1
+            start = max(t, self.lanes_free(rid, k))
+            dur = max(1, math.ceil(nbytes / self.beat[rid]))
+            self.hold(rid, k, start + dur)
             prev = (start, start + dur)
             first = first or prev
             intervals.append(prev)
+            held.append(k)
             t = start + dur + lat
         assert first is not None, "2p routes always have a rated hop"
         charges = self.rec.charges
-        for (rid, _), iv in zip(hops, intervals, strict=True):
+        for (rid, _), iv, k in zip(hops, intervals, held, strict=True):
             s, e = iv or first
             span = e - s
             if self.rates[rid] is None:
                 span = max(1, span)   # folded into a 0-cycle hop: [start, start + 1)
-            charges.append((s, nbytes, span, span, -1, rid, raw.DIR_WRITE, msg))
+                charges.append((s, nbytes, span, span, -1, rid, raw.DIR_WRITE, msg))
+            else:
+                charges.append((s, nbytes, span, k * span, -1, rid, raw.DIR_WRITE, msg))
         return first[0], t
 
     # -- task life cycle ----------------------------------------------------------------
@@ -416,8 +453,8 @@ class Engine:
     def exec_done(self, t: int, task: Task) -> None:
         """Execution ended; the completion goes through the Neutrino's completion port."""
         rid = self.complete_port[task.nu]
-        start = max(t, self.free_at[rid])
-        self.free_at[rid] = start + C_COMPLETE
+        start = max(t, self.lanes_free(rid, 1))
+        self.hold(rid, 1, start + C_COMPLETE)
         self.rec.charges.append((start, C_COMPLETE, C_COMPLETE, C_COMPLETE, task.key, rid,
                                  raw.DIR_WORK, raw_null(8)))
         self.at(start + C_COMPLETE, self.task_complete, task)
@@ -616,8 +653,9 @@ class Workload:
         mine = sm_tasks[(g, s)]
         pe = {n: self.topo.pe_id[f"{S}.{n}"] for n in ("atlas", "muon", "dma")}
         lbus_w = [f"{S}.lbus.dma.in", f"{S}.lbus.smem.out", f"{S}.smem.port"]
-        hbm_read = [f"{G}.hbm.port", f"{G}.clsbus.hbm.in", f"{G}.clsbus.sm{s}.out",
-                    f"{S}.bridge.down", f"{S}.smsbus.bridge.in", f"{S}.smsbus.dma.out"]
+        hbm_read = [f"{G}.hbm.port", f"{G}.clsbus.hbm.in",
+                    f"{G}.clsbus.sm{s}.smsbus_to_clsbus.out", f"{S}.smsbus_to_clsbus.ba",
+                    f"{S}.smsbus.smsbus_to_clsbus.in", f"{S}.smsbus.dma.out"]
         actions = prog.actions
         if i == 0:
             # The program stores a parameter block that the first activation DMA reads.
@@ -643,9 +681,10 @@ class Workload:
         from_neighbor = i > 0 and i % NEIGHBOR_EVERY == 0
         if from_neighbor:
             N = f"{G}.sm{neighbor}"
-            read = [f"{N}.smem.port", f"{N}.smsbus.smem.in", f"{N}.smsbus.bridge.out",
-                    f"{N}.bridge.up", f"{G}.clsbus.sm{neighbor}.in", f"{G}.clsbus.sm{s}.out",
-                    f"{S}.bridge.down", f"{S}.smsbus.bridge.in", f"{S}.smsbus.dma.out"]
+            read = [f"{N}.smem.port", f"{N}.smsbus.smem.in", f"{N}.smsbus.smsbus_to_clsbus.out",
+                    f"{N}.smsbus_to_clsbus.ab", f"{G}.clsbus.sm{neighbor}.smsbus_to_clsbus.in",
+                    f"{G}.clsbus.sm{s}.smsbus_to_clsbus.out", f"{S}.smsbus_to_clsbus.ba",
+                    f"{S}.smsbus.smsbus_to_clsbus.in", f"{S}.smsbus.dma.out"]
             latency = DMA_LATENCY + SMEM_LATENCY
         else:
             read, latency = hbm_read, DMA_LATENCY + HBM_LATENCY
@@ -697,8 +736,9 @@ class Workload:
                              dst_base=gbase + 0x8000000 + blk * 0x10000, dst_len=out_bytes,
                              pipelined=True, latency=DMA_LATENCY + SMEM_LATENCY)
         dma_o.chunks.append(
-            self.demands([f"{S}.smem.port", f"{S}.smsbus.smem.in", f"{S}.smsbus.bridge.out",
-                          f"{S}.bridge.up", f"{G}.clsbus.sm{s}.in", f"{G}.clsbus.dma.out"],
+            self.demands([f"{S}.smem.port", f"{S}.smsbus.smem.in",
+                          f"{S}.smsbus.smsbus_to_clsbus.out", f"{S}.smsbus_to_clsbus.ab",
+                          f"{G}.clsbus.sm{s}.smsbus_to_clsbus.in", f"{G}.clsbus.dma.out"],
                          raw.DIR_READ, out_bytes)
             + self.demands([f"{G}.clsbus.dma.in", f"{G}.clsbus.hbm.out", f"{G}.hbm.port"],
                            raw.DIR_WRITE, out_bytes))
@@ -855,7 +895,7 @@ def make_manifest(topo: Topology, params: dict) -> dict:
                     "partial": False},
         "records": raw.LAYOUTS,
         "nodes": topo.nodes, "pes": topo.pes, "buses": topo.buses,
-        "attachments": topo.attachments, "bridges": topo.bridges, "memories": topo.memories,
+        "attachments": topo.attachments, "links": topo.links, "memories": topo.memories,
         "resources": topo.resources,
         "opcodes": OPCODES,
         "message_kinds": raw.MESSAGE_KINDS,

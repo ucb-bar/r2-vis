@@ -45,24 +45,33 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
     "attachments": ("Attachments of components to buses.", {
         "id": "attachment id",
         "bus": "bus id",
-        "name": "port name on the bus, e.g. sm1, hbm, neutrino, bridge",
+        "name": "port name on the bus, e.g. sm1, hbm, neutrino, smsbus_to_clsbus, "
+                "sm0.smsbus_to_clsbus (a link end on the parent bus)",
         "component": "path of the attached component",
-        "component_type": "memory, neutrino, bridge or compute",
+        "component_type": "memory, neutrino, link or compute",
         "role": "master, slave or both",
         "in_resource": "resource id of the ingress port (component into bus); NULL if none",
         "out_resource": "resource id of the egress port (bus to component); NULL if none",
     }),
-    "bridges": ("Bridges between buses: child bridges and caches.", {
-        "id": "bridge id",
-        "path": "dotted path of the bridge",
-        "type": "child or cache",
-        "a_attachment": "attachment id on side a (the child bus for a child bridge)",
-        "b_attachment": "attachment id on side b (the parent bus for a child bridge)",
-        "a_bus": "bus id of side a",
-        "b_bus": "bus id of side b",
-        "ab_resource": "resource id of direction a to b (up for a child bridge)",
-        "ba_resource": "resource id of direction b to a (down for a child bridge)",
-        "latency": "bridge latency in cycles",
+    "links": ("Fabric links between buses (trace-raw 3.1.1); a raw 1.0 or 1.1 bridge is a "
+              "link from its child side to its parent side.", {
+        "id": "link id",
+        "path": "link name, by convention <from bus>_to_<to bus>",
+        "node": "node whose fabric lists the link",
+        "control": "true for a control link",
+        "from_bus": "bus id of the from end",
+        "to_bus": "bus id of the to end",
+        "from_attachment": "attachment id of the from end",
+        "to_attachment": "attachment id of the to end",
+        "ab_resource": "resource id of direction from -> to",
+        "ba_resource": "resource id of direction to -> from",
+        "up_dir": "ab or ba: the direction toward the ancestor's bus; NULL if the ends are on "
+                  "the same node or on unrelated nodes",
+        "bw_bytes": "bytes per cycle per direction; NULL if unlimited",
+        "beat_bytes": "bytes per beat; NULL if not given",
+        "latency": "link latency in cycles",
+        "cache": "memory id when the link is a cache; NULL otherwise",
+        "class": "global, local or control (Section 5); a cache link: its memory port's class",
     }),
     "memories": ("Memories of the design.", {
         "id": "memory id",
@@ -86,19 +95,25 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "kind": "TensorOps, VectorOps, ScalarOps, Bandwidth or Slots",
         "unit": "unit of amount: MAC, lane-op, instr, B or slot",
         "rate": "units per cycle; NULL if unlimited",
+        "lanes": "link lanes of the resource (each carries rate / lanes; a charge holds whole "
+                 "lanes); 1 for compute arrays, scalar units and raw 1.0 dumps; NULL if "
+                 "unlimited. Not related to the lanes table (task timeline lanes)",
+        "beat_bytes": "bytes per beat of a bandwidth resource; NULL otherwise, if unlimited "
+                      "and for raw 1.0 dumps",
         "ceiling": "100 % line in units per cycle: the rate, or for an unlimited link the "
                    "peak instantaneous throughput over the run (NULL if no charge)",
-        "role": "port, bus, bridge, mem_port, pe, scalar, complete or other",
+        "role": "port, bus, link, mem_port, pe, scalar, complete or other",
         "bus": "bus id for a port or a bus resource",
         "attachment": "attachment id for a port",
-        "bridge": "bridge id for a bridge direction",
+        "link": "link id for a link direction",
         "memory": "memory id for a memory port",
         "pe": "PE id for a PE resource",
-        "link_dir": "in or out for a port, up or down for a bridge direction",
-        "is_link": "true for ports, buses and bridge directions",
+        "link_dir": "in or out for a port; up or down for a link direction with a hierarchy "
+                    "direction (links.up_dir), else ab or ba",
+        "is_link": "true for ports, buses and link directions",
         "class": "global, local, control (links and memory ports), compute (PEs) or "
                  "scalar (Neutrino scalar and completion ports)",
-        "busy_cycles": "sum of charge cycles over the dump",
+        "busy_cycles": "sum of charge cycles over the dump, in lane-cycles",
         "amount": "sum of charge amounts over the dump",
     }),
     "opcodes": ("Opcode names.", {"id": "opcode", "name": "opcode name"}),
@@ -163,8 +178,9 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "resource": "resource id",
         "start": "first cycle of the charge",
         "end": "start + span: end of the whole charge (exclusive)",
-        "cycles": "cycles of this direction; the rows of one charge sum to end - start. "
-                  "On an unlimited link equal to end - start",
+        "cycles": "lane-cycles of this direction; the rows of one charge sum to lanes held "
+                  "x (end - start), so a row holds cycles / (end - start) lanes (v_charges."
+                  "lanes_held). On an unlimited link equal to end - start",
         "amount": "units of this direction (resources.unit)",
         "dir": "direction code (dirs)",
         "gid": "task whose chunk made the charge; NULL for a protocol message, a load, a "
@@ -176,10 +192,11 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "resource": "resource id",
         "dir": "direction code",
         "bin": "bin index; the bin starts at bin * manifest.bins.width (v_bins adds it as t)",
-        "busy": "busy cycles in the bin, rounded to whole cycles (can exceed the width on "
-                "an unlimited link)",
-        "amount": "units moved in the bin (float32); on a rated link it can exceed "
-                  "rate * width by up to one cycle of the rate (calendar carry)",
+        "busy": "busy lane-cycles in the bin, rounded to whole cycles: at most lanes * "
+                "width on a resource with a rate (busy fraction = busy / (lanes * width)); "
+                "can exceed the width on an unlimited link",
+        "amount": "units moved in the bin (float32); on a rated link at most rate * width "
+                  "(traces made before 2026-10-02 can exceed it by one cycle of the rate)",
     }),
     "marks": ("Program marks, sorted by time.", {
         "time": "cycle of the mark",

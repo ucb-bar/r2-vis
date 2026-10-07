@@ -1,11 +1,12 @@
 """The topology of r2-sim configs/2p.yaml as manifest tables (trace-raw.md Section 3.1).
 
-The tables follow r2-sim's first real dump (scratch/tracer/step2/l1) entry for entry:
+The tables follow r2-sim's raw 1.2 dump (scratch/lanesB/l1) entry for entry:
 
 * nodes, buses and PEs depth-first over the node tree;
-* attachments per node in creation order (Neutrino, data bridge, control bridge,
+* attachments per node in creation order (Neutrino, data link, control link,
   compute masters), then the memory attachments of the whole tree;
-* rated resources per node in creation order (bridge, Neutrino, bus ports, memory port,
+* rated resources per node in creation order (link directions, Neutrino, bus ports,
+  memory port,
   PEs), then the rated ports of the memory attachments;
 * then the ports with `rate: null`, in attachment order: every attachment of an
   unlimited bus, and the compute masters on a rated xbar;
@@ -14,20 +15,28 @@ The tables follow r2-sim's first real dump (scratch/tracer/step2/l1) entry for e
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 
 GPCS = 2
 SMS_PER_GPC = 4
-GPC_BRIDGE_BW, GPC_BRIDGE_LATENCY = 256, 20
-SM_BRIDGE_BW, SM_BRIDGE_LATENCY = 128, 10
+GPC_LINK_BW, GPC_LINK_LATENCY = 256, 20
+SM_LINK_BW, SM_LINK_LATENCY = 128, 10
 SYNC_RANGE = (0x1F0000000, 0x1F1000000)
 HBM_RANGE = (0x0, 0xF0000000)
 SMEM_RANGE = (0x0, 0x100000)
+BEAT_BYTES = 64             # r2-sim default beat of ports, links and memory ports
 # Neutrino table capacities (2p.yaml, gpc.yaml, sm.yaml): gpcs have 1024 versions.
 NEUTRINO = {"scoreboard": 128, "pending": 256, "execution": 256, "versions": 256,
             "inbound_refs": 128, "inbound_invokes": 64, "outbound_deps": 128,
             "outbound_invokes": 32}
 NEUTRINO_GPC = {**NEUTRINO, "versions": 1024}
+
+
+def link_name(from_bus: str, to_bus: str) -> str:
+    """The r2-sim link name `<from bus>_to_<to bus>` (last path components)."""
+    return f"{from_bus.rsplit('.', 1)[1]}_to_{to_bus.rsplit('.', 1)[1]}"
 
 
 def own_base(gpc: int | None, sm: int | None) -> int:
@@ -48,7 +57,7 @@ class Topology:
     pes: list[dict] = field(default_factory=list)
     buses: list[dict] = field(default_factory=list)
     attachments: list[dict] = field(default_factory=list)
-    bridges: list[dict] = field(default_factory=list)
+    links: list[dict] = field(default_factory=list)
     memories: list[dict] = field(default_factory=list)
     resources: list[dict] = field(default_factory=list)
     res_id: dict[str, int] = field(default_factory=dict)
@@ -73,8 +82,17 @@ class Topology:
     def add_resource(self, name: str, kind: str, rate: float | None, owner: str,
                      role: dict) -> int:
         rid = len(self.resources)
+        # Lanes (trace-raw v1.1): a bandwidth resource has one lane per beat of BEAT_BYTES;
+        # compute arrays and scalar units have one lane; an unlimited resource has none.
+        if rate is None:
+            lanes, beat = None, None
+        elif kind == "Bandwidth":
+            lanes, beat = math.ceil(rate / BEAT_BYTES), BEAT_BYTES
+        else:
+            lanes, beat = 1, None
         self.resources.append({"id": rid, "name": name, "kind": kind,
                                "rate": None if rate is None else [int(rate), 1],
+                               "lanes": lanes, "beat_bytes": beat,
                                "owner": self.node_id[owner], "role": role})
         self.res_id[name] = rid
         return rid
@@ -126,9 +144,9 @@ class _Builder:
         self.memories: list[_Memory] = []
 
     def attach(self, bus: str, name: str, component: str, ctype: str, role: str) -> None:
-        """An attachment; a Neutrino or bridge on a rated bus gets its rated ports now."""
+        """An attachment; a Neutrino or link end on a rated bus gets its rated ports now."""
         aid = self.t.add_attachment(bus, name, component, ctype, role)
-        if ctype in ("neutrino", "bridge") and self.t.bus_rate(bus) is not None:
+        if ctype in ("neutrino", "link") and self.t.bus_rate(bus) is not None:
             self.t.add_ports(aid, rated=True)
 
     def neutrino(self, path: str, buses: list[str]) -> None:
@@ -140,30 +158,40 @@ class _Builder:
         for bus in buses:
             self.attach(bus, "neutrino", path, "neutrino", "both")
 
-    def bridge_resources(self, path: str, bw: float) -> dict[str, int]:
-        return {s: self.t.add_resource(f"{path}.bridge.{s}", "Bandwidth", bw, path,
-                                       {"type": "bridge", "bridge": None, "dir": None})
-                for s in ("up", "down", "up.ctl", "down.ctl")}
-
-    def bridges(self, path: str, hubs: tuple[str, str], parents: tuple[str, str],
-                ids: dict[str, int], latency: int) -> None:
-        """The data bridge `<path>.bridge` and the control bridge `<path>.bridge.ctl`; each
-        attaches as `bridge` on the child's hub bus and as the child's name on the parent
-        bus (r2-sim `add_bridge`)."""
-        t = self.t
-        name = path.rsplit(".", 1)[1]
+    def link_resources(self, path: str, bw: float, hubs: tuple[str, str],
+                       parents: tuple[str, str]) -> dict[tuple[bool, str], int]:
+        """The ab and ba resources of the data link and the control link of `path` (created
+        before the node's Neutrino ports, as r2-sim does)."""
+        out = {}
         for ctl, hub, parent in ((False, hubs[0], parents[0]), (True, hubs[1], parents[1])):
-            bpath = f"{path}.bridge" + (".ctl" if ctl else "")
+            lpath = f"{path}.{link_name(hub, parent)}"
+            for d in ("ab", "ba"):
+                out[(ctl, d)] = self.t.add_resource(f"{lpath}.{d}", "Bandwidth", bw, path,
+                                                    {"type": "link", "link": None, "dir": d})
+        return out
+
+    def links(self, path: str, hubs: tuple[str, str], parents: tuple[str, str],
+              ids: dict[tuple[bool, str], int], bw: float, latency: int) -> None:
+        """The data link `<path>.<hub>_to_<parent bus>` and the control link; each attaches
+        under its name on the child's hub bus and as `<child>.<name>` on the parent bus
+        (trace-raw 3.1.1)."""
+        t = self.t
+        child = path.rsplit(".", 1)[1]
+        for ctl, hub, parent in ((False, hubs[0], parents[0]), (True, hubs[1], parents[1])):
+            name = link_name(hub, parent)
+            lpath = f"{path}.{name}"
             a = len(t.attachments)
-            self.attach(hub, "bridge", bpath, "bridge", "both")
+            self.attach(hub, name, lpath, "link", "both")
             b = len(t.attachments)
-            self.attach(parent, name, bpath, "bridge", "both")
-            up, down = (ids["up.ctl"], ids["down.ctl"]) if ctl else (ids["up"], ids["down"])
-            brid = len(t.bridges)
-            t.bridges.append({"id": brid, "path": bpath, "type": "child", "a": a, "b": b,
-                              "ab": up, "ba": down, "latency": latency})
-            t.resources[up]["role"] = {"type": "bridge", "bridge": brid, "dir": "ab"}
-            t.resources[down]["role"] = {"type": "bridge", "bridge": brid, "dir": "ba"}
+            self.attach(parent, f"{child}.{name}", lpath, "link", "both")
+            lid = len(t.links)
+            t.links.append({"id": lid, "path": lpath, "node": t.node_id[path], "control": ctl,
+                            "from_bus": t.bus_id[hub], "to_bus": t.bus_id[parent],
+                            "from_attachment": a, "to_attachment": b,
+                            "ab": ids[(ctl, "ab")], "ba": ids[(ctl, "ba")], "bw_bytes": float(bw),
+                            "beat_bytes": BEAT_BYTES, "latency": latency, "cache": None})
+            for d in ("ab", "ba"):
+                t.resources[ids[(ctl, d)]]["role"] = {"type": "link", "link": lid, "dir": d}
 
     def memory(self, path: str, node: str, mtype: str, rng: tuple[int, int], base: int,
                slaves: list[str], bw: float, latency: int) -> None:
@@ -227,10 +255,10 @@ def build() -> Topology:
         t.add_node(gpc, "root", NEUTRINO_GPC)
         t.add_bus(f"{gpc}.clsbus", gpc, False, 512.0)
         t.add_bus(f"{gpc}.clcbus", gpc, True, 64.0)
-        ids = b.bridge_resources(gpc, GPC_BRIDGE_BW)
+        hubs, parents = (f"{gpc}.clsbus", f"{gpc}.clcbus"), ("root.sbus", "root.cbus")
+        ids = b.link_resources(gpc, GPC_LINK_BW, hubs, parents)
         b.neutrino(gpc, [f"{gpc}.clcbus", f"{gpc}.clsbus"])
-        b.bridges(gpc, (f"{gpc}.clsbus", f"{gpc}.clcbus"), ("root.sbus", "root.cbus"), ids,
-                  GPC_BRIDGE_LATENCY)
+        b.links(gpc, hubs, parents, ids, GPC_LINK_BW, GPC_LINK_LATENCY)
         b.memory(f"{gpc}.hbm", gpc, "dram", HBM_RANGE, own_base(g, None), [f"{gpc}.clsbus"],
                  512.0, 200)
         b.sync_memory(gpc, own_base(g, None))
@@ -240,10 +268,10 @@ def build() -> Topology:
             t.add_node(sm, gpc, NEUTRINO)
             for bus, ctl in (("smsbus", False), ("smcbus", True), ("lbus", False)):
                 t.add_bus(f"{sm}.{bus}", sm, ctl, None)
-            ids = b.bridge_resources(sm, SM_BRIDGE_BW)
+            hubs, parents = (f"{sm}.smsbus", f"{sm}.smcbus"), (f"{gpc}.clsbus", f"{gpc}.clcbus")
+            ids = b.link_resources(sm, SM_LINK_BW, hubs, parents)
             b.neutrino(sm, [f"{sm}.smcbus", f"{sm}.lbus", f"{sm}.smsbus"])
-            b.bridges(sm, (f"{sm}.smsbus", f"{sm}.smcbus"), (f"{gpc}.clsbus", f"{gpc}.clcbus"),
-                      ids, SM_BRIDGE_LATENCY)
+            b.links(sm, hubs, parents, ids, SM_LINK_BW, SM_LINK_LATENCY)
             b.memory(f"{sm}.smem", sm, "scratch", SMEM_RANGE, own_base(g, s),
                      [f"{sm}.lbus", f"{sm}.smsbus"], 256.0, 10)
             b.sync_memory(sm, own_base(g, s))

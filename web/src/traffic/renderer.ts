@@ -190,7 +190,7 @@ export class TrafficRenderer {
       if (l.rev !== null) line(l.rev, 'out (from the bus)')
       return out
     }
-    // A bridge: per direction the MAX over the bridge lane and the two ports it passes.
+    // A link: per direction the MAX over the link direction and the two ports it passes.
     for (const k of [0, 1] as const) {
       out.push(k === 0 ? 'up (to the parent):' : 'down (to the child):')
       for (const r of directionSet(l, k)) line(r, `  ${String(res[r].name)}`)
@@ -488,7 +488,7 @@ export class TrafficRenderer {
   }
 }
 
-/** The resources of one direction of an attachment or bridge (0 = forward). */
+/** The resources of one direction of an attachment or link (0 = forward). */
 function directionSet(l: PLink, k: 0 | 1): number[] {
   const main = k === 0 ? l.fwd : l.rev
   return [...(main === null ? [] : [main]), ...(k === 0 ? l.fwdPorts : l.revPorts)]

@@ -15,7 +15,7 @@ import { ArrowBatch, DepIndex, type ArrowStyle } from './deps'
 import { drawLane, taskAt, wideTasks, type ChunkIndex } from './lanes'
 import { blend, LaneRaster, pack, rgba, RowRaster, type RowColors, type SlotColors } from './raster'
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, recorded, rowAt, RowSource, type Recorded, type Row, type RowModel } from './rows'
-import { chargesAmount, rangeAmount, sampleArg, sampleBins, sampleCharges, smooth } from './util'
+import { chargesAmount, lanesHeld, rangeAmount, sampleBins, sampleCharges, sampleFabric, smooth } from './util'
 import { clampViewport, fit, formatCycles, tickStep, zoomAt, type Viewport } from './viewport'
 
 export const GUTTER = 300
@@ -32,6 +32,8 @@ export interface ResourceInfo {
   unit: string
   ceiling: number | null
   rate: number | null
+  /** link lanes of the resource (resources.lanes; 1 for a v1.0 trace), null if unlimited */
+  linkLanes: number | null
   cls: string
   levelRow: number
 }
@@ -147,6 +149,7 @@ export class TimelineRenderer {
     this.res = trace.dims.resources.map((r) => ({
       name: String(r.name), unit: String(r.unit ?? ''), ceiling: r.ceiling as number | null,
       rate: r.rate as number | null, cls: String(r.class ?? ''),
+      linkLanes: (r.lanes as number | null | undefined) ?? (r.rate === null ? null : 1),
       levelRow: trace.levels.rowOf[r.id as number] ?? -1,
     }))
     this.collapsed = this.source.initialCollapsed()
@@ -533,11 +536,13 @@ export class TimelineRenderer {
     const fabricRow = row.kind === 'fabric' ? this.trace.fabricRow.get(this.source.fabrics[row.id].path) : undefined
     const fl = this.trace.levels.fabric
     if (row.kind === 'fabric' && !groups && fl && fabricRow !== undefined && !this.debug.portsFabric) {
-      // Bins: the precomputed MAX series (per bin, the busiest port's fraction of ceiling).
+      // Bins: the precomputed MAX series (per level, the busiest port's average).
       scale = 1
       const cpp = this.view.cpp
-      hasPeak = sampleBins(fl, fabricRow, this.view.t0 - m * cpp, cpp, total, this.raw, this.peak)
-      argmax = sampleArg(fl, fabricRow, this.view.t0, cpp, n)
+      argmax = new Int32Array(n).fill(-1)
+      const arg = new Int32Array(total)
+      hasPeak = sampleFabric(fl, fabricRow, this.view.t0 - m * cpp, cpp, total, this.raw, this.peak, arg)
+      argmax.set(arg.subarray(m, m + n))
     } else if (row.kind === 'fabric') {
       // Charges: the exact per-pixel maximum over the ports.
       const f = this.source.fabrics[row.id]
@@ -1101,6 +1106,16 @@ export class TimelineRenderer {
     } else lines.push(`${fmt(s.raw[p])} ${unit}${pct(s.raw[p])}`)
     if (info.ceiling) {
       lines.push(`100 % = ${fmt(info.ceiling)} ${unit} (${info.rate === null ? 'peak of the run' : 'rate'})`)
+    }
+    // Zoomed to charges: the link lanes held at the cursor cycle (trace v1.1).
+    if (info.linkLanes !== null && this.view.cpp < this.trace.levels.width) {
+      const t = Math.round(h.t)   // the cycle printed as t above
+      const g = this.chargeGroups(t, t + 1)
+      if (g) {
+        const held = lanesHeld(g, row.id, t)
+        const k = Math.abs(held - Math.round(held)) < 1e-9 ? String(Math.round(held)) : held.toFixed(2)
+        lines.push(`link lanes held ${k} of ${info.linkLanes}`)
+      }
     }
     if (this.selection && this.selection.b > this.selection.a) {
       const avg = this.average(row.id, this.selection)

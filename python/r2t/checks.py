@@ -1,4 +1,4 @@
-"""The checks of trace-raw.md Section 8, plus a few format checks. Vectorized."""
+"""The checks of trace-raw.md Section 8 (v1.1), plus a few format checks. Vectorized."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
     if not dump.partial and dump.complete:
         errors += check_gid_refs(dump, gids, ch)
     errors += check_ids(dump, ch)
-    errors += check_rated_overlap(ch, [r["rate"] is not None for r in m["resources"]],
+    errors += check_lane_capacity(ch, [r["lanes"] for r in m["resources"]],
                                   [r["name"] for r in m["resources"]])
     if stats is not None and not dump.partial and dump.complete:
         errors += check_stats(ch, m["resources"], stats)
@@ -81,14 +81,14 @@ def check_ids(dump: RawDump, ch: Charges) -> list[str]:
     names = []
     for a in m["attachments"]:
         names += [(f"attachment {a['id']} {d}", a[d]) for d in ("in", "out")]
-    for b in m["bridges"]:
-        names += [(f"bridge {b['path']} {d}", b[d]) for d in ("ab", "ba")]
+    for link in m["links"]:
+        names += [(f"link {link['path']} {d}", link[d]) for d in ("ab", "ba")]
     for mem in m["memories"]:
         names.append((f"memory {mem['path']} port", mem["port"]))
     for what, rid in names:
         if rid is not None and not 0 <= rid < n:
             errors.append(f"{what}: resource {rid} is not in resources")
-    for table in ("nodes", "pes", "buses", "attachments", "bridges", "memories", "resources"):
+    for table in ("nodes", "pes", "buses", "attachments", "links", "memories", "resources"):
         bad = [i for i, entry in enumerate(m[table]) if entry["id"] != i]
         if bad:
             errors.append(f"manifest.{table}: {len(bad)} entries whose id is not their index")
@@ -104,36 +104,47 @@ def check_ids(dump: RawDump, ch: Charges) -> list[str]:
     return errors
 
 
-def check_rated_overlap(ch: Charges, rated: list[bool], names: list[str]) -> list[str]:
-    """On a rated resource, two charges overlap only if they are the direction records of
-    one charge (same start and span); the records of one charge sum to its span.
-    Zero-cycle charges cover no cycle and are left out."""
-    is_rated = np.array(rated, dtype=bool)
-    sel = is_rated[ch.resource] & (ch.end > ch.start)
+def check_lane_capacity(ch: Charges, lanes: list[int | None], names: list[str]) -> list[str]:
+    """On a resource with a rate, the records of one charge (same start and span) hold a
+    whole number of lanes, and at every cycle the lanes held by the active records,
+    cycles / span summed, are at most the resource's lanes. Zero-cycle records cover no
+    cycle and are left out."""
+    cap = np.array([0 if n is None else n for n in lanes], dtype=np.int64)
+    sel = (cap[ch.resource] > 0) & (ch.end > ch.start)
     res, start, end, cycles = ch.resource[sel], ch.start[sel], ch.end[sel], ch.cycles[sel]
-    order = np.lexsort((end, start, res))
-    res, start, end, cycles = res[order], start[order], end[order], cycles[order]
-    errors = []
+    errors: list[str] = []
     if len(res) == 0:
         return errors
+    order = np.lexsort((end, start, res))
+    res, start, end = res[order], start[order], end[order]
+    cycles = cycles[order].astype(np.int64)
     new = np.concatenate(([True], (res[1:] != res[:-1]) | (start[1:] != start[:-1])
                           | (end[1:] != end[:-1])))
     heads = np.flatnonzero(new)
-    sums = np.add.reduceat(cycles.astype(np.int64), heads)
-    span = end[heads] - start[heads]
-    bad_sum = np.flatnonzero(sums != span)
+    sums = np.add.reduceat(cycles, heads)
+    span = (end[heads] - start[heads]).astype(np.int64)
+    bad_sum = np.flatnonzero(sums % span != 0)
     if len(bad_sum):
         i = heads[bad_sum[0]]
-        errors.append(f"charges: {len(bad_sum)} charges whose direction cycles do not sum to "
-                      f"the span, first on {names[res[i]]} at {int(start[i])}")
+        errors.append(f"charges: {len(bad_sum)} charges whose direction cycles are not a whole "
+                      f"number of lanes x span, first on {names[res[i]]} at {int(start[i])}")
+    # Sweep per resource: +held at a start, -held at an end; at one time the ends come
+    # first (intervals are [start, end)). held is lanes x span / span, a whole number per
+    # group of same-interval records, so the sweep runs on integers.
     hr, hs, he = res[heads], start[heads], end[heads]
-    same = hr[1:] == hr[:-1]
-    overlap = np.flatnonzero(same & (hs[1:] < he[:-1]))
-    if len(overlap):
-        i = overlap[0]
-        errors.append(f"charges: {len(overlap)} overlapping charges on rated resources, first "
-                      f"on {names[hr[i]]}: [{int(hs[i])}, {int(he[i])}) and "
-                      f"[{int(hs[i + 1])}, {int(he[i + 1])})")
+    held = sums // span
+    t = np.concatenate((hs, he))
+    r = np.concatenate((hr, hr))
+    d = np.concatenate((held, -held))
+    order = np.lexsort((d, t, r))
+    t, r, d = t[order], r[order], d[order]
+    level = np.cumsum(d)
+    # Each resource's events sum to 0, so the cumulative sum restarts at 0 per resource.
+    over = np.flatnonzero(level > cap[r])
+    if len(over):
+        k = over[0]
+        errors.append(f"charges: lanes held exceed the resource's lanes at {len(over)} events, "
+                      f"first on {names[r[k]]} at {int(t[k])}: {int(level[k])} of {int(cap[r[k]])}")
     return errors
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-TABLES = ["nodes", "pes", "lanes", "buses", "attachments", "bridges", "memories",
+TABLES = ["nodes", "pes", "lanes", "buses", "attachments", "links", "memories",
           "memory_ranges", "resources", "opcodes", "message_kinds", "dirs", "dep_states",
           "tasks", "chunks", "deps", "programs", "charges", "bins", "marks", "phases"]
 
@@ -49,10 +49,12 @@ FROM bins b
 LEFT JOIN resources r ON r.id = b.resource
 LEFT JOIN dirs dn ON dn.id = b.dir;
 
--- Charges with the resource name and class, the direction and the message name.
+-- Charges with the resource name and class, the direction and the message name, and the
+-- link lanes the row holds (cycles / span; NULL for a zero-cycle charge).
 CREATE OR REPLACE VIEW v_charges AS
 SELECT c.*, r.name AS resource_name, r.class, r.kind, r.unit, dn.name AS dir_name,
-       mk.name AS msg_name
+       mk.name AS msg_name,
+       CASE WHEN c."end" > c.start THEN c.cycles::DOUBLE / (c."end" - c.start) END AS lanes_held
 FROM charges c
 LEFT JOIN resources r ON r.id = c.resource
 LEFT JOIN dirs dn ON dn.id = c.dir
@@ -63,9 +65,10 @@ MACROS = """
 -- The end of the run in cycles.
 CREATE OR REPLACE MACRO end_time() AS {end_time};
 
--- Per resource over [a, b): busy cycles and amount of the charges clipped to the range
--- (a charge counts in proportion to its overlap; a zero-cycle charge counts if its start
--- is in the range), and the utilization amount / (ceiling * (b - a)).
+-- Per resource over [a, b): busy lane-cycles and amount of the charges clipped to the
+-- range (a charge counts in proportion to its overlap; a zero-cycle charge counts if its
+-- start is in the range), the busy fraction busy / (lanes * (b - a)) (NULL if unlimited)
+-- and the utilization amount / (ceiling * (b - a)).
 CREATE OR REPLACE MACRO util(a, b) AS TABLE
 WITH c AS (
     SELECT resource, cycles, amount,
@@ -78,9 +81,9 @@ WITH c AS (
     SELECT resource, sum(cycles * f) AS busy, sum(amount * f) AS amount
     FROM c GROUP BY resource
 )
-SELECT r.id, r.name, r.node, r.kind, r.unit, r.class, r.is_link, r.rate, r.ceiling,
+SELECT r.id, r.name, r.node, r.kind, r.unit, r.class, r.is_link, r.rate, r.lanes, r.ceiling,
        coalesce(s.busy, 0) AS busy, coalesce(s.amount, 0) AS amount,
-       coalesce(s.busy, 0) / (b - a) AS busy_frac,
+       coalesce(s.busy, 0) / (r.lanes * (b - a)) AS busy_frac,
        coalesce(s.amount, 0) / (r.ceiling * (b - a)) AS util
 FROM resources r LEFT JOIN s ON s.resource = r.id
 ORDER BY r.id;

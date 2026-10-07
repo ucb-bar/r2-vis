@@ -26,7 +26,7 @@ from r2t import checks, dims, facts, schema, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 0)
+FORMAT_VERSION = (1, 2)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
 ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288}

@@ -42,25 +42,68 @@ export function sampleBins(lv: BinLevels, row: number, t0: number, cpp: number, 
   return true
 }
 
-/** Per pixel, the member of a fabric series' largest bin (the argmax port), -1 if none. */
-export function sampleArg(fl: FabricLevels, row: number, t0: number, cpp: number, n: number): Int32Array {
-  const out = new Int32Array(n).fill(-1)
+/** A fabric row per pixel from its MAX series. A pixel's time range is cut into
+ * level-aligned bins, the coarsest that fit (a level-k bin inside the pixel stands for
+ * itself; the level-0 bins at the ends count by their overlap); the pixel value sums the
+ * pieces' busiest-port averages times their widths. A pixel that is one aligned bin
+ * gets exactly the largest port average; otherwise the value can exceed it where
+ * different ports win different pieces, never fall below it. `arg` gets the port of the
+ * piece that adds the most; `peak` the largest level-0 value when a pixel spans more than
+ * one bin. */
+export function sampleFabric(fl: FabricLevels, row: number, t0: number, cpp: number, n: number,
+  avg: Float64Array, peak: Float64Array, arg: Int32Array | null): boolean {
   const W = fl.width
   const count = fl.count
-  const k = cpp <= W ? 0 : Math.min(fl.max.length - 1, Math.floor(Math.log(cpp / W) / Math.log(4)))
-  const bw = W * 4 ** k
-  const arr = fl.max[k]
-  const arg = fl.arg[k]
-  const m = Math.ceil(count / 4 ** k)
-  const base = row * m
+  const levels = fl.avg.length
+  const base = fl.avg.map((_, k) => row * Math.ceil(count / 4 ** k))
+  let sum = 0
+  let best = 0
+  let who = -1
+  const add = (level: number, j: number, width: number): void => {
+    const part = fl.avg[level][base[level] + j] * width
+    sum += part
+    if (part > best) { best = part; who = fl.avgArg[level][base[level] + j] }
+  }
+  for (let p = 0; p < n; p++) {
+    const x0 = Math.max(0, (t0 + p * cpp) / W)
+    const x1 = Math.min(count, (t0 + (p + 1) * cpp) / W)
+    sum = 0
+    best = 0
+    who = -1
+    if (x1 > x0) {
+      let i0 = Math.ceil(x0)
+      let i1 = Math.floor(x1)
+      if (i0 > i1) add(0, Math.floor(x0), (x1 - x0) * W)   // inside one level-0 bin
+      else {
+        if (i0 > x0) add(0, i0 - 1, (i0 - x0) * W)
+        if (x1 > i1) add(0, i1, (x1 - i1) * W)
+        // Whole level-0 bins [i0, i1): canonical cover by level-aligned bins.
+        for (let level = 0, w = W; i0 < i1; level++, w *= 4) {
+          if (level === levels - 1) { for (let j = i0; j < i1; j++) add(level, j, w); break }
+          while (i0 < i1 && (i0 & 3) !== 0) add(level, i0++, w)
+          while (i0 < i1 && (i1 & 3) !== 0) add(level, --i1, w)
+          i0 >>= 2
+          i1 >>= 2
+        }
+      }
+    }
+    avg[p] = sum / cpp
+    if (arg && p < arg.length) arg[p] = who
+  }
+  if (cpp <= W) return false
+  const pk = Math.min(fl.max.length - 1, Math.floor(Math.log(cpp / W) / Math.log(4)))
+  const pw = W * 4 ** pk
+  const pm = Math.ceil(fl.count / 4 ** pk)
+  const mx = fl.max[pk]
   for (let p = 0; p < n; p++) {
     const ta = t0 + p * cpp
-    const b0 = Math.max(0, Math.floor(ta / bw))
-    const b1 = Math.min(m, Math.max(b0 + 1, Math.ceil((ta + cpp) / bw)))
+    const b0 = Math.max(0, Math.floor(ta / pw))
+    const b1 = Math.min(pm, Math.ceil((ta + cpp) / pw))
     let v = 0
-    for (let b = b0; b < b1; b++) if (arr[base + b] > v) { v = arr[base + b]; out[p] = arg[base + b] }
+    for (let b = b0; b < b1; b++) if (mx[row * pm + b] > v) v = mx[row * pm + b]
+    peak[p] = v
   }
-  return out
+  return true
 }
 
 /** Exact average per pixel from the charges of the loaded groups (all groups that overlap
@@ -116,6 +159,33 @@ export function sampleCharges(groups: ChargeGroup[], resource: number, t0: numbe
     run += diff[p]
     avg[p] = (avg[p] + run) / cpp
   }
+}
+
+/** Link lanes (resources.lanes, not task lanes) held on a resource at cycle t: the sum
+ * of cycles / span over the charges active at t (trace v1.1; zero-cycle charges hold none).
+ * All groups that overlap t must be given. */
+export function lanesHeld(groups: ChargeGroup[], resource: number, t: number): number {
+  let held = 0
+  for (const g of groups) {
+    const from = g.from[resource]
+    const to = g.to[resource]
+    if (to <= from) continue
+    const start = g.table.cols.start as Float64Array
+    const end = g.table.cols.end as Float64Array
+    const cycles = g.table.cols.cycles as Int32Array | Float64Array
+    let lo = from
+    let hi = to
+    const tmin = t - g.maxSpan[resource]
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (start[mid] < tmin) lo = mid + 1
+      else hi = mid
+    }
+    for (let i = lo; i < to && start[i] <= t; i++) {
+      if (end[i] > t && end[i] > start[i]) held += cycles[i] / (end[i] - start[i])
+    }
+  }
+  return held
 }
 
 /** Centered moving average of src[m .. m + n) over w pixels (1 = copy); src holds m extra

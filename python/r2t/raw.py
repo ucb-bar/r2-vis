@@ -1,4 +1,5 @@
-"""The raw dump format of trace-raw.md v1.0: record layouts, null values, file access."""
+"""The raw dump format of trace-raw.md v1.2 (reads 1.0 and 1.1): record layouts, null values, file
+access."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import zstandard
 
-RAW_VERSION = (1, 0)
+RAW_VERSION = (1, 2)
 
 # Record layouts of trace-raw.md Section 4, as [name, type] in file order.
 LAYOUTS: dict[str, list[list[str]]] = {

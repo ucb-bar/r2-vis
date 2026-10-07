@@ -136,7 +136,8 @@ export function TrafficView({ trace, charges, store }: Props) {
           </label>
         ))}
         <span className="muted">load = lightness, 0 to 100 % of the ceiling · {levelName}
-          {renderer.rec.window ? ' · loads average over the recorded time window only' : ''}</span>
+          {renderer.rec.window ? ' · loads average over the recorded time window only' : ''}
+          {renderer.model.undrawn.length ? ` · not drawn: ${renderer.model.undrawn.length} links that are caches or join no node to its parent (${renderer.model.undrawn.join(', ')})` : ''}</span>
         <span className="spacer" />
         <button className="button small" onClick={() => { renderer.fit(); redraw.current() }}>Fit</button>
       </div>
