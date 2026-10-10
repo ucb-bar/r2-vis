@@ -6,7 +6,8 @@ import re
 
 TABLES = ["nodes", "pes", "lanes", "buses", "attachments", "links", "memories",
           "memory_ranges", "resources", "opcodes", "message_kinds", "dirs", "dep_states",
-          "tasks", "chunks", "deps", "programs", "charges", "bins", "marks", "phases"]
+          "tasks", "chunks", "deps", "programs", "charges", "bins", "marks", "phases",
+          "table_names", "entries"]
 
 HEADER = """\
 -- r2t views. Open the trace with `r2t-sql RUN.r2t [QUERY]`, or run DuckDB from inside the
@@ -40,6 +41,14 @@ SELECT d.*, s.name AS state_name,
 FROM deps d
 LEFT JOIN dep_states s ON s.id = d.state
 LEFT JOIN tasks p ON p.gid = d.producer;
+
+-- Neutrino table entries with the table and node names (table occupancy: the entries with
+-- start <= t < coalesce(end, end_time())).
+CREATE OR REPLACE VIEW v_entries AS
+SELECT e.*, tn.name AS table_name, n.path AS node_path
+FROM entries e
+LEFT JOIN table_names tn ON tn.id = e."table"
+LEFT JOIN nodes n ON n.id = e.nu;
 
 -- Bins with their start cycle t and the resource name and class.
 CREATE OR REPLACE VIEW v_bins AS

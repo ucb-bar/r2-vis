@@ -29,7 +29,8 @@ export function BlockView({ trace, store }: Props) {
     const ctx = cv.getContext('2d', { alpha: false }) as CanvasRenderingContext2D
     let dpr = window.devicePixelRatio || 1
     let frame = 0
-    const draw = () => { frame = 0; renderer.draw(ctx, dpr) }
+    // Hidden tab: no drawing; the resize when it is shown draws again.
+    const draw = () => { frame = 0; if (el.clientWidth > 0) renderer.draw(ctx, dpr) }
     const request = () => { if (!frame) frame = requestAnimationFrame(draw) }
     const resize = () => {
       const w = el.clientWidth

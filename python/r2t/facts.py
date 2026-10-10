@@ -112,6 +112,27 @@ def deps_table(rec: np.ndarray) -> pa.Table:
     })
 
 
+def entries_table(rec: np.ndarray) -> pa.Table:
+    """The Neutrino table entries (trace-raw 4.7), sorted by (nu, table, start)."""
+    rec = rec[np.lexsort((rec["start"], rec["table"], rec["nu"]))]
+    end, end_null = nullable(rec, "end")
+    gid, gid_null = nullable(rec, "gid")
+    version, version_null = nullable(rec, "version")
+    peer, peer_null = nullable(rec, "peer")
+    return pa.table({
+        "nu": pa.array(rec["nu"].astype(np.int32)),
+        "table": pa.array(rec["table"].astype(np.int8)),
+        "start": pa.array(rec["start"].astype(np.int64)),
+        "end": masked(end, end_null, pa.int64()),
+        "base": pa.array(rec["base"], type=pa.uint64()),
+        "len": pa.array(rec["len"], type=pa.uint64()),
+        "version": masked(version, version_null, pa.int32()),
+        "gid": masked(gid, gid_null, pa.int32()),
+        "peer": masked(peer, peer_null, pa.int32()),
+        "flags": pa.array(rec["flags"].astype(np.int8)),
+    })
+
+
 def string_column(ids: np.ndarray, strings: list[str]) -> pa.Array:
     """Strings by id; an id outside strings.txt becomes NULL."""
     table = np.array(strings + [""], dtype=object)

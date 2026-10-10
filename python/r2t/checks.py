@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from r2t import raw
 from r2t.facts import present
 from r2t.rawdump import RawDump, nullable
 from r2t.timeline import Charges
@@ -22,6 +23,7 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
                                   [r["name"] for r in m["resources"]])
     if stats is not None and not dump.partial and dump.complete:
         errors += check_stats(ch, m["resources"], stats)
+    errors += check_entries(dump, gids)
     return errors
 
 
@@ -160,4 +162,93 @@ def check_stats(ch: Charges, resources: list[dict], stats: dict) -> list[str]:
         elif int(round(busy[rid])) != entry["busy_cycles"]:
             errors.append(f"stats: {entry['name']} busy_cycles {entry['busy_cycles']}, "
                           f"charges sum to {int(round(busy[rid]))}")
+    return errors
+
+
+def check_entries(dump: RawDump, gids: np.ndarray) -> list[str]:
+    """entries (trace-raw 4.7 and 8): end >= start; per Neutrino and table the occupancy
+    never exceeds the capacity of the manifest; every gid has a task record (whole dumps);
+    a pending record with an end has a gid; inbound_invokes ends at the task's invoke; an
+    outbound_invokes Invoke starts at the task's queued (the checks against task records:
+    whole, complete dumps only)."""
+    e = dump.records["entries"]
+    if len(e) == 0:
+        return []
+    m = dump.manifest
+    errors: list[str] = []
+    start = e["start"].astype(np.int64)
+    end, end_null = nullable(e, "end")
+    end = end.astype(np.int64)
+    table = e["table"].astype(np.int64)
+    nu = e["nu"].astype(np.int64)
+    gid, gid_null = nullable(e, "gid")
+    names = raw.ENTRY_TABLES
+    bad_table = table >= len(names)
+    if bad_table.any():
+        errors.append(f"entries: {int(bad_table.sum())} records with a table code above "
+                      f"{len(names) - 1}")
+        return errors
+    back = ~end_null & (end < start)
+    if back.any():
+        i = int(np.flatnonzero(back)[0])
+        errors.append(f"entries: {int(back.sum())} records end before they start, first "
+                      f"{names[table[i]]} at node {nu[i]}: [{start[i]}, {end[i]})")
+    # Occupancy: a sweep per (nu, table); at one cycle the frees come before the creations
+    # (an entry is [start, end)); an open entry never leaves.
+    key = nu * len(names) + table
+    t = np.concatenate((start, end[~end_null]))
+    k = np.concatenate((key, key[~end_null]))
+    d = np.concatenate((np.ones(len(start), np.int64), -np.ones(int((~end_null).sum()), np.int64)))
+    order = np.lexsort((d, t, k))
+    t, k, d = t[order], k[order], d[order]
+    level = np.cumsum(d)
+    starts = np.flatnonzero(np.concatenate(([True], k[1:] != k[:-1])))
+    base = np.repeat(np.concatenate(([0], level[starts[1:] - 1])),
+                     np.diff(np.append(starts, len(k))))
+    occ = level - base
+    caps = np.full(int(key.max()) + 1, -1, np.int64)
+    for n in m.get("nodes", []):
+        for j, name in enumerate(names):
+            cap = (n.get("neutrino") or {}).get(name)
+            if cap is not None and n["id"] * len(names) + j < len(caps):
+                caps[n["id"] * len(names) + j] = cap
+    over = (caps[k] >= 0) & (occ > caps[k])
+    if over.any():
+        i = int(np.flatnonzero(over)[0])
+        node, tab = divmod(int(k[i]), len(names))
+        errors.append(f"entries: occupancy above the capacity at {int(over.sum())} events, first "
+                      f"{names[tab]} of node {node} at {int(t[i])}: {int(occ[i])} of "
+                      f"{int(caps[k[i]])}")
+    pending_open_gid = (table == 0) & ~end_null & gid_null
+    if pending_open_gid.any():
+        errors.append(f"entries: {int(pending_open_gid.sum())} pending records with an end "
+                      "and no gid")
+    # The checks against task records need a whole dump (as the gid checks above).
+    if dump.partial or not dump.complete:
+        return errors
+    tasks = dump.records["tasks"]
+    order = np.argsort(tasks["gid"], kind="stable")
+    tg = tasks["gid"][order].astype(np.int64)
+    known = present(tg, gid[~gid_null].astype(np.int64))
+    if not known.all():
+        errors.append(f"entries: {int((~known).sum())} gids without a task record")
+    row = np.searchsorted(tg, gid.astype(np.int64))
+    has = ~gid_null & (row < len(tg))
+    has[has] &= tg[row[has]] == gid[has]
+    invoke = tasks["invoke"][order].astype(np.int64)
+    queued = tasks["queued"][order].astype(np.int64)
+    ii = (table == 3) & has & ~end_null
+    bad = ii & (end != invoke[np.minimum(row, len(tg) - 1)])
+    if bad.any():
+        i = int(np.flatnonzero(bad)[0])
+        errors.append(f"entries: {int(bad.sum())} inbound_invokes records whose end is not the "
+                      f"task's invoke, first gid {int(gid[i])}: {int(end[i])} vs "
+                      f"{int(invoke[row[i]])}")
+    oi = (table == 5) & has & ((e["flags"] & 1) == 0)
+    bad = oi & (start != queued[np.minimum(row, len(tg) - 1)])
+    if bad.any():
+        i = int(np.flatnonzero(bad)[0])
+        errors.append(f"entries: {int(bad.sum())} outbound_invokes Invoke records whose start is "
+                      f"not the task's queued, first gid {int(gid[i])}: {int(start[i])} vs "
+                      f"{int(queued[row[i]])}")
     return errors

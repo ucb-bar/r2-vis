@@ -116,26 +116,39 @@ export class TrafficModel {
     this.root = nodes.find((n) => d.nodes[n.id].parent === null)?.id ?? 0
   }
 
-  /** All resources of the links inside a node's subtree, per class (its buses' ports and
-   * the links between its descendants), and the links from its children (cross). */
-  subtreeLinks(node: number): { inner: Record<LinkClass, number[]>; cross: Record<LinkClass, number[]> } {
-    const inner: Record<LinkClass, number[]> = { global: [], local: [], control: [] }
-    const cross: Record<LinkClass, number[]> = { global: [], local: [], control: [] }
+  /** The links inside a node's subtree per class, by direction (fwd: ports in and links
+   * up; rev: ports out and links down): its descendants' bus ports and the links between
+   * them (inner), and the links from its children (cross). */
+  subtreeLinks(node: number): { inner: Record<LinkClass, Dirs>; cross: Record<LinkClass, Dirs> } {
+    const empty = (): Record<LinkClass, Dirs> => ({ global: { fwd: [], rev: [] }, local: { fwd: [], rev: [] }, control: { fwd: [], rev: [] } })
+    const inner = empty()
+    const cross = empty()
     const visit = (id: number, top: boolean) => {
       const n = this.nodes[id]
       for (const bus of n.buses) {
         for (const att of bus.atts) {
           const a = this.trace.dims.attachments[att]
           // The parent-side ports of the node's own links are not inside the subtree.
-          for (const r of [a.in_resource, a.out_resource]) if (r !== null) inner[bus.cls].push(r as number)
+          if (a.in_resource !== null) inner[bus.cls].fwd.push(a.in_resource as number)
+          if (a.out_resource !== null) inner[bus.cls].rev.push(a.out_resource as number)
         }
       }
-      for (const l of n.uplinks) (top ? cross : inner)[l.cls].push(l.up, l.down)
+      for (const l of n.uplinks) {
+        const to = top ? cross : inner
+        to[l.cls].fwd.push(l.up)
+        to[l.cls].rev.push(l.down)
+      }
       for (const c of n.children) visit(c, false)
     }
     for (const c of this.nodes[node].children) visit(c, true)
     return { inner, cross }
   }
+}
+
+/** The resources of the two directions of a group of links. */
+export interface Dirs {
+  fwd: number[]
+  rev: number[]
 }
 
 /** Names of a group of sibling nodes with the common prefix merged: "sm0-3", "sm{0,2,5}". */

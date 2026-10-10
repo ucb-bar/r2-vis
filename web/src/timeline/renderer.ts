@@ -16,10 +16,10 @@ import { drawLane, taskAt, wideTasks, type ChunkIndex } from './lanes'
 import { blend, LaneRaster, pack, rgba, RowRaster, type RowColors, type SlotColors } from './raster'
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, recorded, rowAt, RowSource, type Recorded, type Row, type RowModel } from './rows'
 import { chargesAmount, lanesHeld, rangeAmount, sampleBins, sampleCharges, sampleFabric, smooth } from './util'
-import { clampViewport, fit, formatCycles, tickStep, zoomAt, type Viewport } from './viewport'
+import { AXIS, GUTTER, TimeAxis, type Range } from './axis'
+import { tickStep, type Viewport } from './viewport'
 
-export const GUTTER = 300
-export const AXIS = 28
+export { AXIS, GUTTER, type Range } from './axis'
 const LINE_PAD = 4
 export const MAX_SMOOTH = 64
 export const DEP_MIN_PX = 4
@@ -43,11 +43,6 @@ export interface Hover {
   y: number
   row: number          // row index or -1
   t: number            // time under the cursor
-}
-
-export interface Range {
-  a: number
-  b: number
 }
 
 export interface FrameStats {
@@ -82,19 +77,13 @@ export class TimelineRenderer {
   smoothing = 1
   showAllDeps = false
   model: RowModel
-  view: Viewport = { t0: 0, cpp: 1 }
+  /** The window, selection, zoom box and pin (shared code with the Instant scrubber). */
+  readonly axis: TimeAxis
   scrollY = 0
-  width = 1
   height = 1
   hover: Hover | null = null
   /** Selected tasks (task rows) of the shared state: arrows stay shown. */
   selectedTasks: ReadonlySet<number> = new Set()
-  /** The pinned cursor time of the shared state, drawn as a line. */
-  pinned: number | null = null
-  /** The range selection [a, b), or the one being dragged. */
-  selection: Range | null = null
-  /** Right-drag zoom preview. */
-  zoomBox: Range | null = null
   /** Row reorder preview: the dragged row and the row index it goes before. */
   reorder: { from: number; before: number } | null = null
   readonly selectedRows = new Set<string>()
@@ -126,10 +115,10 @@ export class TimelineRenderer {
   private readonly programsOf: Map<number, { start: number; end: number; name: string }[]>
   /** Called after a change of the persisted view state, and after a view change. */
   onPrefs: (() => void) | null = null
-  onView: (() => void) | null = null
 
   constructor(trace: Trace, charges: ChargeCache, pool: WorkerPool, blocks: BlockSelection,
     theme: Theme, prefs: ViewPrefs) {
+    this.axis = new TimeAxis(trace.manifest.end_time)
     this.trace = trace
     this.charges = charges
     this.pool = pool
@@ -161,6 +150,17 @@ export class TimelineRenderer {
 
   // ---- state ----------------------------------------------------------------------------
 
+  get view(): Viewport { return this.axis.view }
+  get width(): number { return this.axis.width }
+  get selection(): Range | null { return this.axis.selection }
+  set selection(r: Range | null) { this.axis.selection = r }
+  get zoomBox(): Range | null { return this.axis.zoomBox }
+  set zoomBox(r: Range | null) { this.axis.zoomBox = r }
+  get pinned(): number | null { return this.axis.pinned }
+  set pinned(t: number | null) { this.axis.pinned = t }
+  get onView(): (() => void) | null { return this.axis.onView }
+  set onView(f: (() => void) | null) { this.axis.onView = f }
+
   get theme(): Theme {
     return this.themeValue
   }
@@ -173,11 +173,11 @@ export class TimelineRenderer {
   }
 
   get plotWidth(): number {
-    return Math.max(1, this.width - GUTTER)
+    return this.axis.plotWidth
   }
 
   get endTime(): number {
-    return this.trace.manifest.end_time
+    return this.axis.endTime
   }
 
   prefs(): ViewPrefs {
@@ -241,31 +241,24 @@ export class TimelineRenderer {
   }
 
   resize(width: number, height: number): void {
-    const first = this.width <= 1
-    this.width = width
     this.height = height
-    if (first) this.view = fit(this.plotWidth, this.endTime)
-    this.setView(this.view)
+    this.axis.resize(width)
   }
 
   setView(v: Viewport): void {
-    this.view = clampViewport(v, this.plotWidth, this.endTime)
-    this.onView?.()
+    this.axis.setView(v)
   }
 
   zoom(xPlot: number, factor: number): void {
-    this.setView(zoomAt(this.view, xPlot, factor))
+    this.axis.zoom(xPlot, factor)
   }
 
   pan(dxPx: number): void {
-    this.setView({ t0: this.view.t0 + dxPx * this.view.cpp, cpp: this.view.cpp })
+    this.axis.pan(dxPx)
   }
 
   zoomTo(r: Range): void {
-    const a = Math.min(r.a, r.b)
-    const b = Math.max(r.a, r.b)
-    if (b - a <= 0) return
-    this.setView({ t0: a, cpp: (b - a) / this.plotWidth })
+    this.axis.zoomTo(r)
   }
 
   toggle(node: number): void {
@@ -359,11 +352,11 @@ export class TimelineRenderer {
   }
 
   timeAtX(x: number): number {
-    return this.view.t0 + (x - GUTTER) * this.view.cpp
+    return this.axis.timeAtX(x)
   }
 
   xOf(t: number): number {
-    return GUTTER + (t - this.view.t0) / this.view.cpp
+    return this.axis.xOf(t)
   }
 
   // ---- drawing --------------------------------------------------------------------------
@@ -421,12 +414,11 @@ export class TimelineRenderer {
     ctx.clip()
     this.drawDeps(ctx)
     this.drawWindowShade(ctx)
-    this.drawBand(ctx, this.selection, th.accentArea, null)
-    this.drawBand(ctx, this.zoomBox, th.hover, th.accent)
     ctx.restore()
+    this.axis.drawBands(ctx, th, AXIS, this.height)
     this.drawReorder(ctx)
-    this.drawAxis(ctx, step)
-    this.drawCursor(ctx)
+    this.axis.drawAxis(ctx, th)
+    this.axis.drawCursor(ctx, th, AXIS, this.height, this.hover?.x ?? null)
     if (this.debug.flush) ctx.getImageData(0, 0, 1, 1)
     const dt = performance.now() - t0
     this.stats.drawMs.push(dt)
@@ -914,17 +906,6 @@ export class TimelineRenderer {
 
   // ---- other layers ---------------------------------------------------------------------
 
-  private drawBand(ctx: CanvasRenderingContext2D, r: Range | null, fill: string, edge: string | null): void {
-    if (!r) return
-    const a = this.xOf(Math.min(r.a, r.b))
-    const b = this.xOf(Math.max(r.a, r.b))
-    ctx.fillStyle = fill
-    ctx.fillRect(a, AXIS, Math.max(1, b - a), this.height - AXIS)
-    ctx.fillStyle = edge ?? this.theme.accent
-    ctx.fillRect(Math.round(a), AXIS, 1, this.height - AXIS)
-    ctx.fillRect(Math.round(b), AXIS, 1, this.height - AXIS)
-  }
-
   private drawReorder(ctx: CanvasRenderingContext2D): void {
     if (!this.reorder) return
     const { before } = this.reorder
@@ -988,65 +969,6 @@ export class TimelineRenderer {
     if (l > GUTTER) ctx.fillRect(GUTTER, AXIS, l - GUTTER, this.height - AXIS)
     if (r < this.width) ctx.fillRect(r, AXIS, this.width - r, this.height - AXIS)
     ctx.globalAlpha = 1
-  }
-
-  private drawAxis(ctx: CanvasRenderingContext2D, step: number): void {
-    const th = this.theme
-    const pw = this.plotWidth
-    ctx.fillStyle = th.surface
-    ctx.fillRect(0, 0, this.width, AXIS)
-    ctx.fillStyle = th.axis
-    ctx.fillRect(0, AXIS - 1, this.width, 1)
-    ctx.fillStyle = th.inkMuted
-    ctx.font = `${th.fontSizeXs}px ${th.fontSans}`
-    ctx.textBaseline = 'middle'
-    ctx.fillText('cycles', 10, AXIS / 2)
-    ctx.save()
-    ctx.beginPath()
-    ctx.rect(GUTTER, 0, pw, AXIS)
-    ctx.clip()
-    ctx.fillStyle = th.inkSecondary
-    for (let t = Math.ceil(this.view.t0 / step) * step; t < this.view.t0 + pw * this.view.cpp; t += step) {
-      const x = Math.round(this.xOf(t))
-      ctx.fillRect(x, AXIS - 6, 1, 5)
-      ctx.fillText(formatCycles(t, step), x + 4, AXIS / 2 - 1)
-    }
-    ctx.fillStyle = th.inkMuted
-    ctx.fillRect(Math.round(this.xOf(this.endTime)), 0, 1, AXIS)
-    // The length of the selection (or of the zoom box being dragged).
-    const r = this.zoomBox ?? this.selection
-    if (r) {
-      const a = Math.min(r.a, r.b)
-      const b = Math.max(r.a, r.b)
-      const xa = this.xOf(a)
-      const xb = this.xOf(b)
-      const text = `${Math.round(b - a).toLocaleString('en-US')} cycles`
-      ctx.font = `600 ${th.fontSizeXs}px ${th.fontSans}`
-      const w = ctx.measureText(text).width + 10
-      const cx = Math.max(GUTTER + w / 2, Math.min(this.width - w / 2, (xa + xb) / 2))
-      ctx.fillStyle = th.accent
-      ctx.fillRect(Math.max(GUTTER, xa), AXIS - 3, Math.max(1, Math.min(this.width, xb) - Math.max(GUTTER, xa)), 3)
-      ctx.fillStyle = th.surfaceRaised
-      ctx.fillRect(cx - w / 2, 3, w, AXIS - 8)
-      ctx.fillStyle = th.ink
-      ctx.textAlign = 'center'
-      ctx.fillText(text, cx, AXIS / 2 - 1)
-      ctx.textAlign = 'left'
-    }
-    ctx.restore()
-  }
-
-  private drawCursor(ctx: CanvasRenderingContext2D): void {
-    if (this.pinned !== null) {
-      const x = Math.round(this.xOf(this.pinned))
-      if (x >= GUTTER && x <= this.width) {
-        ctx.fillStyle = this.theme.accent
-        ctx.fillRect(x - 1, AXIS, 2, this.height - AXIS)
-      }
-    }
-    if (!this.hover || this.hover.x < GUTTER) return
-    ctx.fillStyle = this.theme.inkMuted
-    ctx.fillRect(Math.round(this.hover.x), AXIS, 1, this.height - AXIS)
   }
 
   private triangle(ctx: CanvasRenderingContext2D, x: number, y: number, open: boolean): void {

@@ -39,11 +39,12 @@ def link_name(from_bus: str, to_bus: str) -> str:
     return f"{from_bus.rsplit('.', 1)[1]}_to_{to_bus.rsplit('.', 1)[1]}"
 
 
-def own_base(gpc: int | None, sm: int | None) -> int:
-    """Base of a node's own address space (2p.yaml: offset_bits 33, fields gpc:2, sm:3)."""
+def own_base(gpc: int | None, sm: int | None, sm_bits: int = 3) -> int:
+    """Base of a node's own address space (2p.yaml: offset_bits 33, fields gpc:2, sm:3; a
+    larger variant widens the sm field)."""
     base = 0
     if gpc is not None:
-        base |= (gpc + 1) << 36
+        base |= (gpc + 1) << (33 + sm_bits)
     if sm is not None:
         base |= (sm + 1) << 33
     return base
@@ -58,6 +59,9 @@ class Topology:
     buses: list[dict] = field(default_factory=list)
     attachments: list[dict] = field(default_factory=list)
     links: list[dict] = field(default_factory=list)
+    gpcs: int = GPCS
+    sms: int = SMS_PER_GPC
+    sm_bits: int = 3
     memories: list[dict] = field(default_factory=list)
     resources: list[dict] = field(default_factory=list)
     res_id: dict[str, int] = field(default_factory=dict)
@@ -241,16 +245,17 @@ class _Builder:
         return t
 
 
-def build() -> Topology:
-    """The 2p topology: root, 2 gpcs, 4 SMs per gpc."""
+def build(gpcs: int = GPCS, sms: int = SMS_PER_GPC) -> Topology:
+    """The 2p topology: root, 2 gpcs, 4 SMs per gpc (other sizes: a 2p-like variant)."""
     b = _Builder()
     t = b.t
+    t.gpcs, t.sms, t.sm_bits = gpcs, sms, max(3, sms.bit_length())
     t.add_node("root", None, NEUTRINO)
     t.add_bus("root.sbus", "root", False, 512.0)
     t.add_bus("root.cbus", "root", True, 64.0)
     b.neutrino("root", ["root.cbus", "root.sbus"])
-    b.sync_memory("root", own_base(None, None))
-    for g in range(GPCS):
+    b.sync_memory("root", own_base(None, None, t.sm_bits))
+    for g in range(gpcs):
         gpc = f"root.gpc{g}"
         t.add_node(gpc, "root", NEUTRINO_GPC)
         t.add_bus(f"{gpc}.clsbus", gpc, False, 512.0)
@@ -259,11 +264,11 @@ def build() -> Topology:
         ids = b.link_resources(gpc, GPC_LINK_BW, hubs, parents)
         b.neutrino(gpc, [f"{gpc}.clcbus", f"{gpc}.clsbus"])
         b.links(gpc, hubs, parents, ids, GPC_LINK_BW, GPC_LINK_LATENCY)
-        b.memory(f"{gpc}.hbm", gpc, "dram", HBM_RANGE, own_base(g, None), [f"{gpc}.clsbus"],
-                 512.0, 200)
-        b.sync_memory(gpc, own_base(g, None))
+        b.memory(f"{gpc}.hbm", gpc, "dram", HBM_RANGE, own_base(g, None, t.sm_bits),
+                 [f"{gpc}.clsbus"], 512.0, 200)
+        b.sync_memory(gpc, own_base(g, None, t.sm_bits))
         b.pe(f"{gpc}.dma", gpc, "dma", [f"{gpc}.clsbus"], None)
-        for s in range(SMS_PER_GPC):
+        for s in range(sms):
             sm = f"{gpc}.sm{s}"
             t.add_node(sm, gpc, NEUTRINO)
             for bus, ctl in (("smsbus", False), ("smcbus", True), ("lbus", False)):
@@ -272,9 +277,9 @@ def build() -> Topology:
             ids = b.link_resources(sm, SM_LINK_BW, hubs, parents)
             b.neutrino(sm, [f"{sm}.smcbus", f"{sm}.lbus", f"{sm}.smsbus"])
             b.links(sm, hubs, parents, ids, SM_LINK_BW, SM_LINK_LATENCY)
-            b.memory(f"{sm}.smem", sm, "scratch", SMEM_RANGE, own_base(g, s),
+            b.memory(f"{sm}.smem", sm, "scratch", SMEM_RANGE, own_base(g, s, t.sm_bits),
                      [f"{sm}.lbus", f"{sm}.smsbus"], 256.0, 10)
-            b.sync_memory(sm, own_base(g, s))
+            b.sync_memory(sm, own_base(g, s, t.sm_bits))
             b.pe(f"{sm}.atlas", sm, "tensor", [f"{sm}.lbus"], ("array", "TensorOps", 16384))
             b.pe(f"{sm}.muon", sm, "vector", [f"{sm}.lbus", f"{sm}.smsbus"],
                  ("vector", "VectorOps", 256))

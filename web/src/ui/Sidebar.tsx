@@ -8,29 +8,30 @@ interface Saved {
   collapsed: boolean
 }
 
-function load(): Saved {
+function load(key: string, width: number): Saved {
   try {
-    const s = JSON.parse(localStorage.getItem(KEY) ?? '') as Partial<Saved>
-    return { width: Math.max(MIN_WIDTH, Number(s.width) || 260), collapsed: !!s.collapsed }
+    const s = JSON.parse(localStorage.getItem(key) ?? '') as Partial<Saved>
+    return { width: Math.max(MIN_WIDTH, Number(s.width) || width), collapsed: !!s.collapsed }
   } catch {
-    return { width: 260, collapsed: false }
+    return { width, collapsed: false }
   }
 }
 
-function save(s: Saved): void {
+function save(key: string, s: Saved): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(s))
+    localStorage.setItem(key, JSON.stringify(s))
   } catch {
     // storage unavailable: the width is not kept
   }
 }
 
 /** The right sidebar: resizable by its left edge (at least 180 px), collapsible to a thin
- * strip; its width and state persist. */
-export function Sidebar({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<Saved>(load)
+ * strip; its width and state persist (per `name`: each view keeps its own). */
+export function Sidebar({ children, name = '', width = 260 }: { children: ReactNode; name?: string; width?: number }) {
+  const key = name ? `${KEY}.${name}` : KEY
+  const [state, setState] = useState<Saved>(() => load(key, width))
   const drag = useRef<{ x: number; w: number } | null>(null)
-  useEffect(() => save(state), [state])
+  useEffect(() => save(key, state), [key, state])
   useEffect(() => {
     const move = (e: PointerEvent) => {
       if (!drag.current) return

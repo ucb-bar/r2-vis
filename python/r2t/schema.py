@@ -123,6 +123,30 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "id": "state code",
         "name": "not_invoked, scoreboard, executing or done",
     }),
+    "table_names": ("Neutrino table names of the entries table.", {
+        "id": "table code",
+        "name": "pending, versions, inbound_refs, inbound_invokes, outbound_deps or "
+                "outbound_invokes",
+    }),
+    "entries": ("Entries of the six Neutrino tables that the tasks do not give (trace-raw "
+                "4.7), sorted by (nu, table, start). The occupancy of a table at t is the "
+                "number of its entries with start <= t < end.", {
+        "nu": "node id of the Neutrino whose table holds the entry",
+        "table": "table code (table_names)",
+        "start": "cycle the entry was created",
+        "end": "cycle the entry was freed; NULL if still present at the end of the run",
+        "base": "address: the key (pending, inbound_refs, outbound_deps), the range base "
+                "(versions, inbound_invokes, outbound_invokes)",
+        "len": "range length in bytes; 0 for a key, a VersionReset or nu.version",
+        "version": "the key's version, the last counter (versions) or the assigned version "
+                   "(inbound_invokes); NULL if unversioned",
+        "gid": "the entry's task (per table, trace-raw 4.7); NULL if none",
+        "peer": "the other Neutrino (requester, owner, or the VersionReset sender); NULL if "
+                "none",
+        "flags": "per table: pending bits 0-1 creator (0 dependency, 1 local wait, 2 remote "
+                 "Await); versions bit 0 nu.version; outbound_deps bit 0 registered, bit 1 "
+                 "rejected; outbound_invokes bit 0 VersionReset, bit 1 replayed",
+    }),
     "tasks": ("One row per task, sorted by gid.", {
         "gid": "task id, in invoke order",
         "nu": "node id of the Neutrino whose tables track the task (owner of dst)",

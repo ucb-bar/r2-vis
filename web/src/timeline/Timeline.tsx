@@ -10,7 +10,7 @@ import { Section, Sidebar } from '../ui/Sidebar'
 import { OTHER } from './colors'
 import { Minimap } from './Minimap'
 import { AXIS, GUTTER, MAX_SMOOTH, TimelineRenderer } from './renderer'
-import { zoomFactor } from './viewport'
+import { DRAG_PX, TimeInput } from './timeinput'
 
 interface Props {
   trace: Trace
@@ -19,18 +19,18 @@ interface Props {
   store: ViewStore
   docked: boolean
   onDock: (docked: boolean) => void
+  /** Receives the renderer (the Instant scrubber shows its minimap). */
+  onRenderer?: (renderer: TimelineRenderer) => void
 }
 
 declare global {
   interface Window { __r2timeline?: TimelineRenderer }
 }
 
-const DRAG_PX = 3
 const EDGE_PX = 3
 const REVEAL_MIN_SPAN = 20_000  // cycles shown at least when a task is revealed
 
 type Drag =
-  | { kind: 'select' | 'zoom'; x0: number; t0: number; moved: boolean; row: number }
   | { kind: 'resize'; key: string; y0: number; h0: number }
   | { kind: 'label'; row: number; x0: number; y0: number; moved: boolean; additive: boolean }
   | { kind: 'group'; row: number; button: number; x0: number; y0: number }
@@ -45,13 +45,14 @@ interface Menu {
 /** The timeline view. Input:
  * - wheel scrolls the rows; ctrl+wheel (trackpad pinch, ctrl+mouse wheel) zooms around the
  *   cursor; horizontal scroll or shift+wheel pans;
- * - left-drag on a plot selects a range; a click on a plot or Esc clears it;
+ * - left-drag on a plot or the axis selects a range; a click on a plot or Esc clears it;
+ * - a click on the axis pins the cursor there; the playhead handle drags the pin (scrub);
  * - right-drag on a plot zooms to the range;
  * - a click on a row label selects the row (ctrl or shift adds); Delete or Backspace hides
  *   the selected rows; dragging a label moves the row inside its node group; dragging a
  *   row's lower edge in the labels resizes it (double-click resets);
  * - a click on a group header collapses it; a right-click lists its hidden rows. */
-export function Timeline({ trace, charges, pool, store, docked, onDock }: Props) {
+export function Timeline({ trace, charges, pool, store, docked, onDock, onRenderer }: Props) {
   const blocks = store.blocks
   const scroller = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -78,6 +79,8 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
     request()
   }, [renderer, request])
 
+  useEffect(() => onRenderer?.(renderer), [renderer, onRenderer])
+
   useEffect(() => {
     window.__r2timeline = renderer
     const el = scroller.current as HTMLDivElement
@@ -87,6 +90,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
 
     const draw = () => {
       frame.current = 0
+      if (el.clientWidth === 0) return  // hidden tab: drawn again when shown (resize)
       renderer.scrollY = el.scrollTop
       renderer.draw(ctx, dpr)
     }
@@ -116,6 +120,8 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
       setSmoothing(renderer.smoothing)
       request()
     })
+    // The window set by another view of the store (the Instant scrubber).
+    const offWindow = store.window.subscribe((w) => { if (renderer.axis.showWindow(w.a, w.b)) request() })
     const offRange = store.range.subscribe((r) => {
       if (!sameRange(r, renderer.selection)) { renderer.selection = r ? { ...r } : null; request() }
     })
@@ -200,17 +206,32 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
       store.hover(x >= GUTTER ? renderer.hover.t : null)
     }
 
+    // Time gestures (shared with the Instant scrubber); a plain click on a plot toggles the
+    // task under it, or clears the tasks, then the range; a right click on a group header
+    // lists its hidden rows.
+    const time = new TimeInput({
+      axis: renderer.axis, store,
+      changed: () => { request(); updateTip() },
+      rangeChanged: () => publishRange(),
+      plotClick: (x, y) => {
+        setHover(x, y)
+        const task = renderer.hoveredTask()
+        if (task >= 0) toggleTask(store, task)
+        else if (store.tasks.get().size) store.tasks.set(new Set())
+        else return false
+        return true
+      },
+      plotRightClick: (x, y) => {
+        const i = renderer.rowAtY(y)
+        if (i >= 0 && renderer.model.rows[i].kind === 'group') openMenu(renderer.model.rows[i].id, x, y)
+      },
+    })
+
     const onWheel = (e: WheelEvent) => {
       const { x } = pos(e)
-      const horizontal = !e.ctrlKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))
-      if (!horizontal && !e.ctrlKey) return  // native vertical scroll of the rows
+      if (!time.wheel(e, x, el.clientHeight)) return  // native vertical scroll of the rows
       e.preventDefault()
-      const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
-      if (horizontal) renderer.pan((e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX) * scale)
-      else renderer.zoom(Math.max(0, x - GUTTER), zoomFactor(e.deltaY * scale))
       if (renderer.hover) renderer.hover.t = renderer.timeAtX(renderer.hover.x)
-      request()
-      updateTip()
     }
 
     let drag: Drag | null = null
@@ -244,8 +265,9 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
             ? { kind: 'group', row: i, button: e.button, x0: x, y0: y }
             : e.button === 0 ? { kind: 'label', row: i, x0: x, y0: y, moved: false, additive: e.ctrlKey || e.metaKey || e.shiftKey } : null
         }
-      } else {
-        drag = { kind: e.button === 0 ? 'select' : 'zoom', x0: x, t0: renderer.timeAtX(x), moved: false, row: renderer.rowAtY(y) }
+      } else if (time.down(e, x, y)) {
+        el.setPointerCapture(e.pointerId)
+        return
       }
       if (drag) el.setPointerCapture(e.pointerId)
     }
@@ -254,22 +276,17 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
       if ((e.target as Element).closest('.menu')) return
       const { x, y } = pos(e)
       setHover(x, y)
+      if (time.move(x)) {
+        setTip(null)
+        return
+      }
       if (!drag) {
-        cv.style.cursor = x < GUTTER && edgeRow(y) >= 0 ? 'ns-resize' : 'default'
+        cv.style.cursor = (x < GUTTER && edgeRow(y) >= 0 ? 'ns-resize' : time.cursorAt(x, y)) ?? 'default'
         request()
         updateTip()
         return
       }
-      if (drag.kind === 'select' || drag.kind === 'zoom') {
-        if (!drag.moved && Math.abs(x - drag.x0) <= DRAG_PX) return
-        drag.moved = true
-        const r = { a: drag.t0, b: renderer.timeAtX(Math.max(GUTTER, Math.min(renderer.width, x))) }
-        if (drag.kind === 'select') {
-          renderer.selection = { a: Math.min(r.a, r.b), b: Math.max(r.a, r.b) }
-          publishRange()
-        } else renderer.zoomBox = r
-        setTip(null)
-      } else if (drag.kind === 'resize') {
+      if (drag.kind === 'resize') {
         renderer.setHeight(drag.key, drag.h0 + (y - drag.y0))
         setContentHeight(renderer.model.height + AXIS)
       } else if (drag.kind === 'label') {
@@ -281,26 +298,15 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
     }
 
     const onUp = (e: PointerEvent) => {
+      const { x, y } = pos(e)
+      if (time.up(e, x, y)) {
+        refresh()
+        return
+      }
       const d = drag
       drag = null
       if (!d) return
-      const { x, y } = pos(e)
-      if (d.kind === 'select') {
-        if (!d.moved && e.altKey) store.pin(renderer.timeAtX(x))  // alt+click pins the cursor time
-        else if (!d.moved) {
-          // A click toggles the task under it; on empty space it clears the tasks, then the range.
-          setHover(x, y)
-          const task = renderer.hoveredTask()
-          if (task >= 0) toggleTask(store, task)
-          else if (store.tasks.get().size) store.tasks.set(new Set())
-          else renderer.selection = null
-        } else if (renderer.selection && renderer.selection.b - renderer.selection.a <= 0) renderer.selection = null
-        publishRange()
-      } else if (d.kind === 'zoom') {
-        if (d.moved && renderer.zoomBox) renderer.zoomTo(renderer.zoomBox)
-        else if (d.row >= 0 && renderer.model.rows[d.row].kind === 'group') openMenu(renderer.model.rows[d.row].id, x, y)
-        renderer.zoomBox = null
-      } else if (d.kind === 'resize') {
+      if (d.kind === 'resize') {
         renderer.commitHeights()
       } else if (d.kind === 'label') {
         const row = renderer.model.rows[d.row]
@@ -349,10 +355,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
       if (e.key === 'Escape') {
         // Esc clears the task selection first, then the range.
         if (store.tasks.get().size) store.tasks.set(new Set())
-        else {
-          renderer.selection = null
-          publishRange()
-        }
+        else time.escape()
         renderer.zoomBox = null
         setMenu(null)
         request()
@@ -382,6 +385,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock }: Props)
       offRange()
       offCursor()
       offTasks()
+      offWindow()
       offReveal()
       charges.onLoad = null
       renderer.deps.onReady = null

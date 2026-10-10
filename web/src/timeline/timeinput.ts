@@ -1,0 +1,131 @@
+// Time input shared by the timeline and the Instant scrubber (views-design 6.1): drag on
+// the plot or the axis selects a range, a click on the axis pins the cursor there, the
+// playhead handle drags (scrubs) the pin, right-drag zooms to a box, ctrl+wheel or pinch
+// zooms, horizontal or shift+wheel pans, Esc clears the range.
+import type { ViewStore } from '../state/viewstore'
+import { AXIS, GUTTER, type TimeAxis } from './axis'
+import { zoomFactor } from './viewport'
+
+export const DRAG_PX = 3
+
+export interface TimeInputHost {
+  axis: TimeAxis
+  store: ViewStore
+  /** Redraw. */
+  changed(): void
+  /** The axis selection changed: publish it to the store. */
+  rangeChanged(): void
+  /** A left click without a drag on the plot (not the axis); true if the host used it. */
+  plotClick?(x: number, y: number, e: PointerEvent): boolean
+  /** A right click without a drag on the plot. */
+  plotRightClick?(x: number, y: number): void
+}
+
+interface Drag {
+  kind: 'select' | 'axis' | 'zoom' | 'scrub'
+  x0: number
+  t0: number
+  moved: boolean
+}
+
+export class TimeInput {
+  private readonly host: TimeInputHost
+  private drag: Drag | null = null
+
+  constructor(host: TimeInputHost) {
+    this.host = host
+  }
+
+  get dragging(): boolean {
+    return this.drag !== null
+  }
+
+  /** The cursor style for a pointer at (x, y) when no drag runs. */
+  cursorAt(x: number, y: number): string | null {
+    if (x < GUTTER) return null
+    if (this.host.axis.onHandle(x, y)) return 'ew-resize'
+    return y < AXIS ? 'pointer' : null
+  }
+
+  /** Takes a pointer down at (x, y); false if it is not a time gesture (labels). */
+  down(e: PointerEvent, x: number, y: number): boolean {
+    if (x < GUTTER) return false
+    const axis = this.host.axis
+    const t0 = axis.timeAtX(x)
+    if (e.button === 0 && axis.onHandle(x, y)) this.drag = { kind: 'scrub', x0: x, t0, moved: false }
+    else if (e.button === 0) this.drag = { kind: y < AXIS ? 'axis' : 'select', x0: x, t0, moved: false }
+    else if (e.button === 2) this.drag = { kind: 'zoom', x0: x, t0, moved: false }
+    else return false
+    return true
+  }
+
+  /** A pointer move during a drag; false if no time drag runs. */
+  move(x: number): boolean {
+    const d = this.drag
+    if (!d) return false
+    const axis = this.host.axis
+    const xc = Math.max(GUTTER, Math.min(axis.width, x))
+    if (d.kind === 'scrub') {
+      d.moved = true
+      this.host.store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(xc))))
+      this.host.changed()
+      return true
+    }
+    if (!d.moved && Math.abs(x - d.x0) <= DRAG_PX) return true
+    d.moved = true
+    const r = { a: d.t0, b: axis.timeAtX(xc) }
+    if (d.kind === 'zoom') axis.zoomBox = r
+    else {
+      axis.selection = { a: Math.min(r.a, r.b), b: Math.max(r.a, r.b) }
+      this.host.rangeChanged()
+    }
+    this.host.changed()
+    return true
+  }
+
+  /** The end of a drag; false if no time drag ran. */
+  up(e: PointerEvent, x: number, y: number): boolean {
+    const d = this.drag
+    this.drag = null
+    if (!d) return false
+    const { axis, store } = this.host
+    if (d.kind === 'select' || d.kind === 'axis') {
+      if (!d.moved) {
+        // A click on the axis (or alt+click on the plot) pins the cursor there; a plain
+        // click on the plot goes to the host, else it clears the range.
+        if (d.kind === 'axis' || e.altKey) store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(x))))
+        else if (!this.host.plotClick?.(x, y, e)) axis.selection = null
+      } else if (axis.selection && axis.selection.b - axis.selection.a <= 0) axis.selection = null
+      this.host.rangeChanged()
+    } else if (d.kind === 'zoom') {
+      if (d.moved && axis.zoomBox) axis.zoomTo(axis.zoomBox)
+      else this.host.plotRightClick?.(x, y)
+      axis.zoomBox = null
+    }
+    this.host.changed()
+    return true
+  }
+
+  /** A wheel event at x; true if it zoomed or panned (the caller prevents the default). */
+  wheel(e: WheelEvent, x: number, pageHeight: number): boolean {
+    const horizontal = !e.ctrlKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))
+    if (!horizontal && !e.ctrlKey) return false   // a plain vertical wheel scrolls (rows)
+    const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? pageHeight : 1
+    const axis = this.host.axis
+    if (horizontal) axis.pan((e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX) * scale)
+    else axis.zoom(Math.max(0, x - GUTTER), zoomFactor(e.deltaY * scale))
+    this.host.changed()
+    return true
+  }
+
+  /** Esc: clears the zoom box and the range; true if there was a range. */
+  escape(): boolean {
+    const axis = this.host.axis
+    axis.zoomBox = null
+    if (!axis.selection) return false
+    axis.selection = null
+    this.host.rangeChanged()
+    this.host.changed()
+    return true
+  }
+}

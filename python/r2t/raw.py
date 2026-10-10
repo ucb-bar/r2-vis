@@ -1,4 +1,4 @@
-"""The raw dump format of trace-raw.md v1.2 (reads 1.0 and 1.1): record layouts, null values, file
+"""The raw dump format of trace-raw.md v1.3 (reads 1.0 to 1.2): record layouts, null values, file
 access."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import zstandard
 
-RAW_VERSION = (1, 2)
+RAW_VERSION = (1, 3)
 
 # Record layouts of trace-raw.md Section 4, as [name, type] in file order.
 LAYOUTS: dict[str, list[list[str]]] = {
@@ -38,7 +38,19 @@ LAYOUTS: dict[str, list[list[str]]] = {
         ["pad2", "u32"], ["start", "u64"], ["end", "u64"],
     ],
     "marks": [["time", "u64"], ["name", "u32"], ["nu", "u16"], ["pad", "u16"]],
+    "entries": [
+        ["start", "u64"], ["end", "u64"], ["base", "u64"], ["len", "u64"], ["gid", "u32"],
+        ["version", "u32"], ["nu", "u16"], ["peer", "u16"], ["table", "u8"], ["flags", "u8"],
+        ["pad", "u16"],
+    ],
 }
+
+# Record files that a dump of an earlier version does not list (read as absent).
+OPTIONAL_RECORDS = {"entries"}
+
+# The Neutrino tables of entries.bin (trace-raw 4.7), by code; the manifest's capacity keys.
+ENTRY_TABLES = ["pending", "versions", "inbound_refs", "inbound_invokes", "outbound_deps",
+                "outbound_invokes"]
 
 RECORD_FILES = tuple(LAYOUTS)
 

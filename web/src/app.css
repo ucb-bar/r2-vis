@@ -137,6 +137,9 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .chip-x { font: inherit; border: 0; background: none; color: var(--color-ink-secondary); cursor: pointer; padding: 0 var(--space-1); }
 .chip-x:hover { color: var(--color-ink); }
 .instant { display: flex; flex-direction: column; background: var(--color-surface); }
+.time-strip { position: relative; flex: 0 0 auto; border-bottom: var(--border-width) solid var(--color-border); user-select: none; }
+.time-strip canvas { display: block; }
+.time-strip-pin { position: absolute; left: 70px; top: 4px; font-size: var(--font-size-xs); }
 .instant-head { display: flex; align-items: center; padding: var(--space-3) var(--space-5); border-bottom: var(--border-width) solid var(--color-border); font-size: var(--font-size-s); }
 .instant-head .spacer { flex: 1; }
 .instant-body { padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); }
@@ -149,12 +152,16 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .seg { font: inherit; color: var(--color-ink-secondary); background: none; border: 0; padding: var(--space-1) var(--space-4); cursor: pointer; }
 .seg + .seg { border-left: var(--border-width) solid var(--color-border); }
 .seg.active { background: var(--color-accent-area); color: var(--color-ink); font-weight: 600; }
-.traffic { display: flex; flex-direction: column; }
+.traffic { display: flex; flex-direction: row; }
+.traffic-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .traffic-head { display: flex; align-items: center; gap: var(--space-5); padding: var(--space-2) var(--space-5); font-size: var(--font-size-s); border-bottom: var(--border-width) solid var(--color-border); }
 .traffic-head .spacer { flex: 1; }
 .traffic-head .muted { color: var(--color-ink-muted); }
 .traffic-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
-.traffic-body canvas { display: block; }
+.traffic-body canvas { display: block; position: absolute; left: 0; top: 0; }
+.traffic-body canvas:last-of-type { cursor: default; }
+.traffic-class { display: flex; flex-direction: column; gap: var(--space-1); }
+.traffic-class-sub { padding-left: var(--space-6); color: var(--color-ink-secondary); font-size: var(--font-size-s); }
 .ramp { width: 28px; height: 10px; border-radius: 2px; display: inline-block; }
 .control { display: flex; flex-direction: column; }
 .control-head { display: flex; align-items: center; gap: var(--space-5); padding: var(--space-2) var(--space-5); font-size: var(--font-size-s); border-bottom: var(--border-width) solid var(--color-border); }
@@ -199,3 +206,26 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .tool-row { display: flex; gap: var(--space-3); flex-wrap: wrap; }
 .legend-note { color: var(--color-ink-muted); }
 .blocks-tree { max-height: 320px; overflow-y: auto; margin: 0 calc(-1 * var(--space-4)); }
+.control2 { display: flex; flex-direction: row; }
+.control2-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.control-tree { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.control-tree canvas { display: block; }
+.heat-legend { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--color-ink-muted); }
+.heat-ramp { width: 80px; }
+.heat-none { background: var(--color-grid); border: 1px dashed var(--color-axis); }
+.node-panel { font-size: var(--font-size-s); display: flex; flex-direction: column; gap: var(--space-3); }
+.node-panel h3 { margin: 0; font-size: var(--font-size-s); }
+.node-panel table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
+.node-panel th { text-align: left; font-weight: 600; color: var(--color-ink-muted); padding: var(--space-1) var(--space-3) var(--space-1) 0; border-bottom: var(--border-width) solid var(--color-border); }
+.node-panel td { padding: var(--space-1) var(--space-3) var(--space-1) 0; border-bottom: var(--border-width) solid var(--color-grid); }
+.node-panel td.num { text-align: right; white-space: nowrap; }
+.node-panel table.pressure > tbody > tr:not(.items) { cursor: pointer; }
+.node-panel table.pressure > tbody > tr:not(.items):hover { background: var(--color-hover); }
+.node-panel tr.items > td { padding: var(--space-2) 0 var(--space-3) var(--space-4); }
+.node-panel .fold { display: inline-block; width: 1em; color: var(--color-ink-muted); }
+.node-panel .mono { font-family: var(--font-mono); white-space: nowrap; }
+.node-panel .muted, .control2 .muted { color: var(--color-ink-muted); }
+/* No back/forward swipe from horizontal trackpad scrolling over the views (macOS). */
+html, body { overscroll-behavior: none; }
+.strip-divider { height: 6px; cursor: ns-resize; background: var(--color-border); touch-action: none; }
+.strip-divider:hover { background: var(--color-accent-area); }

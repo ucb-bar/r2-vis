@@ -32,7 +32,7 @@ from typing import Callable
 import numpy as np
 
 from r2t import raw
-from r2t.topology_2p import GPCS, SMS_PER_GPC, Topology, build, link_name, own_base
+from r2t.topology_2p import Topology, build, link_name, own_base
 
 OPCODES = ["join", "spawn", "dma", "atlas.matmul", "muon.vector"]
 OP_JOIN, OP_SPAWN, OP_DMA, OP_MATMUL, OP_VECTOR = range(5)
@@ -40,6 +40,7 @@ KINDS = ["none", "router", "qkv", "attn", "wo", "ffn_gate", "ffn_up", "ffn_down"
          "dma_w", "dma_act", "join"]
 MATMUL_KINDS = ["qkv", "attn", "wo", "ffn_gate", "ffn_up", "ffn_down"]
 MSG = {name: i for i, name in enumerate(raw.MESSAGE_KINDS)}
+PENDING, VERSIONS, INBOUND_REFS, INBOUND_INVOKES, OUTBOUND_DEPS, OUTBOUND_INVOKES = range(6)
 
 C_INVOKE, C_STORE, C_RESOLVE, C_COMPLETE = 8, 4, 2, 4
 MSG_BYTES, INVOKE_MSG_BYTES = 64, 128
@@ -135,6 +136,14 @@ class Recorder:
         self.charges: list[tuple] = []   # start, amount, span, cycles, task key|-1, rid, dir, msg
         self.chunks: list[tuple] = []    # task key, index, start, end, culprit, queue_culprit
         self.marks: list[tuple] = []     # time, name id, nu|None
+        # Neutrino table entries (trace-raw 4.7): start, end|None, base, len, task key|-1,
+        # version|None, nu, peer|None, table, flags
+        self.entries: list[tuple] = []
+        # pending keys whose end is the producer's invoke: start, producer, base, version,
+        # nu, peer|None, flags
+        self.pending: list[tuple] = []
+        # versions: (nu, base) -> [start, len, task key, last version]
+        self.versions: dict[tuple[int, int], list] = {}
         self.strings: list[str] = []
         self._string_id: dict[str, int] = {}
 
@@ -338,6 +347,7 @@ class Engine:
             self.hold(rid, k, start + dur)
             prev = (start, start + dur)
             first = first or prev
+            self.last_hop_start = start
             intervals.append(prev)
             held.append(k)
             t = start + dur + lat
@@ -351,6 +361,7 @@ class Engine:
                 charges.append((s, nbytes, span, span, -1, rid, raw.DIR_WRITE, msg))
             else:
                 charges.append((s, nbytes, span, k * span, -1, rid, raw.DIR_WRITE, msg))
+        self.first_hop_end = first[1]
         return first[0], t
 
     # -- task life cycle ----------------------------------------------------------------
@@ -363,6 +374,14 @@ class Engine:
     def invoke(self, t: int, task: Task) -> None:
         """Entry into the scoreboard of `task.nu`."""
         task.invoke = t
+        if task.version is not None:
+            # The versions table: one entry per base; later invokes update its counter.
+            entry = self.rec.versions.get((task.nu, task.dst_base))
+            if entry is None:
+                self.rec.versions[(task.nu, task.dst_base)] = [t, task.dst_len, task.key,
+                                                               task.version]
+            else:
+                entry[3] = task.version
         if task.version is None:
             prev = self.last_writer.get((task.nu, task.dst_base))
             if prev is not None and prev.retire is None:
@@ -379,25 +398,46 @@ class Engine:
             elif dep.producer is None or dep.producer.complete is not None:
                 self.at(t, self.resolve, dep)
             else:
+                if dep.producer.invoke is None:
+                    # A key named before its producer was invoked: pending (dependency).
+                    p = dep.producer
+                    self.rec.pending.append((t, p, p.dst_base, p.version if dep.versioned else None,
+                                             task.nu, None, 0))
                 dep.producer.waiters.append(
                     lambda tc, dep=dep: self.at(tc + C_RESOLVE, self.resolve, dep))
         if not task.deps:
             self.at(t, self.task_ready, task)
 
     def send_await(self, t: int, dep: Dep) -> None:
-        """Remote dependency: Await to the owner, AwaitAck back, Resolve on completion."""
+        """Remote dependency: Await to the owner, AwaitAck back, Resolve on completion.
+        Entries: outbound_deps at the requester from the open (the consumer's invoke) to
+        the AwaitAck (done) or Resolve arrival; inbound_refs at the owner for an Await that
+        finds the key not done, until the completion; pending at the owner when the
+        producer is not invoked yet."""
         consumer = dep.consumer.nu
+        producer = dep.producer
+        base = producer.dst_base if producer is not None else dep.consumer.dst_base
+        version = producer.version if producer is not None and dep.versioned else None
+        key = dep.consumer.key
+        rec = self.rec
         _, arrival = self.send(consumer, dep.owner, "Await", MSG_BYTES, t)
 
         def at_owner(ta: int) -> None:
-            producer = dep.producer
+            if producer is not None and producer.invoke is None:
+                rec.pending.append((ta, producer, base, version, dep.owner, consumer, 2))
             _, back = self.send(dep.owner, consumer, "AwaitAck", MSG_BYTES, ta)
             if producer is None or producer.complete is not None:
+                rec.entries.append((t, back, base, 0, key, version, consumer, dep.owner,
+                                    OUTBOUND_DEPS, 0))
                 self.at(back + C_RESOLVE, self.resolve, dep)
                 return
 
             def on_complete(tc: int) -> None:
                 _, tr = self.send(dep.owner, consumer, "Resolve", MSG_BYTES, tc)
+                rec.entries.append((ta, tc, base, 0, key, version, dep.owner, consumer,
+                                    INBOUND_REFS, 0))
+                rec.entries.append((t, tr, base, 0, key, version, consumer, dep.owner,
+                                    OUTBOUND_DEPS, 1))
                 self.at(tr + C_RESOLVE, self.resolve, dep)
             producer.waiters.append(on_complete)
         self.at(arrival, at_owner)
@@ -500,6 +540,14 @@ class Engine:
                     task.queued = end
                     sent, arrival = self.send(prog.nu, task.nu, "Invoke", INVOKE_MSG_BYTES, end)
                     task.sent = sent
+                    # outbound_invokes at the requester: c_invoke's end to the end of the
+                    # first hop; inbound_invokes at the owner: the last hop to the invoke.
+                    self.rec.entries.append((end, self.first_hop_end, task.dst_base,
+                                             task.dst_len, task.key, None, prog.nu, task.nu,
+                                             OUTBOUND_INVOKES, 0))
+                    self.rec.entries.append((self.last_hop_start, arrival, task.dst_base,
+                                             task.dst_len, task.key, task.version, task.nu,
+                                             prog.nu, INBOUND_INVOKES, 0))
                     self.at(arrival, self.invoke, task)
                 self.at(end, self.advance, prog)
                 return
@@ -585,24 +633,24 @@ class Workload:
         gpc_programs: list[Program] = []
         sm_tasks: dict[tuple[int, int], dict] = {}
         sm_programs = {}
-        for g in range(GPCS):
-            for s in range(SMS_PER_GPC):
+        for g in range(self.topo.gpcs):
+            for s in range(self.topo.sms):
                 sm_programs[(g, s)] = Program(self.nid(f"root.gpc{g}.sm{s}"), "sm_loop", [],
                                               None)
                 sm_tasks[(g, s)] = {"vec": [], "out": []}
         # Tasks are created SM-major per iteration so that cross-SM references exist.
         for i in range(self.iterations):
-            for g in range(GPCS):
-                for s in range(SMS_PER_GPC):
+            for g in range(self.topo.gpcs):
+                for s in range(self.topo.sms):
                     self.iteration(g, s, i, sm_programs[(g, s)], sm_tasks)
-        for g in range(GPCS):
-            for s in range(SMS_PER_GPC):
+        for g in range(self.topo.gpcs):
+            for s in range(self.topo.sms):
                 self.finish_sm(g, s, sm_programs[(g, s)], sm_tasks[(g, s)])
-        for g in range(GPCS):
+        for g in range(self.topo.gpcs):
             gpc = self.nid(f"root.gpc{g}")
             prog = Program(gpc, "gpc_stage", [], None)
             spawns = [self.spawn_task(gpc, sm_programs[(g, s)], s)
-                      for s in range(SMS_PER_GPC)]
+                      for s in range(self.topo.sms)]
             prog.actions += [("invoke", sp) for sp in spawns]
             join = self.join_task(gpc, [(sp, gpc) for sp in spawns],
                                   make_label("join", 0, 0, 8 + g, 0), 1)
@@ -618,7 +666,7 @@ class Workload:
         return prog
 
     def spawn_task(self, nu: int, child: Program, idx: int) -> Task:
-        base = own_base(None, None) if nu == 0 else self.base_of(nu)
+        base = own_base(None, None, self.topo.sm_bits) if nu == 0 else self.base_of(nu)
         task = self.eng.new_task(nu=nu, src_nu=nu, pe=None, opcode=OP_SPAWN, version=None,
                                  label=None, dst_base=base + 0x1F0000000 + 0x1000 + idx * 512,
                                  dst_len=512, child=child)
@@ -629,7 +677,7 @@ class Workload:
         path = self.topo.nodes[nu]["path"].split(".")
         g = int(path[1][3:]) if len(path) > 1 else None
         s = int(path[2][2:]) if len(path) > 2 else None
-        return own_base(g, s)
+        return own_base(g, s, self.topo.sm_bits)
 
     def join_task(self, nu: int, producers: list[tuple[Task | None, int]], label: int,
                   slot: int) -> Task:
@@ -646,8 +694,8 @@ class Workload:
         eng, rng = self.eng, self.rng
         G, S = f"root.gpc{g}", f"root.gpc{g}.sm{s}"
         nu, gnu = self.nid(S), self.nid(G)
-        base, gbase = own_base(g, s), own_base(g, None)
-        unit = g * SMS_PER_GPC + s
+        base, gbase = own_base(g, s, self.topo.sm_bits), own_base(g, None, self.topo.sm_bits)
+        unit = g * self.topo.sms + s
         layer = i // MARK_EVERY
         buf = i % 2
         mine = sm_tasks[(g, s)]
@@ -677,7 +725,7 @@ class Workload:
 
         a_bytes = self.jitter(32 * 1024)
         a_base = base + 0x60000 + buf * 0x10000
-        neighbor = (s + SMS_PER_GPC - 1) % SMS_PER_GPC
+        neighbor = (s + self.topo.sms - 1) % self.topo.sms
         from_neighbor = i > 0 and i % NEIGHBOR_EVERY == 0
         if from_neighbor:
             N = f"{G}.sm{neighbor}"
@@ -761,7 +809,7 @@ class Workload:
         nu = prog.nu
         gnu = self.nid(f"root.gpc{g}")
         producers = [(t, gnu) for t in mine["out"][-4:]] + [(mine["vec"][-1], nu)]
-        join = self.join_task(nu, producers, make_label("join", 1, 0, g * SMS_PER_GPC + s, 0), 5)
+        join = self.join_task(nu, producers, make_label("join", 1, 0, g * self.topo.sms + s, 0), 5)
         prog.actions += [("invoke", join), ("wait", join), ("send", gnu, "VersionReset")]
 
 
@@ -873,8 +921,32 @@ def collect(eng: Engine, params: dict, wall: float) -> tuple[Dump, dict]:
     m_rec["name"] = [m[1] for m in rec.marks]
     m_rec["nu"] = nullable([m[2] for m in rec.marks], NULL16, "u2")
 
+    entries = list(rec.entries)
+    for start, producer, base, version, nu, peer, flags in rec.pending:
+        end = producer.invoke
+        entries.append((start, end, base, 0, producer.key if end is not None else -1, version, nu,
+                        peer, PENDING, flags))
+    for (nu, base), (start, length, key, version) in rec.versions.items():
+        entries.append((start, None, base, length, key, version, nu, None, VERSIONS, 0))
+    e_rec = np.zeros(len(entries), dtype=raw.record_dtype(raw.LAYOUTS["entries"]))
+    if entries:
+        cols = list(zip(*entries, strict=True))
+        e_rec["start"] = cols[0]
+        e_rec["end"] = nullable(list(cols[1]), NULL64, "u8")
+        e_rec["base"] = cols[2]
+        e_rec["len"] = cols[3]
+        e_rec["gid"] = gid_of[np.array(cols[4], dtype=np.int64)]
+        e_rec["version"] = nullable(list(cols[5]), NULL32, "u4")
+        e_rec["nu"] = cols[6]
+        e_rec["peer"] = nullable(list(cols[7]), NULL16, "u2")
+        e_rec["table"] = cols[8]
+        e_rec["flags"] = cols[9]
+    # Written when the entry leaves its table (open entries at the end of the run).
+    write_time = np.where(e_rec["end"] == NULL64, end_time, e_rec["end"])
+    e_rec = e_rec[np.argsort(write_time, kind="stable")]
+
     records = {"tasks": t_rec, "chunks": c_rec, "deps": d_rec, "charges": g_rec,
-               "programs": p_rec, "marks": m_rec}
+               "programs": p_rec, "marks": m_rec, "entries": e_rec}
     manifest = make_manifest(topo, params)
     summary = make_summary(end_time, eng.events, wall, records)
     busy = np.bincount(g_rec["resource"], weights=g_rec["cycles"], minlength=len(topo.resources))
@@ -914,11 +986,11 @@ def make_summary(end_time: int, events: int, wall: float, records: dict) -> dict
             "fatal": None, "phases": phases}
 
 
-def generate(tasks: int, seed: int) -> tuple[Dump, dict]:
+def generate(tasks: int, seed: int, gpcs: int = 2, sms: int = 4) -> tuple[Dump, dict]:
     """Runs the toy workload sized to about `tasks` tasks."""
     t0 = time.perf_counter()
-    eng = Engine(build())
-    iterations = max(1, round(tasks / (GPCS * SMS_PER_GPC * TASKS_PER_ITERATION)))
+    eng = Engine(build(gpcs, sms))
+    iterations = max(1, round(tasks / (gpcs * sms * TASKS_PER_ITERATION)))
     root = Workload(eng, iterations, seed).build()
     eng.at(0, eng.program_start, root)
     eng.run()
@@ -973,8 +1045,12 @@ def partial(dump: Dump, paths: list[str], window: tuple[int, int],
     mk = r["marks"]
     mark_nu_ok = np.where(mk["nu"] == NULL16, True, in_tree[np.minimum(mk["nu"], len(in_tree) - 1)])
     mark_keep = mark_nu_ok & (mk["time"] >= lo) & (mk["time"] < hi)
+    e = r["entries"]
+    e_end = np.where(e["end"] == NULL64, end_time, e["end"])
+    entry_keep = in_tree[e["nu"]] & overlaps(e["start"], np.maximum(e_end, e["start"] + 1), lo, hi)
     kept = {"tasks": t[task_keep], "chunks": c[chunk_keep], "deps": d[dep_keep],
-            "charges": g[charge_keep], "programs": p[prog_keep], "marks": mk[mark_keep]}
+            "charges": g[charge_keep], "programs": p[prog_keep], "marks": mk[mark_keep],
+            "entries": e[entry_keep]}
     records = [name for name in raw.RECORD_FILES
                if name in types or (name == "charges" and "messages" in types)]
     kept = {name: a for name, a in kept.items() if name in records}
@@ -997,6 +1073,7 @@ def crashed(dump: Dump, fraction: float) -> Dump:
         "charges": r["charges"][r["charges"]["start"] < cut],
         "programs": p[(p["end"] != NULL64) & (p["end"] < cut)],
         "marks": r["marks"][r["marks"]["time"] < cut],
+        "entries": r["entries"][(r["entries"]["end"] != NULL64) & (r["entries"]["end"] < cut)],
     }
     truncate = {"tasks": 50, "charges": 13}
     return Dump(dump.manifest, None, dump.strings, kept, truncate)
@@ -1020,7 +1097,7 @@ def write_suite(out: Path) -> None:
     small.write(out / "small-zstd", compress=True)
     end = small.summary["end_time"]
     partial(small, ["root.gpc0.sm1"], (end // 3, 2 * end // 3),
-            ["tasks", "chunks", "deps", "charges", "messages", "programs"]).write(
+            ["tasks", "chunks", "deps", "charges", "messages", "programs", "entries"]).write(
                 out / "partial", False)
     crashed(small, 0.6).write(out / "crashed", compress=False)
 
@@ -1041,13 +1118,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--zstd", action="store_true", help="compress the binary files")
     ap.add_argument("--stats", type=Path, help="also write a --stats-like JSON here")
+    ap.add_argument("--gpcs", type=int, default=2, help="gpcs (a 2p-like variant if not 2)")
+    ap.add_argument("--sms", type=int, default=4, help="SMs per gpc")
     ap.add_argument("--suite", action="store_true",
                     help="write tiny, small, medium, partial, crashed, small-zstd into OUT")
     args = ap.parse_args(argv)
     if args.suite:
         write_suite(args.out)
         return
-    dump, stats = timed(args.out.name, lambda: generate(args.tasks, args.seed))
+    dump, stats = timed(args.out.name, lambda: generate(args.tasks, args.seed, args.gpcs, args.sms))
     dump.write(args.out, args.zstd)
     if args.stats:
         args.stats.write_text(json.dumps(stats, indent=1))

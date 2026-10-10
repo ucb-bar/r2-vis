@@ -1,212 +1,300 @@
-import { useEffect, useMemo, useState } from 'react'
-import { isDict } from '../data/columns'
-import { taskLabel } from '../data/labels'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
 import type { ViewStore } from '../state/viewstore'
-import { recorded } from '../timeline/rows'
+import { onThemeChange, readTheme, type Theme } from '../theme/theme'
+import { rgba } from '../timeline/raster'
+import { Sidebar } from '../ui/Sidebar'
 import { ControlIndex } from './index'
+import { NodePanel } from './NodePanel'
+import { ControlData, TABLES, type Metric, type Statistic } from './pressure'
+import { NeutrinoTree, type TreeNode } from './tree'
 
 interface Props {
   trace: Trace
   store: ViewStore
+  pool: WorkerPool
 }
-
-/** Rows shown per table before "show all". */
-const ROW_LIMIT = 100
-
-const OTHER_TABLES = [
-  ['pending', 'cap_pending'], ['versions', 'cap_versions'], ['inbound refs', 'cap_inbound_refs'],
-  ['inbound invokes', 'cap_inbound_invokes'], ['outbound deps', 'cap_outbound_deps'],
-  ['outbound invokes', 'cap_outbound_invokes'],
-] as const
 
 declare global {
-  interface Window { __r2control?: ControlIndex }
+  interface Window { __r2control?: ControlIndex; __r2controlData?: ControlData; __r2tree?: NeutrinoTree; __r2controlDraw?: { ms: number[] } }
 }
 
-/** The control instant view: per Neutrino of the block selection, its scoreboard and its
- * execution table at the cursor time (the pinned time, or the last cursor position). A
- * click on a task or a producer shows it in the timeline. */
-export function ControlView({ trace, store }: Props) {
-  const rec = useMemo(() => recorded(trace), [trace])
-  const index = useMemo(() => {
-    const t0 = performance.now()
-    const ix = new ControlIndex(trace)
-    ix.buildMs = performance.now() - t0
-    return ix
-  }, [trace])
-  const [t, setT] = useState<{ t: number; pinned: boolean } | null>(store.cursor.get())
-  const [checked, setChecked] = useState(store.blocks.get())
-  const [kind, setKind] = useState<number>(-1)
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+const METRICS: { value: string; label: string; metric: Metric }[] = [
+  { value: 'worst:all', label: 'worst of all tables', metric: { kind: 'worst', group: 'all' } },
+  { value: 'average:all', label: 'average of all tables', metric: { kind: 'average', group: 'all' } },
+  { value: 'worst:lifetime', label: 'worst of the task lifetime tables', metric: { kind: 'worst', group: 'lifetime' } },
+  { value: 'average:lifetime', label: 'average of the task lifetime tables', metric: { kind: 'average', group: 'lifetime' } },
+  { value: 'worst:remote', label: 'worst of the remote protocol tables', metric: { kind: 'worst', group: 'remote' } },
+  { value: 'average:remote', label: 'average of the remote protocol tables', metric: { kind: 'average', group: 'remote' } },
+  ...TABLES.map((t) => ({ value: `t:${t.id}`, label: t.name, metric: { kind: 'table', table: t.id } as Metric })),
+]
+const STATS: { value: Statistic; label: string }[] = [
+  { value: 'at', label: 'at the cursor' }, { value: 'average', label: 'range average' }, { value: 'peak', label: 'range peak' },
+]
+
+/** The control instant view (views-design 6.3): the Neutrinos as a force-directed tree,
+ * each filled by the pressure (occupancy / capacity) of a selected metric; a click selects
+ * a Neutrino and the sidebar lists its tables and their items. */
+export function ControlView({ trace, store, pool }: Props) {
+  const host = useRef<HTMLDivElement>(null)
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const index = useMemo(() => new ControlIndex(trace), [trace])
+  const data = useMemo(() => new ControlData(trace), [trace])
+  const tree = useMemo(() => new NeutrinoTree(trace), [trace])
+  const [ready, setReady] = useState(false)
+  const [metricKey, setMetricKey] = useState('worst:all')
+  const [stat, setStat] = useState<Statistic>('at')
+  const [selected, setSelected] = useState<number | null>(null)
+  const [time, setTime] = useState<{ t: number; pinned: boolean } | null>(store.cursor.get())
+  const [range, setRange] = useState(() => rangeOf(store, trace))
+  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null)
+  const state = useRef({ metric: METRICS[0].metric, stat: 'at' as Statistic, selected: null as number | null, t: 0, range })
+  const redraw = useRef<() => void>(() => {})
+
+  const metric = METRICS.find((m) => m.value === metricKey)?.metric ?? METRICS[0].metric
+  const t = time?.t ?? range.a
+  // The sidebar's lists follow the cursor at a lower priority than the tree.
+  const panelT = useDeferredValue(t)
+  state.current = { metric, stat, selected, t, range }
+  useEffect(() => { redraw.current() })
 
   useEffect(() => {
     window.__r2control = index
+    window.__r2controlData = data
+    window.__r2tree = tree
+    let alive = true
+    data.load(pool).then(() => { if (alive) setReady(true) })
     let frame = 0
     let next = store.cursor.get()
-    const offCursor = store.cursor.subscribe((c) => {
-      if (!c) return  // keep the last time: the pointer leaves the timeline to get here
-      next = c
-      if (!frame) frame = requestAnimationFrame(() => { frame = 0; setT(next) })
-    })
-    const offBlocks = store.blocks.subscribe(setChecked)
-    return () => { offCursor(); offBlocks(); if (frame) cancelAnimationFrame(frame) }
-  }, [store, index])
+    const offs = [
+      store.cursor.subscribe((c) => {
+        if (!c) return  // keep the last time: the pointer leaves the timeline to get here
+        next = c
+        if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTime(next) })
+      }),
+      store.range.subscribe(() => setRange(rangeOf(store, trace))),
+      store.window.subscribe(() => { if (!store.range.get()) setRange(rangeOf(store, trace)) }),
+    ]
+    return () => { alive = false; offs.forEach((off) => off()); if (frame) cancelAnimationFrame(frame); tree.stop() }
+  }, [store, trace, data, index, tree, pool])
 
-  const c = trace.facts.tasks.cols
-  const gid = c.gid as Int32Array
-  const kindCol = c.kind && isDict(c.kind) ? c.kind : null
-  const kinds = kindCol?.dict ?? []
-  const nodes = trace.dims.nodes.filter((n) => checked.has(n.id as number))
+  useEffect(() => {
+    const el = host.current as HTMLDivElement
+    const cv = canvas.current as HTMLCanvasElement
+    const ctx = cv.getContext('2d', { alpha: false }) as CanvasRenderingContext2D
+    let theme = readTheme()
+    let dpr = window.devicePixelRatio || 1
+    let w = 1
+    let h = 1
+    let frame = 0
+    let hovered: TreeNode | null = null
+    const stats = { ms: [] as number[] }
+    window.__r2controlDraw = stats
+    // Layout units -> CSS px: fit the tree's bounding box (computed once, kept while dragging).
+    let fit = { s: 1, ox: 0, oy: 0 }
+    const refit = () => {
+      const xs = tree.nodes.map((n) => n.x)
+      const ys = tree.nodes.map((n) => n.y)
+      const pad = 40
+      const bw = Math.max(1, Math.max(...xs) - Math.min(...xs))
+      const bh = Math.max(1, Math.max(...ys) - Math.min(...ys))
+      const s = Math.min((w - 2 * pad) / bw, (h - 2 * pad) / bh, 2)
+      fit = { s, ox: w / 2 - s * (Math.min(...xs) + bw / 2), oy: h / 2 - s * (Math.min(...ys) + bh / 2) }
+    }
+    const X = (x: number) => fit.ox + fit.s * x
+    const Y = (y: number) => fit.oy + fit.s * y
+    const r = () => Math.max(5, Math.min(16, tree.radius * fit.s))
+    const draw = () => {
+      frame = 0
+      const t0 = performance.now()
+      const { metric: m, stat: st, selected: sel, t: tt, range: rg } = state.current
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.fillStyle = theme.surface
+      ctx.fillRect(0, 0, w, h)
+      ctx.strokeStyle = theme.axis
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      for (const l of tree.links) {
+        ctx.moveTo(X(l.source.x), Y(l.source.y))
+        ctx.lineTo(X(l.target.x), Y(l.target.y))
+      }
+      ctx.stroke()
+      const rad = r()
+      ctx.font = `${theme.fontSizeXs}px ${theme.fontSans}`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'top'
+      for (const n of tree.nodes) {
+        const v = data.ready ? data.heat(n.id, m, st, tt, rg.a, rg.b) : null
+        const x = X(n.x)
+        const y = Y(n.y)
+        ctx.beginPath()
+        ctx.arc(x, y, rad, 0, 2 * Math.PI)
+        ctx.fillStyle = v === null ? theme.grid : heatColor(theme, v)
+        ctx.fill()
+        ctx.lineWidth = n.id === sel ? 3 : n === hovered ? 2 : 1
+        ctx.strokeStyle = n.id === sel ? theme.accent : n === hovered ? theme.ink : theme.axis
+        if (v === null) ctx.setLineDash([2, 2])
+        ctx.stroke()
+        ctx.setLineDash([])
+        if (n.depth <= 1 || rad >= 10) {
+          ctx.fillStyle = theme.inkSecondary
+          ctx.fillText(n.name, x, y + rad + 2)
+        }
+      }
+      stats.ms.push(performance.now() - t0)
+      if (stats.ms.length > 2000) stats.ms.splice(0, 1000)
+    }
+    const request = () => { if (!frame) frame = requestAnimationFrame(draw) }
+    redraw.current = request
+    const resize = () => {
+      if (el.clientWidth === 0 || el.clientHeight === 0) return
+      dpr = window.devicePixelRatio || 1
+      w = el.clientWidth
+      h = el.clientHeight
+      cv.width = Math.round(w * dpr)
+      cv.height = Math.round(h * dpr)
+      cv.style.width = `${w}px`
+      cv.style.height = `${h}px`
+      refit()
+      request()
+    }
+    const ro = new ResizeObserver(resize)
+    ro.observe(el)
+    resize()
+    const offTheme = onThemeChange(() => { theme = readTheme(); request() })
+    const pos = (e: MouseEvent) => {
+      const b = cv.getBoundingClientRect()
+      return { x: e.clientX - b.left, y: e.clientY - b.top }
+    }
+    const nodeAt = (x: number, y: number): TreeNode | null => {
+      let best: TreeNode | null = null
+      let bestD = r() + 3
+      for (const n of tree.nodes) {
+        const d = Math.hypot(X(n.x) - x, Y(n.y) - y)
+        if (d < bestD) { best = n; bestD = d }
+      }
+      return best
+    }
+    let drag: { node: TreeNode; x0: number; y0: number; moved: boolean } | null = null
+    const onDown = (e: PointerEvent) => {
+      const { x, y } = pos(e)
+      const n = nodeAt(x, y)
+      if (!n || e.button !== 0) return
+      drag = { node: n, x0: x, y0: y, moved: false }
+      cv.setPointerCapture(e.pointerId)
+    }
+    const onMove = (e: PointerEvent) => {
+      const { x, y } = pos(e)
+      if (drag) {
+        if (!drag.moved && Math.hypot(x - drag.x0, y - drag.y0) <= 3) return
+        drag.moved = true
+        tree.drag(drag.node, (x - fit.ox) / fit.s, (y - fit.oy) / fit.s, request)
+        setTip(null)
+        return
+      }
+      const n = nodeAt(x, y)
+      if (n !== hovered) { hovered = n; request() }
+      if (!n) { setTip(null); return }
+      const { metric: m, stat: st, t: tt, range: rg } = state.current
+      const v = data.ready ? data.heat(n.id, m, st, tt, rg.a, rg.b) : null
+      setTip({ x, y, text: `${n.path} · ${v === null ? 'no recorded table with a capacity' : `${(100 * v).toFixed(1)} %`}` })
+      cv.style.cursor = 'pointer'
+    }
+    const onUp = (e: PointerEvent) => {
+      const d = drag
+      drag = null
+      if (!d) return
+      if (d.moved) tree.release(d.node)
+      else setSelected((s) => (s === d.node.id ? null : d.node.id))
+      void e
+      request()
+    }
+    const onLeave = () => { hovered = null; setTip(null); request() }
+    // A trackpad pinch (ctrl+wheel) over the tree must not zoom the page.
+    const onWheel = (e: WheelEvent) => { if (e.ctrlKey) e.preventDefault() }
+    cv.addEventListener('wheel', onWheel, { passive: false })
+    cv.addEventListener('pointerdown', onDown)
+    cv.addEventListener('pointermove', onMove)
+    cv.addEventListener('pointerup', onUp)
+    cv.addEventListener('pointercancel', onUp)
+    cv.addEventListener('mouseleave', onLeave)
+    return () => {
+      ro.disconnect()
+      offTheme()
+      cv.removeEventListener('pointerdown', onDown)
+      cv.removeEventListener('pointermove', onMove)
+      cv.removeEventListener('pointerup', onUp)
+      cv.removeEventListener('pointercancel', onUp)
+      cv.removeEventListener('mouseleave', onLeave)
+      cv.removeEventListener('wheel', onWheel)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [tree, data])
+
   const fmt = (v: number) => Math.round(v).toLocaleString('en-US')
-  const label = (task: number) => taskLabel(trace, task) ?? `task ${gid[task]}`
-  const keep = (task: number) => kind < 0 || (kindCol !== null && kindCol.codes[task] === kind)
-  const reveal = (task: number) => store.reveal.set(task)
-  const toggle = (key: string) => {
-    const next = new Set(expanded)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    setExpanded(next)
-  }
-  const limit = <T,>(key: string, rows: T[]) => (expanded.has(key) ? rows : rows.slice(0, ROW_LIMIT))
-  const more = (key: string, n: number) => n > ROW_LIMIT && (
-    <button className="button small" onClick={() => toggle(key)}>
-      {expanded.has(key) ? 'show fewer' : `show all ${n}`}
-    </button>
-  )
-  const cap = (node: Record<string, unknown>, col: string) => {
-    const v = node[col]
-    return typeof v === 'number' ? v : null
-  }
-  const ofCap = (n: number, capacity: number | null) => (capacity === null ? `${n}` : `${n} of ${capacity}`)
-
+  const theme = readTheme()
   return (
-    <div className="control">
-      <div className="control-head">
-        <span className="instant-active">
-          {t ? `t = ${fmt(t.t)} cycles${t.pinned ? ' (pinned)' : ' (last cursor position; Alt+click in the timeline pins a time)'}`
-            : 'Move the pointer over the timeline, or pin a time with Alt+click.'}
-        </span>
-        <span className="spacer" />
-        {kinds.length > 0 && (
+    <div className="control2">
+      <div className="control2-main">
+        <div className="control-head">
           <label className="tool">
-            kind
-            <select value={kind} onChange={(e) => setKind(Number(e.target.value))}>
-              <option value={-1}>all</option>
-              {kinds.map((k, i) => <option key={k} value={i}>{k}</option>)}
+            fill
+            <select value={metricKey} onChange={(e) => setMetricKey(e.target.value)}>
+              <optgroup label="aggregates">
+                {METRICS.slice(0, 6).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </optgroup>
+              <optgroup label="one table">
+                {METRICS.slice(6).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </optgroup>
             </select>
           </label>
-        )}
+          <select value={stat} onChange={(e) => setStat(e.target.value as Statistic)}>
+            {STATS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+          <span className="heat-legend">
+            0 %<span className="ramp heat-ramp" style={{ background: `linear-gradient(90deg, ${theme.seq.join(', ')})` }} />100 %
+            <span className="swatch heat-none" /> not recorded or no capacity
+          </span>
+          <span className="spacer" />
+          <span className="instant-active">
+            {stat === 'at'
+              ? time ? `t = ${fmt(t)}${time.pinned ? ' (pinned)' : ' (last cursor position)'}` : `t = ${fmt(t)} (no cursor yet: the range start)`
+              : `range [${fmt(range.a)}, ${fmt(range.b)})`}
+            {!ready && ' · loading the tables…'}
+            {ready && !data.hasEntries && ' · no entries in this trace: 6 of 8 tables not recorded'}
+          </span>
+        </div>
+        <div className="control-tree" ref={host}>
+          <canvas ref={canvas} />
+          {tip && <div className="tooltip" style={{ left: tip.x + 14, top: tip.y + 14 }}>{tip.text}</div>}
+        </div>
       </div>
-      <div className="control-body">
-        {nodes.length === 0 && <div className="instant-note">No blocks are in the timeline. Add blocks in the Blocks panel or the block diagram.</div>}
-        {t && nodes.map((n) => {
-          const id = n.id as number
-          const tables = index.at(id, t.t)
-          const sb = tables.scoreboard.filter(keep)
-          const ex = tables.execution.filter(keep)
-          const executing = ex.filter((i) => !((c.complete as Float64Array)[i] <= t.t))
-          const sbKey = `s${id}`
-          const exKey = `e${id}`
-          const capSb = cap(n, 'cap_scoreboard')
-          const capEx = cap(n, 'cap_execution')
-          const w = rec.window
-          const missing = !rec.tasks ? 'tasks are not recorded in this dump'
-            : !rec.inTree[id] ? 'not recorded in this dump (outside the recorded blocks)'
-              : w && (t.t < w[0] || t.t >= w[1]) ? `t is outside the recorded window [${fmt(w[0])}, ${fmt(w[1])})` : null
-          if (missing) {
-            return (
-              <div key={id} className="control-empty">
-                <strong>{String(n.path)}</strong><span className="muted"> · {missing}</span>
-              </div>
-            )
-          }
-          if (sb.length === 0 && ex.length === 0) {
-            return (
-              <div key={id} className="control-empty">
-                <strong>{String(n.path)}</strong>
-                <span className="muted"> · scoreboard {ofCap(0, capSb)} · execution table {ofCap(0, capEx)}</span>
-              </div>
-            )
-          }
-          return (
-            <section key={id} className="control-node">
-              <h3>{String(n.path)}</h3>
-              <div className="control-table">
-                <div className="control-title">
-                  Scoreboard <span className="count">{ofCap(sb.length, capSb)}</span>
-                  {kind >= 0 && <span className="muted"> ({tables.scoreboard.length} of all kinds)</span>}
-                </div>
-                {sb.length > 0 && (
-                  <table>
-                    <thead><tr><th>label</th><th>gid</th><th>version</th><th>waiting</th><th>deps left</th><th>producers (* remote)</th></tr></thead>
-                    <tbody>
-                      {limit(sbKey, sb).map((task) => {
-                        const deps = index.pendingDeps(task, t.t)
-                        const version = (c.version as Int32Array)[task]
-                        return (
-                          <tr key={task}>
-                            <td><button className="link" onClick={() => reveal(task)}>{label(task)}</button></td>
-                            <td className="num">{gid[task]}</td>
-                            <td className="num">{version >= 0 ? version : ''}</td>
-                            <td className="num">{fmt(t.t - (c.invoke as Float64Array)[task])}</td>
-                            <td className="num">{deps.length}</td>
-                            <td className="producers">
-                              {deps.slice(0, 8).map((d, k) => {
-                                if (d.producer < 0) return <span key={k} className="muted">store </span>
-                                const row = index.rowOf(d.producer)
-                                return row < 0
-                                  ? <span key={k} className="muted" title="not in the trace">{d.producer} </span>
-                                  : <button key={k} className="link" title={`${label(row)}${d.remote ? ' (remote)' : ''}`}
-                                    onClick={() => reveal(row)}>{d.producer}{d.remote ? '*' : ''}</button>
-                              })}
-                              {deps.length > 8 && <span className="muted">+{deps.length - 8}</span>}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                )}
-                {more(sbKey, sb.length)}
-              </div>
-              <div className="control-table">
-                <div className="control-title">
-                  Execution table <span className="count">{ofCap(ex.length, capEx)}</span>
-                  <span className="muted"> · {executing.length} executing, {ex.length - executing.length} done</span>
-                </div>
-                {ex.length > 0 && (
-                  <table>
-                    <thead><tr><th>label</th><th>gid</th><th>version</th><th>state</th><th>since issue</th></tr></thead>
-                    <tbody>
-                      {limit(exKey, ex).map((task) => {
-                        const version = (c.version as Int32Array)[task]
-                        const done = (c.complete as Float64Array)[task] <= t.t
-                        return (
-                          <tr key={task}>
-                            <td><button className="link" onClick={() => reveal(task)}>{label(task)}</button></td>
-                            <td className="num">{gid[task]}</td>
-                            <td className="num">{version >= 0 ? version : ''}</td>
-                            <td>{done ? 'done' : 'executing'}</td>
-                            <td className="num">{fmt(t.t - (c.issue as Float64Array)[task])}</td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                )}
-                {more(exKey, ex.length)}
-              </div>
-              <div className="control-other muted">
-                Not recorded in trace v1.0: {OTHER_TABLES.map(([name, col]) => {
-                  const v = cap(n, col)
-                  return v === null ? name : `${name} (${v})`
-                }).join(', ')}
-              </div>
-            </section>
-          )
-        })}
-      </div>
+      <Sidebar name="control" width={460}>
+        {selected === null
+          ? <div className="muted">Click a Neutrino to list its tables.</div>
+          : <NodePanel trace={trace} store={store} data={data} index={index} node={selected} t={panelT} range={range} key={ready ? 1 : 0} />}
+      </Sidebar>
     </div>
   )
+}
+
+/** The range for averages and peaks: the selection, else the window; clipped to the run. */
+function rangeOf(store: ViewStore, trace: Trace): { a: number; b: number } {
+  const r = store.range.get() ?? store.window.get()
+  const end = trace.manifest.end_time
+  const a = Math.max(0, Math.min(r.a, end - 1))
+  return { a, b: Math.max(a + 1, Math.min(r.b, end)) }
+}
+
+/** The sequential scale of the theme (seq-0 .. seq-6) at v in [0, 1]. */
+function heatColor(th: Theme, v: number): string {
+  const steps = th.seq
+  const x = Math.max(0, Math.min(1, v)) * (steps.length - 1)
+  const i = Math.min(steps.length - 2, Math.floor(x))
+  const f = x - i
+  const a = rgba(steps[i])
+  const b = rgba(steps[i + 1])
+  const mix = (k: number) => Math.round(a[k] + (b[k] - a[k]) * f)
+  return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`
 }

@@ -6,6 +6,7 @@ import { readFooter, rowGroupRange } from './parquet/footer'
 import { zstdDecoder } from './parquet/zstd'
 import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
+import { buildOccupancy } from './occupancy'
 
 export interface DecodeRequest {
   op: 'decode'
@@ -22,6 +23,7 @@ export type ComputeRequest =
   | { op: 'levels'; id: number; args: Parameters<typeof buildLevels> }
   | { op: 'laneIndex'; id: number; args: Parameters<typeof buildLaneIndex> }
   | { op: 'depsByProducer'; id: number; args: Parameters<typeof buildDepsByProducer> }
+  | { op: 'occupancy'; id: number; args: Parameters<typeof buildOccupancy> }
 
 export interface WorkerReply {
   id: number
@@ -84,6 +86,8 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
       result = buildLevels(...req.args)
     } else if (req.op === 'laneIndex') {
       result = buildLaneIndex(...req.args)
+    } else if (req.op === 'occupancy') {
+      result = buildOccupancy(...req.args)
     } else {
       result = buildDepsByProducer(...req.args)
     }

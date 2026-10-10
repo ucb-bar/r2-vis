@@ -7,6 +7,8 @@ from collections import deque
 import numpy as np
 import pyarrow as pa
 
+from r2t import raw
+
 UNITS = {"TensorOps": "MAC", "VectorOps": "lane-op", "ScalarOps": "instr", "Bandwidth": "B",
          "Slots": "slot"}
 DIRS = ["read", "write", "work"]
@@ -276,4 +278,5 @@ def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
     tabs["message_kinds"] = code_table(m["message_kinds"])
     tabs["dirs"] = code_table(DIRS)
     tabs["dep_states"] = code_table(DEP_STATES)
+    tabs["table_names"] = code_table(raw.ENTRY_TABLES)
     return tabs

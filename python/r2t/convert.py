@@ -26,10 +26,11 @@ from r2t import checks, dims, facts, schema, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 2)
+FORMAT_VERSION = (1, 3)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
-ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288}
+ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288,
+              "entries": 524288}
 
 
 def end_time_of(dump: RawDump) -> int:
@@ -116,6 +117,7 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
     tables["programs"] = facts.programs_table(rec["programs"], dump.strings)
     tables["marks"] = facts.marks_table(rec["marks"], dump.strings)
     tables["phases"] = facts.phases_table(dump.summary)
+    tables["entries"] = facts.entries_table(rec["entries"])
     width = timeline.bin_width(end_time)
     tables["bins"], bin_count = timeline.bins(ch, end_time, width, window)
 

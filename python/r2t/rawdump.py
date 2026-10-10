@@ -53,6 +53,10 @@ def load(raw_dir: Path) -> RawDump:
     dump = RawDump(manifest, summary, strings, {})
     for name in raw.RECORD_FILES:
         layout = manifest.get("records", {}).get(name)
+        if layout is None and name in raw.OPTIONAL_RECORDS:
+            dump.absent.append(name)
+            dump.records[name] = np.zeros(0, dtype=raw.record_dtype(raw.LAYOUTS[name]))
+            continue
         if layout is None:
             raise FormatError(f"manifest.records has no layout for {name}")
         check_layout(name, layout)
@@ -113,7 +117,7 @@ def check_layout(name: str, layout: list[list[str]]) -> None:
     """The manifest layout must start with the Section 4 fields; later fields are allowed."""
     expected = raw.LAYOUTS[name]
     if [list(f) for f in layout[: len(expected)]] != expected:
-        raise FormatError(f"layout of {name} does not match trace-raw v1.2: {layout}")
+        raise FormatError(f"layout of {name} does not match trace-raw v1.3: {layout}")
 
 
 def nullable(records: np.ndarray, name: str) -> tuple[np.ndarray, np.ndarray]:

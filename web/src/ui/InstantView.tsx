@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { ChargeCache } from '../data/charges'
+import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
 import type { ViewStore } from '../state/viewstore'
 import { ControlView } from '../control/ControlView'
+import type { TimelineRenderer } from '../timeline/renderer'
 import { TrafficView } from '../traffic/TrafficView'
+import { TimeStrip } from './TimeStrip'
 
 type Mode = 'traffic' | 'control'
 
@@ -11,11 +14,14 @@ interface Props {
   trace: Trace
   charges: ChargeCache
   store: ViewStore
+  /** the timeline's renderer when the scrubber is shown (not in the docked split) */
+  strip: TimelineRenderer | null
+  pool: WorkerPool
 }
 
 /** The instant views: traffic at the active time range of the shared state
  * (views-design Section 3) and control at the cursor time (Section 4). */
-export function InstantView({ trace, charges, store }: Props) {
+export function InstantView({ trace, charges, store, strip, pool }: Props) {
   const [, setTick] = useState(0)
   const [follow, setFollow] = useState(store.followCursor.get())
   const [mode, setMode] = useState<Mode>('traffic')
@@ -34,6 +40,7 @@ export function InstantView({ trace, charges, store }: Props) {
     : `${active.kind === 'range' ? 'range' : 'time window'} [${n(active.a)}, ${n(active.b)}) · ${n(active.b - active.a)} cycles`
   return (
     <div className="instant">
+      {strip && <TimeStrip store={store} timeline={strip} />}
       <div className="instant-head">
         <div className="segmented" role="tablist">
           {(['traffic', 'control'] as Mode[]).map((m) => (
@@ -54,7 +61,7 @@ export function InstantView({ trace, charges, store }: Props) {
         <TrafficView trace={trace} charges={charges} store={store} />
       </div>
       <div className="instant-main" style={{ display: mode === 'control' ? 'flex' : 'none' }}>
-        <ControlView trace={trace} store={store} />
+        <ControlView trace={trace} store={store} pool={pool} />
       </div>
     </div>
   )
