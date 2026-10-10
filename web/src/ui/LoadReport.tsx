@@ -5,12 +5,14 @@ export function LoadReport({ trace }: { trace: Trace }) {
   const { load } = trace
   return (
     <div className="panel">
-      <h2>
-        Loaded in {Math.round(load.totalMs)} ms with {load.workers} workers (decode{' '}
-        {Math.round(load.decodeMs)} ms, bin levels and lane index {Math.round(load.deriveMs)} ms,
-        worker time {Math.round(load.workerMs)} ms
-        {load.fallbackUnits ? `, ${load.fallbackUnits} row groups through the fallback decoder` : ''})
-      </h2>
+      <table className="report" style={{ marginBottom: 'var(--space-5)' }}>
+        <tbody>
+          {([['total', `${Math.round(load.totalMs)} ms`], ['workers', load.workers], ['decode', `${Math.round(load.decodeMs)} ms`],
+            ['bin levels, lane index', `${Math.round(load.deriveMs)} ms`], ['worker time', `${Math.round(load.workerMs)} ms`],
+            ...(load.fallbackUnits ? [['fallback decoder', `${load.fallbackUnits} row groups`]] : [])] as [string, string | number][])
+            .map(([k, v]) => <tr key={k}><th>{k}</th><td>{v}</td></tr>)}
+        </tbody>
+      </table>
       <table className="report">
         <thead>
           <tr><th>table</th><th>rows</th><th>row groups</th><th>MB</th><th>ready at ms</th></tr>

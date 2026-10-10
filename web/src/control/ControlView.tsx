@@ -254,16 +254,15 @@ export function ControlView({ trace, store, pool }: Props) {
           </select>
           <span className="heat-legend">
             0 %<span className="ramp heat-ramp" style={{ background: `linear-gradient(90deg, ${theme.seq.join(', ')})` }} />100 %
-            <span className="swatch heat-none" /> not recorded or no capacity
+            <span className="swatch heat-none" title="not recorded, or no capacity" /> n/a
           </span>
           <span className="spacer" />
-          <span className="instant-active">
-            {stat === 'at'
-              ? time ? `t = ${fmt(t)}${time.pinned ? ' (pinned)' : ' (last cursor position)'}` : `t = ${fmt(t)} (no cursor yet: the range start)`
-              : `range [${fmt(range.a)}, ${fmt(range.b)})`}
-            {!ready && ' · loading the tables…'}
-            {ready && !data.hasEntries && ' · no entries in this trace: 6 of 8 tables not recorded'}
+          <span className="instant-active" title={stat === 'at' && !time ? 'no cursor yet: the range start' : undefined}>
+            {stat === 'at' ? `t = ${fmt(t)}` : `[${fmt(range.a)}, ${fmt(range.b)})`}
           </span>
+          {stat === 'at' && time?.pinned && <span className="badge">pinned</span>}
+          {!ready && <span className="badge">loading</span>}
+          {ready && !data.hasEntries && <span className="badge" title="no entries in this trace: 6 of 8 tables not recorded">no entries</span>}
         </div>
         <div className="control-tree" ref={host}>
           <canvas ref={canvas} />
@@ -272,7 +271,7 @@ export function ControlView({ trace, store, pool }: Props) {
       </div>
       <Sidebar name="control" width={460}>
         {selected === null
-          ? <div className="muted">Click a Neutrino to list its tables.</div>
+          ? <div className="muted" title="click a Neutrino to list its tables">no Neutrino selected</div>
           : <NodePanel trace={trace} store={store} data={data} index={index} node={selected} t={panelT} range={range} key={ready ? 1 : 0} />}
       </Sidebar>
     </div>

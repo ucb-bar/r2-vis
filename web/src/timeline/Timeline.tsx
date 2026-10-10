@@ -522,15 +522,14 @@ function Legend({ renderer }: { renderer: TimelineRenderer }) {
           {e.names.join(', ')}
         </span>
       ))}
-      <span className="legend-item legend-note">Neutrino tasks: at least a 3 px tick</span>
     </div>
   )
 }
 
 const LINE_FAMILIES: [string, string][] = [
-  ['global-2', 'global fabric (steps by level)'], ['local-0', 'local fabric'],
-  ['control-2', 'control fabric (steps by level)'], ['tensor', 'tensor arrays'],
-  ['vector', 'vector arrays'], ['scalar', 'Neutrino scalar, complete'],
+  ['global-2', 'global fabric'], ['local-0', 'local fabric'],
+  ['control-2', 'control fabric'], ['tensor', 'tensor arrays'],
+  ['vector', 'vector arrays'], ['scalar', 'Neutrino scalar'],
 ]
 
 function LineLegend() {
@@ -541,7 +540,7 @@ function LineLegend() {
           <span className="swatch line" style={{ background: `var(--line-${slot})` }} />{name}
         </span>
       ))}
-      <span className="legend-item legend-note">dotted: 100 % of the ceiling</span>
+      <span className="legend-item"><span className="swatch line dotted" />ceiling</span>
     </div>
   )
 }

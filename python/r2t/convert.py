@@ -26,7 +26,7 @@ from r2t import checks, dims, facts, schema, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 3)
+FORMAT_VERSION = (1, 4)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
 ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288,
@@ -96,7 +96,8 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
                           f"manifest lists {len(m['resources'])} resources")
     # One sorted copy of the charges serves every step; the raw records are dropped first.
     rec["charges"] = None
-    ch, block, block_span = timeline.sort_charges(ch, end_time)
+    lo, hi = timeline.extent(ch, end_time, window)
+    ch, block, block_span = timeline.sort_charges(ch, hi - lo)
 
     lanes_tab, lane_of_node, lane_of_pe = dims.lanes(m)
     tables: dict[str, pa.Table] = {}
@@ -118,8 +119,8 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
     tables["marks"] = facts.marks_table(rec["marks"], dump.strings)
     tables["phases"] = facts.phases_table(dump.summary)
     tables["entries"] = facts.entries_table(rec["entries"])
-    width = timeline.bin_width(end_time)
-    tables["bins"], bin_count = timeline.bins(ch, end_time, width, window)
+    width, origin, bin_count = timeline.bin_grid(lo, hi)
+    tables["bins"] = timeline.bins(ch, width, origin, bin_count, window)
 
     errors = checks.run(dump, gids, ch, stats)
     for name, nbytes in dump.dropped_bytes.items():
@@ -143,14 +144,14 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
                    "dropped_bytes": dump.dropped_bytes, "absent_records": dump.absent},
         "end_time": end_time,
         "label": m.get("label", {}),
-        "bins": {"width": width, "count": bin_count},
+        "bins": {"width": width, "count": bin_count, "origin": origin},
         "charge_block_span": block_span,
         "charge_blocks": blocks,
         "tables": {name: schema.describe(name, rows[name], label_fields)
                    for name in [*tables, "charges"]},
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
-    (out / "views.sql").write_text(views_sql(m.get("label", {}), end_time, width))
+    (out / "views.sql").write_text(views_sql(m.get("label", {}), end_time, width, origin))
     return manifest, errors
 
 

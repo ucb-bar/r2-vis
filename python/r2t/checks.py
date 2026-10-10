@@ -24,6 +24,46 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
     if stats is not None and not dump.partial and dump.complete:
         errors += check_stats(ch, m["resources"], stats)
     errors += check_entries(dump, gids)
+    errors += check_write_channels(m)
+    return errors
+
+
+def read_channel(m: dict, r: dict) -> int | None:
+    """The read channel (or memory port) of a write resource (trace-raw 3.1.2)."""
+    role = r["role"]
+    kind = role["type"]
+    if kind == "link":
+        return m["links"][role["link"]][role["dir"]]
+    if kind == "port":
+        return m["attachments"][role["attachment"]][role["dir"]]
+    if kind == "mem_port":
+        return m["memories"][role["memory"]]["port"]
+    if kind == "bus":
+        return next((x["id"] for x in m["resources"]
+                     if x["role"] == {"type": "bus", "bus": role["bus"]}), None)
+    return None
+
+
+def check_write_channels(m: dict) -> list[str]:
+    """A write channel or write port (raw 1.4, 1.5) has a read channel, the same
+    beat_bytes, and lanes = ceil(rate / beat_bytes)."""
+    errors = []
+    res = m["resources"]
+    for r in res:
+        if not r["role"].get("write"):
+            continue
+        rd = read_channel(m, r)
+        if rd is None:
+            errors.append(f"{r['name']}: write resource without a read channel")
+            continue
+        if r.get("beat_bytes") != res[rd].get("beat_bytes"):
+            errors.append(f"{r['name']}: beat_bytes {r.get('beat_bytes')}, its read channel "
+                          f"{res[rd].get('beat_bytes')}")
+        if r["rate"] is not None and r.get("beat_bytes"):
+            lanes = -(-r["rate"][0] // (r["rate"][1] * r["beat_bytes"]))
+            if r.get("lanes") != lanes:
+                errors.append(f"{r['name']}: lanes {r.get('lanes')}, "
+                              f"rate / beat_bytes gives {lanes}")
     return errors
 
 

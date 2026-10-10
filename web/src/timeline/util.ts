@@ -6,8 +6,9 @@ import type { BinLevels, FabricLevels, LaneIndex } from '../data/derive'
 
 /** Average and peak (largest bin average) per pixel; peak only when a pixel spans more
  * than one bin. */
-export function sampleBins(lv: BinLevels, row: number, t0: number, cpp: number, n: number,
+export function sampleBins(lv: BinLevels, row: number, from: number, cpp: number, n: number,
   avg: Float64Array, peak: Float64Array): boolean {
+  const t0 = from - lv.origin   // times from bin 0
   const W = lv.width
   const count = lv.count
   const pre = lv.prefix
@@ -50,8 +51,9 @@ export function sampleBins(lv: BinLevels, row: number, t0: number, cpp: number, 
  * different ports win different pieces, never fall below it. `arg` gets the port of the
  * piece that adds the most; `peak` the largest level-0 value when a pixel spans more than
  * one bin. */
-export function sampleFabric(fl: FabricLevels, row: number, t0: number, cpp: number, n: number,
+export function sampleFabric(fl: FabricLevels, row: number, from: number, cpp: number, n: number,
   avg: Float64Array, peak: Float64Array, arg: Int32Array | null): boolean {
+  const t0 = from - fl.origin   // times from bin 0
   const W = fl.width
   const count = fl.count
   const levels = fl.avg.length
@@ -244,15 +246,16 @@ export function chargesAmount(groups: ChargeGroup[], resource: number, a: number
 export function rangeAmount(lv: BinLevels, row: number, a: number, b: number,
   edge: (x: number, y: number) => number | null): { amount: number; exact: boolean } {
   const W = lv.width
+  const O = lv.origin   // bin i covers [O + i * W, ...)
   const count = lv.count
   const pre = lv.prefix
   const o = row * (count + 1)
   const at = (bin: number) => pre[o + Math.max(0, Math.min(count, bin))]
-  const binOf = (t: number) => Math.max(0, Math.min(count, Math.floor(t / W)))
+  const binOf = (t: number) => Math.max(0, Math.min(count, Math.floor((t - O) / W)))
   const ia = binOf(a)
   const ib = binOf(b)
   const frac = (bin: number, lo: number, hi: number) => {
-    const bs = bin * W
+    const bs = O + bin * W
     const amt = at(bin + 1) - at(bin)
     return amt * (Math.max(0, Math.min(hi, bs + W) - Math.max(lo, bs)) / W)
   }
@@ -263,14 +266,14 @@ export function rangeAmount(lv: BinLevels, row: number, a: number, b: number,
   }
   let amount = at(ib) - at(ia + 1)  // whole bins (ia, ib)
   let exact = true
-  if (a === ia * W) amount += at(ia + 1) - at(ia)
+  if (a === O + ia * W) amount += at(ia + 1) - at(ia)
   else {
-    const e = edge(a, (ia + 1) * W)
+    const e = edge(a, O + (ia + 1) * W)
     if (e !== null) amount += e
     else { amount += frac(ia, a, b); exact = false }
   }
-  if (b !== ib * W) {
-    const e = edge(ib * W, b)
+  if (b !== O + ib * W) {
+    const e = edge(O + ib * W, b)
     if (e !== null) amount += e
     else { amount += frac(ib, a, b); exact = false }
   }

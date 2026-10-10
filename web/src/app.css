@@ -59,7 +59,7 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .toolbar .spacer { flex: 1; }
 .tool { display: inline-flex; align-items: center; gap: var(--space-3); white-space: nowrap; }
 .tool input[type=range] { width: 120px; accent-color: var(--color-accent); }
-.tool input[type=checkbox] { accent-color: var(--color-accent); margin: 0; }
+.tool input[type=checkbox], .tool input[type=radio] { accent-color: var(--color-accent); margin: 0; }
 .tool-value { min-width: 3.5em; color: var(--color-ink); font-variant-numeric: tabular-nums; }
 .button.small { padding: var(--space-1) var(--space-3); font-size: var(--font-size-s); }
 .button.active { background: var(--color-accent-area); border-color: var(--color-accent); }
@@ -156,6 +156,7 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .traffic-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .traffic-head { display: flex; align-items: center; gap: var(--space-5); padding: var(--space-2) var(--space-5); font-size: var(--font-size-s); border-bottom: var(--border-width) solid var(--color-border); }
 .traffic-head .spacer { flex: 1; }
+.traffic-zoom { width: 180px; accent-color: var(--color-accent); }
 .traffic-head .muted { color: var(--color-ink-muted); }
 .traffic-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 .traffic-body canvas { display: block; position: absolute; left: 0; top: 0; }
@@ -204,7 +205,8 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .sidebar .legend { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
 .sidebar .tool { white-space: normal; }
 .tool-row { display: flex; gap: var(--space-3); flex-wrap: wrap; }
-.legend-note { color: var(--color-ink-muted); }
+.swatch.line.dotted { height: 0; background: none; border-top: 2px dotted var(--color-ink-secondary); }
+.badge { font-size: var(--font-size-xs); padding: 1px var(--space-2); border-radius: 8px; border: var(--border-width) solid var(--color-border); color: var(--color-ink-secondary); white-space: nowrap; }
 .blocks-tree { max-height: 320px; overflow-y: auto; margin: 0 calc(-1 * var(--space-4)); }
 .control2 { display: flex; flex-direction: row; }
 .control2-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }

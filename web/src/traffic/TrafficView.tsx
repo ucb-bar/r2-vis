@@ -29,6 +29,7 @@ interface Prefs {
   scaleByBandwidth: boolean
   animate: boolean
   classes: Record<LinkClass, ClassOptions>
+  channels: 'combined' | 'separate'
 }
 
 const PREFS_KEY = 'r2vis.traffic'
@@ -41,9 +42,10 @@ function loadClasses(saved: Partial<Record<LinkClass, Partial<ClassOptions>>> | 
 function loadPrefs(): Prefs {
   try {
     const p = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '') as Partial<Prefs>
-    return { scaleByBandwidth: p.scaleByBandwidth === true, animate: p.animate !== false, classes: loadClasses(p.classes) }
+    return { scaleByBandwidth: p.scaleByBandwidth === true, animate: p.animate !== false, classes: loadClasses(p.classes),
+      channels: p.channels === 'separate' ? 'separate' : 'combined' }
   } catch {
-    return { scaleByBandwidth: false, animate: true, classes: loadClasses(undefined) }
+    return { scaleByBandwidth: false, animate: true, classes: loadClasses(undefined), channels: 'combined' }
   }
 }
 
@@ -56,8 +58,8 @@ function savePrefs(p: Prefs): void {
 }
 
 /** The traffic view: the fabric at the active time range of the shared state. Wheel
- * scrolls, ctrl+wheel (or pinch) zooms the y axis; levels below about 20 px per row are
- * aggregated per parent. Three stacked canvases: the base and the top layer are drawn on a
+ * scrolls, ctrl+wheel (or pinch) zooms: the zoom picks the deepest level whose packed
+ * drawing fits in the zoom height (deeper levels aggregated per parent). Three stacked canvases: the base and the top layer are drawn on a
  * change; only the pattern layer between them is drawn per animation frame. */
 export function TrafficView({ trace, charges, store }: Props) {
   const host = useRef<HTMLDivElement>(null)
@@ -69,11 +71,13 @@ export function TrafficView({ trace, charges, store }: Props) {
     const p = loadPrefs()
     r.scaleByBandwidth = p.scaleByBandwidth
     r.classes = p.classes
+    r.channels = p.channels
     return r
   })
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
   const [reducedMotion, setReducedMotion] = useState(() => matchMedia('(prefers-reduced-motion: reduce)').matches)
   const [level, setLevel] = useState(renderer.model.depth)
+  const [zoom, setZoom] = useState({ stops: [] as number[], at: 0 })
   const [tip, setTip] = useState<Tip | null>(null)
   const redraw = useRef<() => void>(() => {})
   const animateRef = useRef(prefs.animate && !reducedMotion)
@@ -148,6 +152,11 @@ export function TrafficView({ trace, charges, store }: Props) {
         renderer.drawBase(bctx, dpr)
         renderer.drawAnim(actx, dpr, now(), true)
         setLevel(renderer.level)
+        // The zoom slider: the cuts' stops (computed after the frame; cached per state).
+        setTimeout(() => {
+          const stops = renderer.zoomStops()
+          setZoom({ stops, at: renderer.zoomStop(stops) })
+        }, 0)
         needBase = false
       }
       updateTip()
@@ -200,12 +209,23 @@ export function TrafficView({ trace, charges, store }: Props) {
       else renderer.scrollBy(e.deltaY * scale)
       request()
     }
-    const onMove = (e: MouseEvent) => { hover = pos(e); request(false) }
+    const onMove = (e: MouseEvent) => {
+      hover = pos(e)
+      top.style.cursor = renderer.clickable(hover.x, hover.y) ? 'pointer' : 'default'
+      request(false)
+    }
+    // A click on a closed group splits it; on an open group's name in the gutter merges it.
+    const onClick = (e: MouseEvent) => {
+      const { x, y } = pos(e)
+      if (renderer.clickAt(x, y)) request()
+    }
     const onLeave = () => { hover = null; renderer.hoverKey = null; setTip(null); request(false) }
     top.addEventListener('wheel', onWheel, { passive: false })
     top.addEventListener('mousemove', onMove)
     top.addEventListener('mouseleave', onLeave)
+    top.addEventListener('click', onClick)
     return () => {
+      top.removeEventListener('click', onClick)
       ro.disconnect()
       offs.forEach((off) => off())
       document.removeEventListener('visibilitychange', onVisibility)
@@ -222,22 +242,32 @@ export function TrafficView({ trace, charges, store }: Props) {
     setPrefs((p) => ({ ...p, classes: renderer.classes }))
     redraw.current()
   }
+  const setChannels = (channels: Prefs['channels']) => {
+    renderer.channels = channels
+    setPrefs((p) => ({ ...p, channels }))
+    redraw.current()
+  }
   const setScale = (on: boolean) => {
     renderer.scaleByBandwidth = on
     setPrefs((p) => ({ ...p, scaleByBandwidth: on }))
     redraw.current()
   }
-  const full = level === renderer.model.depth
-  const levelName = full ? 'all levels drawn' : `drawn to depth ${level} of ${renderer.model.depth}, deeper levels aggregated`
+  const undrawn = renderer.model.undrawn
   return (
     <div className="traffic">
       <div className="traffic-main">
         <div className="traffic-head">
-          <span className="muted">{prefs.scaleByBandwidth ? 'width = √ bandwidth' : 'text: utilization · throughput'} · pattern speed = utilization
-            · {levelName}
-            {renderer.rec.window ? ' · loads average over the recorded time window only' : ''}
-            {renderer.model.undrawn.length ? ` · not drawn: ${renderer.model.undrawn.length} links that are caches or join no node to its parent (${renderer.model.undrawn.join(', ')})` : ''}</span>
+          <span className="muted">depth {level} / {renderer.model.depth}</span>
+          {renderer.rec.window && <span className="badge" title="loads average over the recorded time window only">windowed</span>}
+          {undrawn.length > 0 && <span className="badge" title={`not drawn (caches, or links that join no node to its parent): ${undrawn.join(', ')}`}>
+            {undrawn.length} links not drawn</span>}
           <span className="spacer" />
+          {zoom.stops.length > 1 && (
+            <input className="traffic-zoom" type="range" min={0} max={zoom.stops.length - 1} step={1} value={zoom.at}
+              aria-label="zoom" title={`cut ${zoom.at + 1} of ${zoom.stops.length}`} list="traffic-zoom-ticks"
+              onChange={(e) => { renderer.zoomTo(zoom.stops[Number(e.target.value)]); redraw.current() }} />
+          )}
+          <datalist id="traffic-zoom-ticks">{zoom.stops.map((_, i) => <option key={i} value={i} />)}</datalist>
           <button className="button small" onClick={() => { renderer.fit(); redraw.current() }}>Fit</button>
         </div>
         <div className="traffic-body" ref={host}>
@@ -251,7 +281,7 @@ export function TrafficView({ trace, charges, store }: Props) {
               top: tip.y > renderer.height - 120 ? undefined : tip.y + 14,
               bottom: tip.y > renderer.height - 120 ? renderer.height - tip.y + 14 : undefined }}>
               <div className="tooltip-title">{tip.title}</div>
-              {tip.lines.map((l) => <div key={l}>{l}</div>)}
+              {tip.lines.map((l, i) => <div key={i}>{l}</div>)}
             </div>
           )}
         </div>
@@ -272,25 +302,27 @@ export function TrafficView({ trace, charges, store }: Props) {
               </label>
             </div>
           ))}
-          <div className="muted">collapsed: a link with no traffic in the range is a thin line; a dashed grey line: not recorded</div>
         </Section>
         <Section title="Strip width">
           <label className="tool">
             <input type="checkbox" checked={prefs.scaleByBandwidth} onChange={(e) => setScale(e.target.checked)} />
             scale width by bandwidth
           </label>
-          <div className="muted">{prefs.scaleByBandwidth
-            ? 'square root of bw_bytes (an unlimited link: its peak in the run, dashed outline); no text'
-            : 'every strip 18 px high, with its utilization and throughput'}</div>
+        </Section>
+        <Section title="Read / write channels">
+          {(['combined', 'separate'] as const).map((c) => (
+            <label key={c} className="tool">
+              <input type="radio" name="traffic-channels" checked={prefs.channels === c} onChange={() => setChannels(c)} />
+              {c}
+            </label>
+          ))}
         </Section>
         <Section title="Motion">
-          <label className="tool">
+          <label className="tool" title={reducedMotion ? 'off: the system asks for reduced motion' : undefined}>
             <input type="checkbox" checked={prefs.animate && !reducedMotion} disabled={reducedMotion}
               onChange={(e) => setPrefs((p) => ({ ...p, animate: e.target.checked }))} />
             animate the patterns
           </label>
-          {reducedMotion && <div className="muted">off: the system asks for reduced motion</div>}
-          <div className="muted">speed = utilization (100 % = 80 px/s); chevrons: the direction; a link with traffic both ways over the run: two strips (top: in / up, bottom: out / down); still stripes: no traffic in the range</div>
         </Section>
       </Sidebar>
     </div>

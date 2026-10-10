@@ -15,6 +15,8 @@ export interface ChargeGroup {
   maxSpan: Float64Array
 }
 
+const RECENT_MS = 1000
+
 export class ChargeCache {
   private readonly groups = new Map<number, ChargeGroup>()  // insertion order = LRU order
   private readonly inflight = new Map<number, Promise<ChargeGroup>>()
@@ -24,6 +26,8 @@ export class ChargeCache {
   /** Called when a group finishes loading (the timeline redraws). */
   onLoad: (() => void) | null = null
   private readonly listeners = new Set<() => void>()
+  /** per group: when a view last asked for it (performance.now) */
+  private readonly used = new Map<number, number>()
 
   constructor(trace: Trace, limitBytes = 512 * 1024 * 1024) {
     this.trace = trace
@@ -37,6 +41,7 @@ export class ChargeCache {
 
   /** A decoded group if it is cached (and marks it as recently used). */
   peek(group: number): ChargeGroup | undefined {
+    this.used.set(group, performance.now())
     const g = this.groups.get(group)
     if (g) {
       this.groups.delete(group)
@@ -46,6 +51,7 @@ export class ChargeCache {
   }
 
   get(block: ChargeBlock): Promise<ChargeGroup> {
+    this.used.set(block.group, performance.now())
     const hit = this.peek(block.group)
     if (hit) return Promise.resolve(hit)
     let p = this.inflight.get(block.group)
@@ -71,9 +77,15 @@ export class ChargeCache {
     return () => { this.listeners.delete(cb) }
   }
 
+  /** Drops the least recently used groups over the limit, except the groups a view asked
+   * for within the last second: one drawing can need more than the limit (the two ends of
+   * a range in two large groups), and evicting one of them would load it again on the next
+   * frame, which would evict the other, and so on. */
   private evict(): void {
+    const recent = performance.now() - RECENT_MS
     for (const [key, g] of this.groups) {
       if (this.bytes <= this.limit || this.groups.size <= 1) break
+      if ((this.used.get(key) ?? 0) > recent) continue
       this.groups.delete(key)
       this.bytes -= g.bytes
     }

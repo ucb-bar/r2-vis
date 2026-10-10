@@ -97,7 +97,7 @@ export class BlockMetrics {
       const o = row * (count + 1)
       const pre = lv.prefix
       const F = (t: number): number => {
-        const u = t / W
+        const u = (t - lv.origin) / W
         if (u <= 0) return pre[o]
         if (u >= count) return pre[o + count]
         const i = Math.floor(u)

@@ -91,10 +91,22 @@ def block_size(end_time: int, rows: int) -> int:
     return max(MIN_BLOCK, 1 << max(0, round(np.log2(target))))
 
 
-def sort_charges(ch: Charges, end_time: int) -> tuple[Charges, np.ndarray, int]:
+def extent(ch: Charges, end_time: int, window: tuple[int, int] | None) -> tuple[int, int]:
+    """The time the charges cover: from the first start to the last end, within the window
+    of a windowed dump; [0, end_time) without charges."""
+    if not len(ch):
+        return 0, max(1, end_time)
+    lo, hi = int(ch.start.min()), int(ch.end.max())
+    if window is not None:
+        lo, hi = max(lo, window[0]), min(hi, window[1])
+    return lo, max(hi, lo + 1)
+
+
+def sort_charges(ch: Charges, span_cycles: int) -> tuple[Charges, np.ndarray, int]:
     """Charges in file order (block, resource, start); returns them, their block index and
-    the block span."""
-    span = block_size(end_time, len(ch))
+    the block span (sized to the cycles the charges cover, not the run: a windowed dump
+    has all its charges in the window)."""
+    span = block_size(span_cycles, len(ch))
     block = ch.start // span
     order = np.lexsort((ch.start, ch.resource, block))
     return ch.take(order), block[order], span
@@ -126,34 +138,37 @@ def write_charges(path: Path, ch: Charges, block: np.ndarray, span: int) -> list
     return blocks
 
 
-def bin_width(end_time: int) -> int:
-    """Smallest power of two of at least MIN_BIN cycles with at most MAX_BINS bins."""
+def bin_grid(lo: int, hi: int) -> tuple[int, int, int]:
+    """The bins over [lo, hi) (the charge extent): the smallest power-of-two width of at
+    least MIN_BIN cycles with at most MAX_BINS bins from the origin, the origin (lo rounded
+    down to the width) and the bin count."""
     width = MIN_BIN
-    while -(-end_time // width) > MAX_BINS:
+    while -(-(hi - lo // width * width) // width) > MAX_BINS:
         width *= 2
-    return width
+    origin = lo // width * width
+    return width, origin, max(1, -(-(hi - origin) // width))
 
 
 SLICE_ROWS = 1 << 21   # charges per slice of the bin computation (bounds the memory)
 
 
-def bins(ch: Charges, end_time: int, width: int,
-         window: tuple[int, int] | None) -> tuple[pa.Table, int]:
+def bins(ch: Charges, width: int, origin: int, count: int,
+         window: tuple[int, int] | None) -> pa.Table:
     """Spreads each charge's cycles and amount evenly over the bins it covers.
 
     A zero-cycle charge adds its amount to the bin of its start. In a partial dump the
     charges are clipped to the window first. busy is rounded to whole cycles (INT32) and
     amount stored as FLOAT (trace-format 4.2). Returns the table of non-empty bins
-    (sorted by resource, dir, bin) and the bin count.
+    (sorted by resource, dir, bin); bin b covers [origin + b * width, ...).
     """
-    count = max(1, -(-end_time // width))
+    win = None if window is None else (window[0] - origin, window[1] - origin)
     pair = ch.resource.astype(np.int64) * 3 + ch.dir
     keys = np.unique(pair)
     acc = BinAccumulator(len(keys), count, width)
     for a in range(0, len(ch), SLICE_ROWS):
         b = min(a + SLICE_ROWS, len(ch))
-        acc.add(np.searchsorted(keys, pair[a:b]), ch.start[a:b], ch.end[a:b],
-                ch.cycles[a:b], ch.amount[a:b], window)
+        acc.add(np.searchsorted(keys, pair[a:b]), ch.start[a:b] - origin, ch.end[a:b] - origin,
+                ch.cycles[a:b], ch.amount[a:b], win)
     k, b, busy, amount = acc.result()
     tab = pa.table({
         "resource": (keys[k] // 3).astype(np.int32),
@@ -162,7 +177,7 @@ def bins(ch: Charges, end_time: int, width: int,
         "busy": np.rint(busy).astype(np.int32),
         "amount": amount.astype(np.float32),
     })
-    return tab, count
+    return tab
 
 
 class BinAccumulator:

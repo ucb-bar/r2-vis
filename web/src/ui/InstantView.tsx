@@ -36,8 +36,8 @@ export function InstantView({ trace, charges, store, strip, pool }: Props) {
   const cursor = store.cursor.get()
   const n = (t: number) => Math.round(t).toLocaleString('en-US')
   const what = active.kind === 'cursor'
-    ? `cursor at ${n(cursor?.t ?? active.a)} cycles${cursor?.pinned ? ' (pinned)' : ''}, averaged over [${n(active.a)}, ${n(active.b)}) (smoothing ${store.smoothing.get()} px)`
-    : `${active.kind === 'range' ? 'range' : 'time window'} [${n(active.a)}, ${n(active.b)}) · ${n(active.b - active.a)} cycles`
+    ? `t = ${n(cursor?.t ?? active.a)}${cursor?.pinned ? ' · pinned' : ''} · [${n(active.a)}, ${n(active.b)})`
+    : `[${n(active.a)}, ${n(active.b)}) · ${n(active.b - active.a)} cycles`
   return (
     <div className="instant">
       {strip && <TimeStrip store={store} timeline={strip} />}

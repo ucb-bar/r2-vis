@@ -202,10 +202,32 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
         "pe": ([role_field(r, "pe") for r in res], pa.int32()),
         "link_dir": (link_dir, pa.string()),
         "is_link": ([r["role"]["type"] in LINK_ROLES for r in res], pa.bool_()),
+        "write": ([bool(r["role"].get("write", False)) for r in res], pa.bool_()),
         "class": (classes, pa.string()),
         "busy_cycles": ([int(x) for x in busy_cycles], pa.int64()),
         "amount": ([int(x) for x in amount], pa.int64()),
     })
+
+
+def hash_columns(links: list[dict]) -> dict[str, tuple[list, pa.DataType]]:
+    """The address hash of a link that spreads a range onto banks (raw 1.4): NULL without."""
+    h = [x.get("hash") for x in links]
+
+    def num(key: str, i: int | None = None) -> list:
+        return [None if x is None else int(x[key] if i is None else x[key][i], 16) for x in h]
+
+    return {
+        "hash_lo": (num("range", 0), pa.uint64()),
+        "hash_hi": (num("range", 1), pa.uint64()),
+        "hash_to_lo": (num("to_range", 0), pa.uint64()),
+        "hash_to_hi": (num("to_range", 1), pa.uint64()),
+        # Lists as text (the tables have flat columns only): "0x200,0x400", "9,10".
+        "hash_index": ([None if x is None else ",".join(x["index"]) for x in h], pa.string()),
+        "hash_drop": ([None if x is None else ",".join(str(b) for b in x["drop"]) for x in h],
+                      pa.string()),
+        "hash_granule": ([None if x is None else x["granule"] for x in h], pa.int64()),
+        "hash_slice_bytes": ([None if x is None else x["slice_bytes"] for x in h], pa.int64()),
+    }
 
 
 def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
@@ -228,6 +250,7 @@ def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
             "bw_bytes": ([b["bw_bytes"] for b in m["buses"]], pa.int64()),
             "latency": ([b["latency"] for b in m["buses"]], pa.int64()),
             "class": (bus_class, pa.string()),
+            "wr_bytes": ([b.get("wr_bytes") for b in m["buses"]], pa.int64()),
         }),
         "attachments": table({
             "id": ([a["id"] for a in atts], pa.int32()),
@@ -238,6 +261,8 @@ def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
             "role": ([a["role"] for a in atts], pa.string()),
             "in_resource": ([a["in"] for a in atts], pa.int32()),
             "out_resource": ([a["out"] for a in atts], pa.int32()),
+            "in_wr_resource": ([a.get("in_wr") for a in atts], pa.int32()),
+            "out_wr_resource": ([a.get("out_wr") for a in atts], pa.int32()),
         }),
         "links": table({
             "id": ([x["id"] for x in links], pa.int32()),
@@ -256,6 +281,10 @@ def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
             "latency": ([x["latency"] for x in links], pa.int64()),
             "cache": ([x["cache"] for x in links], pa.int32()),
             "class": (link_classes(m, bus_class), pa.string()),
+            **hash_columns(links),
+            "wr_bytes": ([x.get("wr_bytes") for x in links], pa.float64()),
+            "ab_wr_resource": ([x.get("ab_wr") for x in links], pa.int32()),
+            "ba_wr_resource": ([x.get("ba_wr") for x in links], pa.int32()),
         }),
         "memories": table({
             "id": ([x["id"] for x in m["memories"]], pa.int32()),
@@ -265,6 +294,8 @@ def topology_tables(m: dict, bus_class: list[str]) -> dict[str, pa.Table]:
             "port": ([x["port"] for x in m["memories"]], pa.int32()),
             "bw_bytes": ([x["bw_bytes"] for x in m["memories"]], pa.int64()),
             "latency": ([x["latency"] for x in m["memories"]], pa.int64()),
+            "wport": ([x.get("wport") for x in m["memories"]], pa.int32()),
+            "wr_bytes": ([x.get("wr_bytes") for x in m["memories"]], pa.int64()),
         }),
     }
     ranges = [(x["id"], int(lo, 16), int(hi, 16)) for x in m["memories"]

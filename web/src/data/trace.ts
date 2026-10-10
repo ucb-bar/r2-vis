@@ -118,6 +118,9 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
     fallbackUnits: pool.stats.fallbackUnits - fallback0,
     tables: loads.sort((a, b) => names.indexOf(a.name as never) - names.indexOf(b.name as never)),
   }
+  // The bins start at the charge extent (format 1.4); the worker builds them from 0.
+  levels.origin = manifest.bins.origin ?? 0
+  if (levels.fabric) levels.fabric.origin = levels.origin
   const fabricRow = new Map(fg.paths.map((p, g) => [p, g]))
   return { name: tf.name, reader, manifest, dims, facts, levels, lanes, fabricRow, load }
 }

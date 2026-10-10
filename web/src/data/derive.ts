@@ -4,6 +4,7 @@
 export interface BinLevels {
   width: number            // cycles per level-0 bin
   count: number            // level-0 bins per resource
+  origin: number           // the start of bin 0 (cycles)
   resources: Int32Array    // resource ids that have bins, ascending
   rowOf: Int32Array        // resource id -> row in the arrays below, -1 if none
   prefix: Float64Array     // per row: count + 1 prefix sums of the amount per bin (dirs summed)
@@ -19,6 +20,7 @@ export interface BinLevels {
 export interface FabricLevels {
   width: number
   count: number
+  origin: number
   avg: Float32Array[]
   avgArg: Int32Array[]
   max: Float32Array[]
@@ -72,7 +74,7 @@ export function buildLevels(resource: Int32Array, bin: Int32Array, amount: Float
     max.push(next)
     n = m
   }
-  const levels: BinLevels = { width, count, resources: Int32Array.from(ids), rowOf, prefix, max }
+  const levels: BinLevels = { width, count, origin: 0, resources: Int32Array.from(ids), rowOf, prefix, max }
   if (groups) levels.fabric = buildFabricLevels(levels, groups)
   return levels
 }
@@ -137,7 +139,7 @@ function buildFabricLevels(lv: BinLevels, g: FabricGroupArgs): FabricLevels {
     }
     max.push(out)
   }
-  return { width, count, avg, avgArg, max }
+  return { width, count, origin: 0, avg, avgArg, max }
 }
 
 export interface LaneIndex {

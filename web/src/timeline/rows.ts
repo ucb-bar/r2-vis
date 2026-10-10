@@ -5,7 +5,7 @@
 // child rows) and one per link (its two directions as child rows), collapsed by default.
 // The user can reorder rows inside their container (a node, or a fabric node), hide them
 // and resize them.
-import { fabricOf } from '../data/fabrics'
+import { fabricChain, type FabricEntity } from '../data/fabrics'
 import type { Trace } from '../data/trace'
 
 export type RowKind = 'group' | 'lane' | 'resource' | 'fabric' | 'note'
@@ -29,10 +29,10 @@ export interface Row {
 export interface Fabric {
   id: number
   key: string
-  path: string             // bus path, or link path
-  kind: 'bus' | 'link'
-  members: number[]        // resource ids, in row order
-  members_rows: Row[]      // their rows (shown when the fabric node is open)
+  path: string             // bus, link, memory, bank or channel path
+  kind: FabricEntity['kind']
+  members: number[]        // resource ids below it (all levels), in row order
+  members_rows: Row[]      // the rows one level below (shown when the fabric node is open)
 }
 
 const LINK_DIR_MARK: Record<string, string> = { up: '↑', down: '↓' }
@@ -158,40 +158,65 @@ export class RowSource {
     const res = t.dims.resources.filter((r) => r.node === id).sort((a, b) =>
       (ROLE_ORDER[String(a.role)] ?? 9) - (ROLE_ORDER[String(b.role)] ?? 9) || (a.id as number) - (b.id as number))
     const fabricByPath = new Map<string, Fabric>()
+    const fabricRows: Row[] = []   // this node's fabric rows, outer before inner
     for (const r of res) {
       const typeKept = r.class === 'control' ? this.rec.messages : this.rec.charges
       const charged = (r.busy_cycles as number) > 0 || (r.amount as number) > 0
       if (!charged && typeKept) continue  // no charge in the whole run: hidden
       const name = String(r.name)
-      const entity = fabricOf(t.dims, r)
+      const chain = fabricChain(t.dims, r)
       const row: Row = { kind: 'resource', key: `r:${name}`, depth: 0, height: ROW_HEIGHT.resource,
-        label: name.startsWith(`${path}.`) ? name.slice(path.length + 1) : name, node: id,
-        id: r.id as number, notRecorded: !typeKept, parent: path }
-      if (!entity) {
+        label: rel(name, path), node: id, id: r.id as number, notRecorded: !typeKept, parent: path }
+      if (!chain.length) {
         out.push(row)
         continue
       }
-      let f = fabricByPath.get(entity.path)
-      if (!f) {
-        f = { id: this.fabrics.length, key: `f:${entity.path}`, path: entity.path, kind: entity.kind,
-          members: [], members_rows: [] }
-        this.fabrics.push(f)
-        fabricByPath.set(entity.path, f)
-        out.push({ kind: 'fabric', key: f.key, depth: 0, height: ROW_HEIGHT.fabric,
-          label: entity.path.startsWith(`${path}.`) ? entity.path.slice(path.length + 1) : entity.path,
-          node: id, id: f.id, notRecorded: true, parent: path })
+      // The fabric nodes of the chain, outermost first: each in its parent's rows.
+      const mark = LINK_DIR_MARK[String(r.link_dir)] ?? String(r.link_dir)
+      let rows = out
+      let parentKey = path
+      let parentPath = path
+      let top = ''   // the link's label, for its direction nodes
+      for (const e of chain) {
+        let f = fabricByPath.get(e.path)
+        if (!f) {
+          f = { id: this.fabrics.length, key: `f:${e.path}`, path: e.path, kind: e.kind, members: [], members_rows: [] }
+          this.fabrics.push(f)
+          fabricByPath.set(e.path, f)
+          const label = e.kind === 'channel' && top ? `${top} ${mark}` : rel(e.path, parentPath)
+          const frow: Row = { kind: 'fabric', key: f.key, depth: 0, height: ROW_HEIGHT.fabric, label, node: id,
+            id: f.id, notRecorded: true, parent: parentKey }
+          rows.push(frow)
+          fabricRows.push(frow)
+        }
+        if (e.kind === 'link') top = rel(e.path, parentPath)
+        f.members.push(r.id as number)
+        rows = f.members_rows
+        parentKey = f.key
+        parentPath = e.path
       }
-      f.members.push(r.id as number)
-      // A link direction: the link's name and its hierarchy direction (up_dir), else ab / ba.
-      const fabricLabel = entity.path.startsWith(`${path}.`) ? entity.path.slice(path.length + 1) : entity.path
-      const label = entity.kind === 'link' ? `${fabricLabel} ${LINK_DIR_MARK[String(r.link_dir)] ?? r.link_dir}`
-        : name.startsWith(`${entity.path}.`) ? name.slice(entity.path.length + 1) : row.label
-      f.members_rows.push({ ...row, parent: f.key, label })
+      // A leaf: its name below its innermost node (a channel's read and write channels; a
+      // link direction: the link's name and its hierarchy direction, else ab / ba).
+      const inner = chain[chain.length - 1]
+      const label = inner.kind === 'channel' ? (r.write ? 'write' : 'read')
+        : inner.kind === 'link' ? `${top} ${mark}` : rel(name, inner.path)
+      rows.push({ ...row, parent: parentKey, label })
     }
-    // A fabric node is "not recorded" only if all its members are.
-    for (const row of out) {
-      if (row.kind === 'fabric') row.notRecorded = this.fabrics[row.id].members_rows.every((m) => m.notRecorded)
+    // A channel or bank node with one row left (its write channel or write port carried
+    // nothing and is hidden) is that row, under the node's name.
+    const lists = [out, ...fabricRows.map((r) => this.fabrics[r.id].members_rows)]
+    for (const row of fabricRows) {
+      const f = this.fabrics[row.id]
+      if ((f.kind !== 'channel' && f.kind !== 'bank') || f.members_rows.length !== 1) continue
+      const only = f.members_rows[0]
+      const label = f.kind === 'bank' ? `${row.label}.${only.label}` : only.label === 'write' ? `${row.label} (write)` : row.label
+      for (const list of lists) {
+        const i = list.indexOf(row)
+        if (i >= 0) list[i] = { ...only, label, parent: row.parent }
+      }
     }
+    // A fabric node is "not recorded" only if all its members are (innermost first).
+    for (const row of [...fabricRows].reverse()) row.notRecorded = this.fabrics[row.id].members_rows.every((m) => m.notRecorded)
     return out
   }
 
@@ -219,16 +244,16 @@ export class RowSource {
       rows.push({ kind: 'group', key: `g:${path}`, depth, height: ROW_HEIGHT.group, label: path,
         node: id, id, notRecorded: !this.rec.inTree[id] && !this.recordedBelow[id], parent: '' })
       if (o.collapsed.has(id)) return
-      for (const r of orderRows(this.own[id], o.order.get(path))) {
-        if (o.hidden.has(r.key)) continue
-        push(r, depth + 1)
+      // A row, and the rows of an open fabric node below it (nested fabric nodes too).
+      const place = (r: Row, d: number) => {
+        if (o.hidden.has(r.key)) return
+        push(r, d)
         if (r.kind === 'fabric' && o.fabricOpen.has(r.key)) {
           const f = this.fabrics[r.id]
-          for (const m of orderRows(f.members_rows, o.order.get(f.key))) {
-            if (!o.hidden.has(m.key)) push(m, depth + 2)
-          }
+          for (const m of orderRows(f.members_rows, o.order.get(f.key))) place(m, d + 1)
         }
       }
+      for (const r of orderRows(this.own[id], o.order.get(path))) place(r, depth + 1)
       for (const c of kids.get(id) ?? []) visit(c, depth + 1)
     }
     for (const root of kids.get(null) ?? []) visit(root, 0)
@@ -284,4 +309,9 @@ export function rowAt(model: RowModel, y: number): number {
     else hi = mid - 1
   }
   return lo
+}
+
+/** A path or name below a parent path, without the parent's prefix. */
+function rel(name: string, parent: string): string {
+  return name.startsWith(`${parent}.`) ? name.slice(parent.length + 1) : name
 }

@@ -32,8 +32,9 @@ export interface TLink {
   down: number          // resource parent -> child
   childAtt: number      // its end attachment on the child's bus
   parentAtt: number     // its end attachment on the parent's bus
-  /** the attachment ports each direction passes: up = child bus out, parent bus in;
-   * down = parent bus out, child bus in */
+  /** the other resources of each direction (its load is the MAX): the attachment ports
+   * it passes (up = child bus out, parent bus in; down = parent bus out, child bus in) and
+   * the write channels of the link and those ports (raw 1.5) */
   upPorts: number[]
   downPorts: number[]
 }
@@ -47,6 +48,9 @@ export interface TNode {
   buses: TBus[]
   blocks: TBlock[]
   uplinks: TLink[]      // the links of this node to its parent
+  /** links between two buses of this node (hashed links in front of banks): `child` and
+   * `childAtt` are the from end, `up` = ab (from -> to) */
+  inlinks: TLink[]
 }
 
 export class TrafficModel {
@@ -62,7 +66,7 @@ export class TrafficModel {
     const d = trace.dims
     const nodes: TNode[] = d.nodes.map((n) => ({
       id: n.id as number, path: String(n.path), name: String(n.name), depth: n.depth as number,
-      children: [], buses: [], blocks: [], uplinks: [],
+      children: [], buses: [], blocks: [], uplinks: [], inlinks: [],
     }))
     for (const n of d.nodes) if (n.parent !== null) nodes[n.parent as number].children.push(n.id as number)
     const busById = new Map<number, TBus>()
@@ -93,55 +97,36 @@ export class TrafficModel {
     // Links with a hierarchy direction; a cache link, or one between unrelated nodes or
     // within one node, has no place in this layout (none in the current configurations).
     this.undrawn = []
+    const ports = (...rs: unknown[]) => rs.filter((r): r is number => r !== null && r !== undefined)
     for (const l of d.links) {
       const up = l.up_dir as string | null
-      if (l.cache !== null || (up !== 'ab' && up !== 'ba')) { this.undrawn.push(String(l.path)); continue }
-      const childAtt = (up === 'ab' ? l.from_attachment : l.to_attachment) as number
-      const parentAtt = (up === 'ab' ? l.to_attachment : l.from_attachment) as number
+      const from = busById.get(d.attachments[l.from_attachment as number].bus as number)
+      const to = busById.get(d.attachments[l.to_attachment as number].bus as number)
+      const inside = l.cache === null && up === null && from && to && from.node === to.node
+      if (l.cache !== null || ((up !== 'ab' && up !== 'ba') && !inside)) { this.undrawn.push(String(l.path)); continue }
+      const dir = inside ? 'ab' : up
+      const childAtt = (dir === 'ab' ? l.from_attachment : l.to_attachment) as number
+      const parentAtt = (dir === 'ab' ? l.to_attachment : l.from_attachment) as number
       const childBus = busById.get(d.attachments[childAtt].bus as number)
       if (!childBus) continue
       const a = d.attachments[childAtt]
       const b = d.attachments[parentAtt]
-      const ports = (...rs: unknown[]) => rs.filter((r): r is number => r !== null && r !== undefined)
-      nodes[childBus.node].uplinks.push({ id: l.id as number, path: String(l.path), child: childBus.node,
-        cls: childBus.cls, up: (up === 'ab' ? l.ab_resource : l.ba_resource) as number,
-        down: (up === 'ab' ? l.ba_resource : l.ab_resource) as number, childAtt, parentAtt,
-        upPorts: ports(a.out_resource, b.in_resource), downPorts: ports(b.out_resource, a.in_resource) })
+      const upWr = (dir === 'ab' ? l.ab_wr_resource : l.ba_wr_resource) ?? null
+      const downWr = (dir === 'ab' ? l.ba_wr_resource : l.ab_wr_resource) ?? null
+      const link: TLink = { id: l.id as number, path: String(l.path), child: childBus.node,
+        cls: childBus.cls, up: (dir === 'ab' ? l.ab_resource : l.ba_resource) as number,
+        down: (dir === 'ab' ? l.ba_resource : l.ab_resource) as number, childAtt, parentAtt,
+        upPorts: ports(a.out_resource, b.in_resource, upWr, a.out_wr_resource, b.in_wr_resource),
+        downPorts: ports(b.out_resource, a.in_resource, downWr, b.out_wr_resource, a.in_wr_resource) }
+      if (inside) nodes[childBus.node].inlinks.push(link)
+      else nodes[childBus.node].uplinks.push(link)
     }
-    // Blocks in a fixed order: Neutrino, compute, memories.
+    // Blocks in a fixed order: Neutrino, compute, memories (banks b2 before b10).
     const rank = (b: TBlock) => (b.label === 'neutrino' ? 0 : d.attachments[b.atts[0]].component_type === 'memory' ? 2 : 1)
-    for (const n of nodes) n.blocks.sort((x, y) => rank(x) - rank(y) || x.label.localeCompare(y.label))
+    for (const n of nodes) n.blocks.sort((x, y) => rank(x) - rank(y) || x.label.localeCompare(y.label, 'en', { numeric: true }))
     this.nodes = nodes
     this.depth = Math.max(...nodes.map((n) => n.depth))
     this.root = nodes.find((n) => d.nodes[n.id].parent === null)?.id ?? 0
-  }
-
-  /** The links inside a node's subtree per class, by direction (fwd: ports in and links
-   * up; rev: ports out and links down): its descendants' bus ports and the links between
-   * them (inner), and the links from its children (cross). */
-  subtreeLinks(node: number): { inner: Record<LinkClass, Dirs>; cross: Record<LinkClass, Dirs> } {
-    const empty = (): Record<LinkClass, Dirs> => ({ global: { fwd: [], rev: [] }, local: { fwd: [], rev: [] }, control: { fwd: [], rev: [] } })
-    const inner = empty()
-    const cross = empty()
-    const visit = (id: number, top: boolean) => {
-      const n = this.nodes[id]
-      for (const bus of n.buses) {
-        for (const att of bus.atts) {
-          const a = this.trace.dims.attachments[att]
-          // The parent-side ports of the node's own links are not inside the subtree.
-          if (a.in_resource !== null) inner[bus.cls].fwd.push(a.in_resource as number)
-          if (a.out_resource !== null) inner[bus.cls].rev.push(a.out_resource as number)
-        }
-      }
-      for (const l of n.uplinks) {
-        const to = top ? cross : inner
-        to[l.cls].fwd.push(l.up)
-        to[l.cls].rev.push(l.down)
-      }
-      for (const c of n.children) visit(c, false)
-    }
-    for (const c of this.nodes[node].children) visit(c, true)
-    return { inner, cross }
   }
 }
 
@@ -161,4 +146,24 @@ export function mergedName(names: string[]): string {
     return `${m[0]?.[1]}${run ? `${nums[0]}-${nums[nums.length - 1]}` : `{${nums.join(',')}}`}`
   }
   return names.join(', ')
+}
+
+/** The other resources of an attachment's two directions (in: component to bus, out: bus
+ * to component): its write channels, and for a memory its port and write port (reads
+ * leave the memory, writes enter it; a memory without a write port has one port for
+ * both). */
+export function attachmentExtras(trace: Trace, att: number): { fwd: number[]; rev: number[] } {
+  const d = trace.dims
+  const a = d.attachments[att]
+  const ok = (r: unknown): r is number => r !== null && r !== undefined
+  const fwd = [a.in_wr_resource].filter(ok)
+  const rev = [a.out_wr_resource].filter(ok)
+  if (a.component_type === 'memory') {
+    const mem = d.memories.find((x) => x.path === a.component)
+    if (mem && ok(mem.port)) {
+      fwd.push(mem.port)
+      rev.push(ok(mem.wport) ? mem.wport : mem.port)
+    }
+  }
+  return { fwd, rev }
 }

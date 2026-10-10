@@ -52,7 +52,7 @@ LEFT JOIN nodes n ON n.id = e.nu;
 
 -- Bins with their start cycle t and the resource name and class.
 CREATE OR REPLACE VIEW v_bins AS
-SELECT b.*, b.bin::BIGINT * {bin_width} AS t, r.name AS resource_name, r.class,
+SELECT b.*, {bin_origin} + b.bin::BIGINT * {bin_width} AS t, r.name AS resource_name, r.class,
        dn.name AS dir_name
 FROM bins b
 LEFT JOIN resources r ON r.id = b.resource
@@ -159,11 +159,12 @@ def label_name_sql(label: dict) -> str:
     return "CASE WHEN t.label IS NULL THEN NULL ELSE " + " || ".join(parts) + " END"
 
 
-def views_sql(label: dict, end_time: int, bin_width: int) -> str:
+def views_sql(label: dict, end_time: int, bin_width: int, bin_origin: int = 0) -> str:
     lines = [HEADER]
     for name in TABLES:
         lines.append(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM "
                      f"read_parquet('{name}.parquet');")
-    lines.append(NAME_VIEWS.format(label_name=label_name_sql(label), bin_width=bin_width))
+    lines.append(NAME_VIEWS.format(label_name=label_name_sql(label), bin_width=bin_width,
+                                   bin_origin=bin_origin))
     lines.append(MACROS.format(end_time=end_time))
     return "\n".join(lines)

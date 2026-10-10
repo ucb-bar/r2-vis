@@ -284,14 +284,11 @@ export class TimelineRenderer {
   /** The hidden rows of a node (key and label), the rows inside its fabric nodes included. */
   hiddenOf(node: number): { key: string; label: string }[] {
     const out: { key: string; label: string }[] = []
-    for (const r of this.source.ownRowsOf(node)) {
-      if (this.hidden.has(r.key)) out.push({ key: r.key, label: r.label })
-      if (r.kind === 'fabric') {
-        for (const m of this.source.fabrics[r.id].members_rows) {
-          if (this.hidden.has(m.key)) out.push({ key: m.key, label: `${r.label} › ${m.label}` })
-        }
-      }
+    const visit = (r: Row, prefix: string) => {
+      if (this.hidden.has(r.key)) out.push({ key: r.key, label: `${prefix}${r.label}` })
+      if (r.kind === 'fabric') for (const m of this.source.fabrics[r.id].members_rows) visit(m, `${prefix}${r.label} › `)
     }
+    for (const r of this.source.ownRowsOf(node)) visit(r, '')
     return out
   }
 
@@ -841,7 +838,7 @@ export class TimelineRenderer {
       ctx.fillStyle = th.inkMuted
       ctx.font = `${th.fontSizeS}px ${th.fontSans}`
       ctx.textBaseline = 'middle'
-      ctx.fillText('zoom in to show dependencies', GUTTER + 8, AXIS + 10)
+      ctx.fillText('dependencies: zoom in', GUTTER + 8, AXIS + 10)
     }
     ctx.lineWidth = 1
     ctx.strokeStyle = th.inkMuted
@@ -1053,7 +1050,8 @@ export class TimelineRenderer {
     if (!s || p < 0 || p >= s.shown.length) return null
     const f = this.source.fabrics[row.id]
     const port = s.argmax?.[p] ?? -1
-    const lines = [`${f.path} (${f.kind}: ${f.members.length} ${f.kind === 'bus' ? 'ports' : 'directions'})`,
+    const what = { bus: 'ports', link: 'directions', channel: 'channels', memory: 'ports', bank: 'ports' }[f.kind]
+    const lines = [`${f.path} (${f.kind}: ${f.members.length} ${what})`,
       `t = ${Math.round(h.t).toLocaleString('en-US')} cycles`]
     const pct = (v: number) => `${(100 * v).toFixed(1)} %`
     if (port >= 0) {

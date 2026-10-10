@@ -37,7 +37,8 @@ export interface Manifest {
   }
   end_time: number
   label: { fields: LabelField[]; format: string }
-  bins: { width: number; count: number }
+  /** bin b covers [origin + b * width, ...); origin from format 1.4 (before: 0) */
+  bins: { width: number; count: number; origin?: number }
   charge_block_span: number
   charge_blocks: ChargeBlock[]
   tables: Record<string, { rows: number; description: string; columns: Record<string, string> }>

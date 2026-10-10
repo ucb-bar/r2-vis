@@ -32,7 +32,7 @@ from typing import Callable
 import numpy as np
 
 from r2t import raw
-from r2t.topology_2p import Topology, build, link_name, own_base
+from r2t.topology_2p import Topology, build, link_name
 
 OPCODES = ["join", "spawn", "dma", "atlas.matmul", "muon.vector"]
 OP_JOIN, OP_SPAWN, OP_DMA, OP_MATMUL, OP_VECTOR = range(5)
@@ -621,7 +621,32 @@ class Workload:
         return self.topo.node_id[path]
 
     def demands(self, names: list[str], d: int, amount: int) -> list[Demand]:
+        """Demands on the named resources; a write lands on the write channel of a port or
+        link direction, or the write port of a memory, where there is one (raw 1.5)."""
+        if d == raw.DIR_WRITE:
+            names = [self.write_twin(n) for n in names]
         return [(self.res[n], d, amount) for n in names]
+
+    def write_twin(self, name: str) -> str:
+        if f"{name}.wr" in self.res:
+            return f"{name}.wr"
+        if name.endswith(".port") and f"{name[:-5]}.wport" in self.res:
+            return f"{name[:-5]}.wport"
+        return name
+
+    def hbm_path(self, g: int, k: int, d: int) -> list[str]:
+        """The HBM end of a DMA: the HBM port and its clsbus port, or with banks the bank
+        `k`'s port, its hbmbus port, the hash link and its ports."""
+        G = f"root.gpc{g}"
+        if not self.topo.banks:
+            return [f"{G}.hbm.port", f"{G}.clsbus.hbm.in"] if d == raw.DIR_READ \
+                else [f"{G}.clsbus.hbm.out", f"{G}.hbm.port"]
+        b = f"b{k % self.topo.banks}"
+        if d == raw.DIR_READ:
+            return [f"{G}.hbm.{b}.port", f"{G}.hbmbus.{b}.in", f"{G}.hbmbus.clsbus_to_hbmbus.out",
+                    f"{G}.clsbus_to_hbmbus.ba", f"{G}.clsbus.clsbus_to_hbmbus.in"]
+        return [f"{G}.clsbus.clsbus_to_hbmbus.out", f"{G}.clsbus_to_hbmbus.ab",
+                f"{G}.hbmbus.clsbus_to_hbmbus.in", f"{G}.hbmbus.{b}.out", f"{G}.hbm.{b}.port"]
 
     def jitter(self, base: int, spread: float = 0.25, quantum: int = 512) -> int:
         v = base * self.rng.uniform(1 - spread, 1 + spread)
@@ -666,7 +691,7 @@ class Workload:
         return prog
 
     def spawn_task(self, nu: int, child: Program, idx: int) -> Task:
-        base = own_base(None, None, self.topo.sm_bits) if nu == 0 else self.base_of(nu)
+        base = self.topo.base(None, None) if nu == 0 else self.base_of(nu)
         task = self.eng.new_task(nu=nu, src_nu=nu, pe=None, opcode=OP_SPAWN, version=None,
                                  label=None, dst_base=base + 0x1F0000000 + 0x1000 + idx * 512,
                                  dst_len=512, child=child)
@@ -677,7 +702,7 @@ class Workload:
         path = self.topo.nodes[nu]["path"].split(".")
         g = int(path[1][3:]) if len(path) > 1 else None
         s = int(path[2][2:]) if len(path) > 2 else None
-        return own_base(g, s, self.topo.sm_bits)
+        return self.topo.base(g, s)
 
     def join_task(self, nu: int, producers: list[tuple[Task | None, int]], label: int,
                   slot: int) -> Task:
@@ -694,16 +719,20 @@ class Workload:
         eng, rng = self.eng, self.rng
         G, S = f"root.gpc{g}", f"root.gpc{g}.sm{s}"
         nu, gnu = self.nid(S), self.nid(G)
-        base, gbase = own_base(g, s, self.topo.sm_bits), own_base(g, None, self.topo.sm_bits)
+        base, gbase = self.topo.base(g, s), self.topo.base(g, None)
         unit = g * self.topo.sms + s
         layer = i // MARK_EVERY
         buf = i % 2
         mine = sm_tasks[(g, s)]
         pe = {n: self.topo.pe_id[f"{S}.{n}"] for n in ("atlas", "muon", "dma")}
         lbus_w = [f"{S}.lbus.dma.in", f"{S}.lbus.smem.out", f"{S}.smem.port"]
-        hbm_read = [f"{G}.hbm.port", f"{G}.clsbus.hbm.in",
-                    f"{G}.clsbus.sm{s}.smsbus_to_clsbus.out", f"{S}.smsbus_to_clsbus.ba",
-                    f"{S}.smsbus.smsbus_to_clsbus.in", f"{S}.smsbus.dma.out"]
+        to_sm = [f"{G}.clsbus.sm{s}.smsbus_to_clsbus.out", f"{S}.smsbus_to_clsbus.ba",
+                 f"{S}.smsbus.smsbus_to_clsbus.in", f"{S}.smsbus.dma.out"]
+
+        def hbm_read(k: int) -> list[str]:
+            # with banks: chunks spread over the banks in turn (the real hash interleaves
+            # 512 B granules; the toy keeps its chunks whole)
+            return self.hbm_path(g, k, raw.DIR_READ) + to_sm
         actions = prog.actions
         if i == 0:
             # The program stores a parameter block that the first activation DMA reads.
@@ -720,7 +749,7 @@ class Workload:
         nchunks = math.ceil(w_bytes / CHUNK_BYTES)
         for c in range(nchunks):
             part = min(CHUNK_BYTES, w_bytes - c * CHUNK_BYTES)
-            dma_w.chunks.append(self.demands(hbm_read, raw.DIR_READ, part)
+            dma_w.chunks.append(self.demands(hbm_read(i + c), raw.DIR_READ, part)
                                 + self.demands(lbus_w, raw.DIR_WRITE, part))
 
         a_bytes = self.jitter(32 * 1024)
@@ -735,7 +764,7 @@ class Workload:
                     f"{S}.smsbus.smsbus_to_clsbus.in", f"{S}.smsbus.dma.out"]
             latency = DMA_LATENCY + SMEM_LATENCY
         else:
-            read, latency = hbm_read, DMA_LATENCY + HBM_LATENCY
+            read, latency = hbm_read(i), DMA_LATENCY + HBM_LATENCY
         dma_a = eng.new_task(nu=nu, src_nu=nu, pe=pe["dma"], opcode=OP_DMA, version=None,
                              label=make_label("dma_act", 0, layer, unit, i), dst_base=a_base,
                              dst_len=a_bytes, pipelined=True, latency=latency)
@@ -788,7 +817,7 @@ class Workload:
                           f"{S}.smsbus.smsbus_to_clsbus.out", f"{S}.smsbus_to_clsbus.ab",
                           f"{G}.clsbus.sm{s}.smsbus_to_clsbus.in", f"{G}.clsbus.dma.out"],
                          raw.DIR_READ, out_bytes)
-            + self.demands([f"{G}.clsbus.dma.in", f"{G}.clsbus.hbm.out", f"{G}.hbm.port"],
+            + self.demands([f"{G}.clsbus.dma.in"] + self.hbm_path(g, blk, raw.DIR_WRITE),
                            raw.DIR_WRITE, out_bytes))
         dma_o.deps.append(Dep(dma_o, vec, 0, nu, False))
 
@@ -986,10 +1015,11 @@ def make_summary(end_time: int, events: int, wall: float, records: dict) -> dict
             "fatal": None, "phases": phases}
 
 
-def generate(tasks: int, seed: int, gpcs: int = 2, sms: int = 4) -> tuple[Dump, dict]:
+def generate(tasks: int, seed: int, gpcs: int = 2, sms: int = 4, acc: bool = False,
+             rw: bool = False, banks: int = 0) -> tuple[Dump, dict]:
     """Runs the toy workload sized to about `tasks` tasks."""
     t0 = time.perf_counter()
-    eng = Engine(build(gpcs, sms))
+    eng = Engine(build(gpcs, sms, acc, rw, banks))
     iterations = max(1, round(tasks / (gpcs * sms * TASKS_PER_ITERATION)))
     root = Workload(eng, iterations, seed).build()
     eng.at(0, eng.program_start, root)
@@ -1120,13 +1150,21 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--stats", type=Path, help="also write a --stats-like JSON here")
     ap.add_argument("--gpcs", type=int, default=2, help="gpcs (a 2p-like variant if not 2)")
     ap.add_argument("--sms", type=int, default=4, help="SMs per gpc")
+    ap.add_argument("--acc", action="store_true",
+                    help="add a child node acc0 of another kind to each gpc")
+    ap.add_argument("--rw", action="store_true",
+                    help="separate write channels and SMEM write ports (2p.yaml, raw 1.5)")
+    ap.add_argument("--banks", type=int, default=0,
+                    help="HBM as this many banks behind a hash link (2p-hbm-sliced.yaml)")
     ap.add_argument("--suite", action="store_true",
                     help="write tiny, small, medium, partial, crashed, small-zstd into OUT")
     args = ap.parse_args(argv)
     if args.suite:
         write_suite(args.out)
         return
-    dump, stats = timed(args.out.name, lambda: generate(args.tasks, args.seed, args.gpcs, args.sms))
+    dump, stats = timed(args.out.name,
+                        lambda: generate(args.tasks, args.seed, args.gpcs, args.sms, args.acc,
+                                         args.rw, args.banks))
     dump.write(args.out, args.zstd)
     if args.stats:
         args.stats.write_text(json.dumps(stats, indent=1))

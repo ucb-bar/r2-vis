@@ -66,8 +66,9 @@ export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: sh
     ctx.fillStyle = th.inkMuted
     ctx.font = `${th.fontSizeXs}px ${th.fontSans}`
     ctx.textBaseline = 'middle'
-    const label = row ? `${String(renderer.trace.dims.nodes[row.node].path)}.${row.label}` : 'click a row label to show it here'
+    const label = row ? `${String(renderer.trace.dims.nodes[row.node].path)}.${row.label}` : ''
     ctx.fillText(label.length > 44 ? `…${label.slice(-43)}` : label, 10, height / 2)
+    cv.title = row ? '' : 'click a row label in the timeline to show its series here'
     if (s.image) ctx.drawImage(s.image, GUTTER, 4, plot, height - 8)
     // The box of the shown range.
     const v = axis.view

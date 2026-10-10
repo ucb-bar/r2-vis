@@ -1,21 +1,24 @@
 // Layout of the traffic view: x in hierarchy columns (leaves on the left, root on the
-// right), y in rows. Level `L` = the deepest level that is drawn in full; the nodes at depth
-// L with children show their subtree as one aggregated row. The strips of a box (a block,
-// an aggregated row, the links of a child to its parent) are stacked in slots around the
-// box's center; the renderer turns slots into screen pixels (strip heights are fixed in
-// pixels, views-design 6.4), and sizes the boxes and buses to the strips they take.
-import { CLASS_ORDER, mergedName, type LinkClass, type TBlock, type TBus, type TrafficModel } from './model'
+// right); y in px, by interval packing (views-design 6.6). The layout draws a cut of the
+// merge tree (merge.ts): an open node shows its children's runs, an open group its parts; a
+// closed group (or a closed node) is one box with the links that leave it and loops for
+// the links inside it. The layout gives the boxes, the links and the order in which pack()
+// places them; pack() gives every box and link group its y.
+import type { Trace } from '../data/trace'
+import { MergeTree, type MGroup } from './merge'
+import { attachmentExtras, CLASS_ORDER, type LinkClass, type TBlock, type TBus, type TLink, type TrafficModel } from './model'
 
 export interface PBlock {
   x0: number
   x1: number
-  y: number
   label: string
   path: string
-  /** strips attached to it (one per bus it is on) */
+  /** strips attached to it (one per bus it is on, two for a link with traffic both ways) */
   slots: number
-  /** rows of space it has (the distance to its neighbors in its column) */
-  span: number
+  /** its center (px, from pack) */
+  yc: number
+  /** a merged block group: the key that a click opens */
+  open?: string
 }
 
 export interface PBus {
@@ -36,17 +39,19 @@ export interface PLink {
   name: string
   /** the node whose bus (or subtree) the link belongs to */
   node: number
+  /** cross and self: the member nodes of the group (their subtrees) */
+  group: number[]
   x0: number
   x1: number
-  /** the center row of its box, its slot there (a loop: two slots, its legs) and the
-   * box's number of slots */
+  /** the center (px, from pack) of its box or link group, its slot there (a loop: two
+   * slots, its legs) and the group's number of slots */
   yc: number
   slot: number
   slots: number
   /** the bus attachments that it ends on */
   ends: number[]
-  /** traffic in both directions over the run: two one-way strips (slots slot and slot + 1) */
-  pair: boolean
+  /** its strips, in slots slot, slot + 1, ... (a loop: none, its legs are its two slots) */
+  strips: PStrip[]
   /** att and link: the two directions (forward = block to bus, child to parent) */
   fwd: number | null
   rev: number | null
@@ -59,32 +64,91 @@ export interface PLink {
   revMembers: number[]
 }
 
+/** A strip: the direction it shows (0 = forward; null: a link with no traffic over the run)
+ * and its channel: all (the busiest of the direction's read and write channels) or, with
+ * the channels shown separately, read or write. */
+export interface PStrip {
+  dir: 0 | 1 | null
+  ch: 'all' | 'read' | 'write'
+}
+
+/** The strips of a link from its two directions' resources: one per direction that carried
+ * traffic over the whole run (the layout does not change with the range); with `separate`,
+ * one per channel (read, write) that did; none: one still strip. */
+export function channelStrips(d: Trace['dims'], dirs: [number[], number[]], separate: boolean): PStrip[] {
+  const busy = (rs: number[]) => rs.some((r) => (d.resources[r].amount as number) > 0)
+  const out: PStrip[] = []
+  for (const k of [0, 1] as const) {
+    const rs = dirs[k]
+    if (!separate) {
+      if (busy(rs)) out.push({ dir: k, ch: 'all' })
+      continue
+    }
+    if (busy(rs.filter((r) => !d.resources[r].write))) out.push({ dir: k, ch: 'read' })
+    if (busy(rs.filter((r) => d.resources[r].write))) out.push({ dir: k, ch: 'write' })
+  }
+  return out.length ? out : [{ dir: null, ch: 'all' }]
+}
+
+/** A closed group of nodes (or one closed node): one box. */
 export interface PAgg {
   x0: number
   x1: number
-  y: number
   label: string
   node: number
   slots: number
-  span: number
+  yc: number
+  /** the key that a click opens (the group, or the node) */
+  open: string
 }
 
+/** The px rows of an open node or group (from pack), nested `nest` deep below the root. */
 export interface PBand {
   y0: number
   y1: number
   label: string
-  depth: number
+  key: string
+  nest: number
+  /** an open node (else an open group) */
+  isNode: boolean
 }
 
+/** A split block group (memory banks): no band; a thin bracket beside its members, which
+ * a click merges back. `level`: the depth of the split groups inside it (0: none). */
+export interface PBracket {
+  key: string
+  label: string
+  blocks: PBlock[]
+  level: number
+  /** blocks of the deepest nodes: on the left of the boxes (their strips go right) */
+  left: boolean
+}
+
+/** A packing unit: a box with the strips that end on it, or the strips of one link. */
+export interface PUnit {
+  box: PBlock | PAgg | null
+  links: PLink[]
+  /** the band it is in */
+  band: string
+}
+
+/** The order of packing: units, and the opening and closing of a band (a band's units go
+ * no higher than the bottom of everything placed before the band opened). */
+export type PStep = PUnit | { open: string; label: string; isNode: boolean } | { close: string }
+
 export interface Layout {
+  /** the depth of the deepest open node */
   level: number
   cols: number
-  units: number
   blocks: PBlock[]
   buses: PBus[]
   links: PLink[]
   aggs: PAgg[]
   bands: PBand[]
+  brackets: PBracket[]
+  seq: PStep[]
+  /** the height of the packed drawing (px, from pack) */
+  height: number
 }
 
 export const LOOP_LEG = 1.6   // slots from a loop's top leg to its bottom leg
@@ -98,168 +162,204 @@ export function columns(depth: number): { busCol: (d: number) => number; blockCo
 }
 
 const classRank = (c: LinkClass) => CLASS_ORDER.indexOf(c)
-const noMembers = { fwdPorts: [], revPorts: [], members: [], fwdMembers: [], revMembers: [] }
 
-/** The layout of a level with the visible classes only (views-design 6.5: no space for the
- * hidden classes or their buses). */
-export function layout(m: TrafficModel, level: number, visible: Record<LinkClass, boolean>): Layout {
+/** The layout of a cut of the merge tree, with the visible classes only (views-design 6.5:
+ * no space for the hidden classes or their buses). The packing order: per open node the
+ * items of its runs (an open child node followed by its links to the node); links and
+ * strips by class. */
+export function layout(m: TrafficModel, tree: MergeTree, isOpen: (key: string) => boolean,
+  visible: Record<LinkClass, boolean>, separate: boolean): Layout {
   const D = m.depth
   const d = m.trace.dims
   const { busCol, blockCol, cols } = columns(D)
   // The buses of the visible classes spread evenly over their column.
   const shown = CLASS_ORDER.filter((c) => visible[c])
-  const BUS_DX = Object.fromEntries(shown.map((c, k) => [c, (k + 0.5) / shown.length])) as Record<LinkClass, number>
-  // Traffic in a direction over the whole run (the layout does not change with the range).
-  const busy = (rs: (number | null)[]) => rs.some((r) => r !== null && (d.resources[r].amount as number) > 0)
-  const out: Layout = { level, cols, units: 0, blocks: [], buses: [], links: [], aggs: [], bands: [] }
+  // The buses of the visible classes spread over their column: per depth, each class has as
+  // many places as the most buses of that class on one node (hbmbus beside clsbus).
+  const most = new Map<string, number>()
+  for (const n of m.nodes) {
+    for (const c of shown) {
+      const k = `${n.depth}|${c}`
+      most.set(k, Math.max(most.get(k) ?? 1, n.buses.filter((b) => b.cls === c).length))
+    }
+  }
+  const busX = new Map<number, number>()
+  for (const n of m.nodes) {
+    const places = shown.reduce((acc, c) => acc + (most.get(`${n.depth}|${c}`) ?? 1), 0)
+    let base = 0
+    for (const c of shown) {
+      n.buses.filter((b) => b.cls === c).forEach((b, k) => busX.set(b.id, busCol(n.depth) + (base + k + 0.5) / places))
+      base += most.get(`${n.depth}|${c}`) ?? 1
+    }
+  }
+  const attX = (att: number) => busX.get(d.attachments[att].bus as number) ?? 0
+  const strips = (fwd: (number | null)[], rev: (number | null)[]) =>
+    channelStrips(d, [fwd.filter((r): r is number => r !== null), rev.filter((r): r is number => r !== null)], separate)
+  const out: Layout = { level: 0, cols, blocks: [], buses: [], links: [], aggs: [], bands: [], brackets: [], seq: [], height: 0 }
   const placedBuses: TBus[] = []
-  let cursor = 0
+  const unit = (box: PBlock | PAgg | null, links: PLink[], band: string) => {
+    out.seq.push({ box, links, band })
+    out.links.push(...links)
+  }
+  const noLink = { group: [] as number[], fwdPorts: [], revPorts: [], members: [], fwdMembers: [], revMembers: [] }
 
-  /** Places the blocks of a band [y0, y1) clear of the link centers in it (the rows where
-   * link groups cross the strips of the blocks: the band's own center, where the node's
-   * uplinks (and an aggregated row's links) are, and the centers of the children's bands). */
-  const placeBlocks = (blocks: TBlock[], depth: number, y0: number, y1: number, centers: number[]) => {
+  /** A block of node `node` (in its node's block column): its box and its attachments. */
+  const placeBlock = (b: TBlock, band: string) => {
+    const depth = m.nodes[b.node].depth
     const c = blockCol(depth)
     const left = depth === D
-    const { at, span } = spread(blocks.length, y0, y1, centers)
-    blocks.forEach((b, k) => {
-      const y = at[k]
-      const x0 = c + 0.08
-      const x1 = c + 0.92
-      const atts = b.atts.map((att) => ({ att, bus: m.nodes[b.node].buses.find((x) => x.id === d.attachments[att].bus) }))
-        .filter((x): x is { att: number; bus: TBus } => x.bus !== undefined && visible[x.bus.cls])
-        .sort((p, q) => classRank(p.bus.cls) - classRank(q.bus.cls))
-      const pairs = atts.map(({ att }) => busy([d.attachments[att].in_resource as number | null])
-        && busy([d.attachments[att].out_resource as number | null]))
-      const slots = pairs.reduce((n, p) => n + (p ? 2 : 1), 0)
-      out.blocks.push({ x0, x1, y, label: b.label, path: b.key, slots, span })
-      let slot = 0
-      atts.forEach(({ att, bus }, k) => {
-        const a = d.attachments[att]
-        out.links.push({ key: `a${att}`, kind: 'att', cls: bus.cls, name: `${bus.path}.${a.name}`, node: b.node,
-          x0: left ? x1 : x0, x1: busCol(depth) + BUS_DX[bus.cls], yc: y, slot, slots, ends: [att], pair: pairs[k],
-          fwd: a.in_resource as number | null, rev: a.out_resource as number | null, ...noMembers })
-        slot += pairs[k] ? 2 : 1
-      })
+    const x0 = c + 0.08
+    const x1 = c + 0.92
+    const atts = b.atts.map((att) => ({ att, bus: m.nodes[b.node].buses.find((x) => x.id === d.attachments[att].bus) }))
+      .filter((x): x is { att: number; bus: TBus } => x.bus !== undefined && visible[x.bus.cls])
+      .sort((p, q) => classRank(p.bus.cls) - classRank(q.bus.cls))
+    const extras = atts.map(({ att }) => attachmentExtras(m.trace, att))
+    const each = atts.map(({ att }, k) => strips([d.attachments[att].in_resource as number | null, ...extras[k].fwd],
+      [d.attachments[att].out_resource as number | null, ...extras[k].rev]))
+    const slots = each.reduce((n, p) => n + p.length, 0)
+    const block: PBlock = { x0, x1, label: b.label, path: b.key, slots, yc: 0 }
+    out.blocks.push(block)
+    let slot = 0
+    const links = atts.map(({ att, bus }, k): PLink => {
+      const a = d.attachments[att]
+      const l: PLink = { key: `a${att}`, kind: 'att', cls: bus.cls, name: `${bus.path}.${a.name}`, node: b.node,
+        x0: left ? x1 : x0, x1: busX.get(bus.id) ?? 0, yc: 0, slot, slots, ends: [att], strips: each[k],
+        fwd: a.in_resource as number | null, rev: a.out_resource as number | null, ...noLink,
+        fwdPorts: extras[k].fwd, revPorts: extras[k].rev }
+      slot += each[k].length
+      return l
     })
+    unit(block, links, band)
   }
 
-  const visit = (id: number) => {
-    const n = m.nodes[id]
-    const y0 = cursor
-    placedBuses.push(...n.buses)
-    if (n.children.length && n.depth === level && level < D) {
-      // Aggregated: the subtree below is one row; the node's own blocks next to its buses.
-      // Two rows more than its blocks: the row and the links at the center are clear.
-      const units = n.blocks.length + 2
-      const ac = y0 + units / 2
-      const ax = busCol(n.depth + 1) + 0.3
-      const merged = mergedName(n.children.map((c) => m.nodes[c].name))
-      const { inner, cross } = m.subtreeLinks(id)
-      // Per class: the loop of the links inside (two slots: its legs), then the edge of the
-      // links that cross the aggregate's boundary to this level.
-      const items: Omit<PLink, 'slot' | 'slots'>[] = []
-      const slotOf: number[] = []
-      let slots = 0
-      for (const cls of shown) {
-        const self = inner[cls]
-        if (self.fwd.length + self.rev.length) {
-          items.push({ key: `s${id}${cls}`, kind: 'self', cls, name: `inside ${n.name}.${merged} (${cls})`,
-            // x1: the hairpin may reach to the start of this node's bus column
-            node: id, x0: ax, x1: busCol(n.depth), yc: ac, ends: [], pair: false, fwd: null, rev: null, fwdPorts: [], revPorts: [],
-            members: [...self.fwd, ...self.rev], fwdMembers: self.fwd, revMembers: self.rev })
-          slotOf.push(slots)
-          slots += LOOP_LEG + 1
-        }
-        const keep = cross[cls]
-        const bus = n.buses.find((b) => b.cls === cls)
-        if (keep.fwd.length && bus) {
-          const ends = n.children.flatMap((c) => m.nodes[c].uplinks.filter((l) => l.cls === cls).map((l) => l.parentAtt))
-          const pair = busy(keep.fwd) && busy(keep.rev)
-          items.push({ key: `x${id}${cls}`, kind: 'cross', cls, name: `${n.name}.${merged} links (${cls})`,
-            node: id, x0: ax, x1: busCol(n.depth) + BUS_DX[cls], yc: ac, ends, pair, fwd: null, rev: null, fwdPorts: [], revPorts: [],
-            members: [...keep.fwd, ...keep.rev], fwdMembers: keep.fwd, revMembers: keep.rev })
-          slotOf.push(slots)
-          slots += pair ? 2 : 1
-        }
+  /** A closed group of blocks: one block box with, per class, the strip of its members'
+   * ports summed. */
+  const placeBlockGroup = (g: MGroup, band: string) => {
+    const depth = m.nodes[g.parent].depth
+    const c = blockCol(depth)
+    const left = depth === D
+    const x0 = c + 0.08
+    const x1 = c + 0.92
+    const { cross, ends } = tree.groupLinks(g)
+    const items: Omit<PLink, 'slot' | 'slots'>[] = []
+    for (const cls of shown) {
+      const k = cross[cls]
+      if (!k.fwd.length && !k.rev.length) continue
+      items.push({ key: `${g.key}${cls}`, kind: 'cross', cls, name: `${m.nodes[g.parent].path}.${g.label} (${cls})`,
+        node: g.parent, group: [], x0: left ? x1 : x0, x1: attX(ends[cls][0]), yc: 0, ends: ends[cls],
+        strips: strips(k.fwd, k.rev), fwd: null, rev: null, fwdPorts: [], revPorts: [],
+        members: [...k.fwd, ...k.rev], fwdMembers: k.fwd, revMembers: k.rev })
+    }
+    let slot = 0
+    const slotOf = items.map((it) => { const s0 = slot; slot += it.strips.length; return s0 })
+    const block: PBlock = { x0, x1, label: g.label, path: g.key, slots: slot, yc: 0, open: g.key }
+    out.blocks.push(block)
+    unit(block, items.map((it, k) => ({ ...it, slot: slotOf[k], slots: slot })), band)
+  }
+
+  /** A closed group of child nodes (or one closed child node): one box over the columns
+   * of their subtrees; per class the loop of the links inside (two slots: its legs), then
+   * the edge of the links that leave it. */
+  const placeAgg = (g: MGroup, band: string) => {
+    const p = m.nodes[g.parent]
+    const ax = busCol(p.depth + 1) + 0.3
+    const nodes = MergeTree.nodesOf(g)
+    const { inner, cross, ends } = tree.groupLinks(g)
+    const name = `${p.name}.${g.label}`
+    const items: Omit<PLink, 'slot' | 'slots'>[] = []
+    const slotOf: number[] = []
+    let slots = 0
+    for (const cls of shown) {
+      const self = inner[cls]
+      if (self.fwd.length + self.rev.length) {
+        items.push({ key: `s${g.key}${cls}`, kind: 'self', cls, name: `inside ${name} (${cls})`,
+          // x1: the hairpin may reach to the start of the parent's bus column
+          node: g.parent, group: nodes, x0: ax, x1: busCol(p.depth), yc: 0, ends: [], strips: [], fwd: null, rev: null,
+          fwdPorts: [], revPorts: [], members: [...self.fwd, ...self.rev], fwdMembers: self.fwd, revMembers: self.rev })
+        slotOf.push(slots)
+        slots += LOOP_LEG + 1
       }
-      items.forEach((it, k) => out.links.push({ ...it, slot: slotOf[k], slots }))
-      // The box is alone in its band and columns: it may take the band's height.
-      out.aggs.push({ x0: 0.08, x1: ax, y: ac, label: `${n.name}.${merged}`, node: id, slots, span: units - 0.4 })
-      cursor = y0 + units
-      placeBlocks(n.blocks, n.depth, y0, cursor, [ac])
-    } else if (!n.children.length) {
-      // A leaf: a row more at the center for its uplinks, which cross the strips of its
-      // blocks to the other buses of its column.
-      const ups = n.uplinks.some((l) => visible[l.cls])
-      cursor = y0 + Math.max(1, n.blocks.length) + (ups && n.blocks.length ? 1 : 0)
-      placeBlocks(n.blocks, n.depth, y0, cursor, ups ? [(y0 + cursor) / 2] : [])
-    } else {
-      for (const c of n.children) visit(c)
-      if (cursor - y0 < n.blocks.length) cursor = y0 + n.blocks.length
-      const centers = n.children.filter((c) => m.nodes[c].uplinks.some((l) => visible[l.cls]))
-        .map((c) => out.bands.find((b) => b.label === m.nodes[c].path))
-        .filter((b): b is PBand => b !== undefined).map((b) => (b.y0 + b.y1) / 2)
-      // and the node's own uplinks, at its band's center
-      if (n.uplinks.some((l) => visible[l.cls])) centers.push((y0 + cursor) / 2)
-      placeBlocks(n.blocks, n.depth, y0, cursor, centers)
-      // Links of the children: from the child's bus to this node's bus, at the center of
-      // the child's band, stacked in slots by class.
-      for (const c of n.children) {
-        const band = out.bands.find((b) => b.label === m.nodes[c].path)
-        if (!band) continue
-        const ups = m.nodes[c].uplinks.filter((l) => visible[l.cls]).sort((p, q) => classRank(p.cls) - classRank(q.cls))
-        const pairs = ups.map((l) => busy([l.up, ...l.upPorts]) && busy([l.down, ...l.downPorts]))
-        const slots = pairs.reduce((k, p) => k + (p ? 2 : 1), 0)
-        let slot = 0
-        ups.forEach((l, k) => {
-          out.links.push({ key: `l${l.id}`, kind: 'link', cls: l.cls, name: l.path, node: c,
-            x0: busCol(n.depth + 1) + BUS_DX[l.cls], x1: busCol(n.depth) + BUS_DX[l.cls],
-            yc: (band.y0 + band.y1) / 2, slot, slots, ends: [l.childAtt, l.parentAtt], pair: pairs[k],
-            fwd: l.up, rev: l.down, fwdPorts: l.upPorts, revPorts: l.downPorts, members: [], fwdMembers: [], revMembers: [] })
-          slot += pairs[k] ? 2 : 1
-        })
+      const keep = cross[cls]
+      if (keep.fwd.length && p.buses.some((b) => b.cls === cls)) {
+        const st = strips(keep.fwd, keep.rev)
+        items.push({ key: `x${g.key}${cls}`, kind: 'cross', cls, name: `${name} links (${cls})`,
+          node: g.parent, group: nodes, x0: ax, x1: attX(ends[cls][0]), yc: 0, ends: ends[cls], strips: st,
+          fwd: null, rev: null, fwdPorts: [], revPorts: [], members: [...keep.fwd, ...keep.rev], fwdMembers: keep.fwd,
+          revMembers: keep.rev })
+        slotOf.push(slots)
+        slots += st.length
       }
     }
-    out.bands.push({ y0, y1: cursor, label: n.path, depth: n.depth })
+    const agg: PAgg = { x0: 0.08, x1: ax, label: name, node: g.parent, slots, yc: 0, open: g.key }
+    out.aggs.push(agg)
+    unit(agg, items.map((it, k) => ({ ...it, slot: slotOf[k], slots })), band)
   }
-  visit(m.root)
-  out.units = cursor
+
+  /** The links of a child to its parent (or between two buses of one node): one unit per
+   * link (by class). */
+  const placeLinks = (links: TLink[], band: string) => {
+    const ups = links.filter((l) => visible[l.cls]).sort((p, q) => classRank(p.cls) - classRank(q.cls))
+    for (const l of ups) {
+      const st = strips([l.up, ...l.upPorts], [l.down, ...l.downPorts])
+      unit(null, [{ key: `l${l.id}`, kind: 'link', cls: l.cls, name: l.path, node: l.child, group: [],
+        x0: attX(l.childAtt), x1: attX(l.parentAtt),
+        yc: 0, slot: 0, slots: st.length, ends: [l.childAtt, l.parentAtt], strips: st,
+        fwd: l.up, rev: l.down, fwdPorts: l.upPorts, revPorts: l.downPorts, members: [], fwdMembers: [], revMembers: [] }], band)
+    }
+  }
+
+  const visitNode = (id: number) => {
+    const n = m.nodes[id]
+    out.level = Math.max(out.level, n.depth)
+    placedBuses.push(...n.buses)
+    for (const g of tree.runs[id]) placeItem(g, `n${id}`)
+    placeLinks(n.inlinks, `n${id}`)
+  }
+
+  /** A closed group of nodes in a band of its own, below everything before it (beside an
+   * open sibling it could cover the sibling's bus boxes, which are not packed). */
+  const placeClosed = (g: MGroup) => {
+    out.seq.push({ open: `a${g.key}`, label: '', isNode: false })
+    placeAgg(g, `a${g.key}`)
+    out.seq.push({ close: `a${g.key}` })
+  }
+
+  const placeItem = (g: MGroup, band: string) => {
+    const one = g.members.length === 1 ? g.members[0] : null
+    if (one && 'node' in one) {
+      if (isOpen(g.key)) {
+        out.seq.push({ open: g.key, label: g.label, isNode: true })
+        visitNode(one.node)
+        placeLinks(m.nodes[one.node].uplinks, g.key)
+        out.seq.push({ close: g.key })
+      } else placeClosed(g)
+    } else if (one) placeBlock(one.block, band)
+    else if (isOpen(g.key) && 'block' in g.members[0]) {
+      // A split block group floats in its node's band like single blocks; a bracket marks it.
+      const first = out.blocks.length
+      const inner = out.brackets.length
+      for (const p of g.parts) placeItem(p, band)
+      const nested = out.brackets.slice(inner)
+      out.brackets.push({ key: g.key, label: g.label, blocks: out.blocks.slice(first),
+        level: nested.length ? 1 + Math.max(...nested.map((b) => b.level)) : 0, left: m.nodes[g.parent].depth === D })
+    } else if (isOpen(g.key)) {
+      out.seq.push({ open: g.key, label: g.label, isNode: false })
+      for (const p of g.parts) placeItem(p, g.key)
+      out.seq.push({ close: g.key })
+    } else if ('node' in g.members[0]) placeClosed(g)
+    else placeBlockGroup(g, band)
+  }
+
+  out.seq.push({ open: `n${m.root}`, label: m.nodes[m.root].name, isNode: true })
+  visitNode(m.root)
+  out.seq.push({ close: `n${m.root}` })
   const used = new Set(out.links.flatMap((l) => l.ends))
   for (const bus of placedBuses) {
     if (!visible[bus.cls]) continue
     const atts = bus.atts.filter((a) => used.has(a))
     if (!atts.length) continue
-    out.buses.push({ x: busCol(m.nodes[bus.node].depth) + BUS_DX[bus.cls], label: bus.label, path: bus.path,
+    out.buses.push({ x: busX.get(bus.id) ?? 0, label: bus.label, path: bus.path,
       cls: bus.cls, atts })
   }
   return out
-}
-
-/** Rows for n blocks in [y0, y1) clear of the centers: the intervals between the centers
- * (and the band's edges) share the blocks, each next block to the interval where the step
- * stays the largest. In an interval the blocks are a step apart and a step from a center;
- * half a step from an edge (the next band's blocks are as far on the other side). `span`:
- * the smallest step (the room of a box). */
-export function spread(n: number, y0: number, y1: number, centers: number[]): { at: number[]; span: number } {
-  const cuts = [...centers].filter((c) => c > y0 && c < y1).sort((p, q) => p - q)
-  const ivs = [y0, ...cuts].map((p, k) => ({ p, q: k < cuts.length ? cuts[k] : y1, top: k === 0, bot: k === cuts.length, m: 0 }))
-  // the step with m blocks: the edges count half a step, the centers a full one
-  const step = (v: { p: number; q: number; top: boolean; bot: boolean }, m: number) =>
-    (v.q - v.p) / (m + (v.top ? -0.5 : 0) + (v.bot ? -0.5 : 0) + 1)
-  for (let k = 0; k < n; k++) {
-    let best = ivs[0]
-    for (const v of ivs) if (step(v, v.m + 1) > step(best, best.m + 1)) best = v
-    best.m++
-  }
-  const at: number[] = []
-  let span = Infinity
-  for (const v of ivs) {
-    if (!v.m) continue
-    const st = step(v, v.m)
-    span = Math.min(span, st)
-    const first = v.p + (v.top ? 0.5 : 1) * st
-    for (let j = 0; j < v.m; j++) at.push(first + j * st)
-  }
-  return { at, span: Number.isFinite(span) ? span : y1 - y0 }
 }

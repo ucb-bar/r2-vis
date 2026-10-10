@@ -41,6 +41,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "bw_bytes": "bytes per cycle per port; NULL if unlimited",
         "latency": "bus latency in cycles",
         "class": "link class: global, local or control (trace-format Section 5)",
+        "wr_bytes": "write channel bytes per cycle per port (raw 1.5): the bus has separate "
+                    "read and write channels; NULL if not split",
     }),
     "attachments": ("Attachments of components to buses.", {
         "id": "attachment id",
@@ -52,6 +54,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "role": "master, slave or both",
         "in_resource": "resource id of the ingress port (component into bus); NULL if none",
         "out_resource": "resource id of the egress port (bus to component); NULL if none",
+        "in_wr_resource": "write channel of the ingress port (raw 1.5); NULL if not split",
+        "out_wr_resource": "write channel of the egress port (raw 1.5); NULL if not split",
     }),
     "links": ("Fabric links between buses (trace-raw 3.1.1); a raw 1.0 or 1.1 bridge is a "
               "link from its child side to its parent side.", {
@@ -72,6 +76,20 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "latency": "link latency in cycles",
         "cache": "memory id when the link is a cache; NULL otherwise",
         "class": "global, local or control (Section 5); a cache link: its memory port's class",
+        "hash_lo": "hashed link (raw 1.4): first address of the linear range it rewrites; "
+                   "NULL without a hash",
+        "hash_hi": "end of that range (exclusive)",
+        "hash_to_lo": "first address of the banked range it maps onto",
+        "hash_to_hi": "end of the banked range (exclusive)",
+        "hash_index": "masks as comma-separated hex, e.g. 0x200,0x400: bank bit j = "
+                      "parity(address & mask j)",
+        "hash_drop": "comma-separated address bit positions dropped after the bank bits are "
+                     "taken, e.g. 9,10",
+        "hash_granule": "bytes per interleave granule",
+        "hash_slice_bytes": "bytes of one bank's slice of the banked range",
+        "wr_bytes": "write channel bytes per cycle per direction (raw 1.5); NULL if not split",
+        "ab_wr_resource": "write channel of direction from -> to; NULL if not split",
+        "ba_wr_resource": "write channel of direction to -> from; NULL if not split",
     }),
     "memories": ("Memories of the design.", {
         "id": "memory id",
@@ -81,6 +99,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "port": "resource id of the memory port; NULL if none",
         "bw_bytes": "port bytes per cycle; NULL if none",
         "latency": "access latency in cycles; NULL if none",
+        "wport": "resource id of a separate write port (raw 1.4); NULL if none",
+        "wr_bytes": "write port bytes per cycle; NULL if none",
     }),
     "memory_ranges": ("Global address ranges of the memories.", {
         "memory": "memory id",
@@ -111,6 +131,7 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "link_dir": "in or out for a port; up or down for a link direction with a hierarchy "
                     "direction (links.up_dir), else ab or ba",
         "is_link": "true for ports, buses and link directions",
+        "write": "true for a memory write port or a write channel (raw 1.4, 1.5)",
         "class": "global, local, control (links and memory ports), compute (PEs) or "
                  "scalar (Neutrino scalar and completion ports)",
         "busy_cycles": "sum of charge cycles over the dump, in lane-cycles",
@@ -215,7 +236,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
              "non-empty bins. Sorted by (resource, dir, bin).", {
         "resource": "resource id",
         "dir": "direction code",
-        "bin": "bin index; the bin starts at bin * manifest.bins.width (v_bins adds it as t)",
+        "bin": "bin index; the bin starts at manifest.bins.origin + bin * manifest.bins.width "
+               "(v_bins adds it as t)",
         "busy": "busy lane-cycles in the bin, rounded to whole cycles: at most lanes * "
                 "width on a resource with a rate (busy fraction = busy / (lanes * width)); "
                 "can exceed the width on an unlimited link",
