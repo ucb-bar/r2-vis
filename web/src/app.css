@@ -171,6 +171,7 @@ table.report th { color: var(--color-ink-secondary); font-weight: 500; border-bo
 .seg { font: inherit; color: var(--color-ink-secondary); background: none; border: 0; padding: var(--space-1) var(--space-4); cursor: pointer; }
 .seg + .seg { border-left: var(--border-width) solid var(--color-border); }
 .seg.active { background: var(--color-accent-area); color: var(--color-ink); font-weight: 600; }
+.theme-toggle .seg { display: inline-flex; align-items: center; padding: var(--space-2) var(--space-3); }
 .traffic { display: flex; flex-direction: row; }
 .traffic-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .traffic-head { display: flex; align-items: center; gap: var(--space-5); padding: var(--space-2) var(--space-5); font-size: var(--font-size-s); border-bottom: var(--border-width) solid var(--color-border); }

@@ -4,6 +4,7 @@ import { WorkerPool, defaultPoolSize } from './data/pool'
 import { loadTrace, type Trace } from './data/trace'
 import { ChargeCache } from './data/charges'
 import { ViewStore } from './state/viewstore'
+import { homeRange } from './timeline/rows'
 import { OpenPanel } from './ui/OpenPanel'
 import { LoadReport } from './ui/LoadReport'
 import { Workspace } from './ui/Workspace'
@@ -33,7 +34,7 @@ export function App() {
       const trace = await loadTrace(tf, pool(), (done, total) =>
         setState({ kind: 'loading', name: tf.name, done, total }))
       const charges = new ChargeCache(trace)
-      const store = new ViewStore(trace.dims.nodes.map((n) => n.id as number), trace.manifest.end_time)
+      const store = new ViewStore(trace.dims.nodes.map((n) => n.id as number), trace.manifest.end_time, homeRange(trace))
       window.__r2vis = { ...window.__r2vis, trace, charges, store }
       setState({ kind: 'loaded', trace, charges, store })
     } catch (err) {

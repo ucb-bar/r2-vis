@@ -171,15 +171,19 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
                 <td><span className="fold">{v.recorded ? (isOpen ? '▾' : '▸') : ''}</span>{tb.name}</td>
                 {v.recorded ? (
                   <>
-                    <td className="num">{v.cap ? `${v.at} / ${v.cap}` : v.at}</td>
-                    <td className="num">{num(v.average)}{share(v.average, v.cap)}</td>
-                    <td className="num">{v.peak}{share(v.peak, v.cap)}</td>
+                    {v.atRecorded ? <td className="num">{v.cap ? `${v.at} / ${v.cap}` : v.at}</td> : <td className="muted">not recorded</td>}
+                    {v.rangeRecorded ? (
+                      <>
+                        <td className="num">{num(v.average)}{share(v.average, v.cap)}</td>
+                        <td className="num">{v.peak}{share(v.peak, v.cap)}</td>
+                      </>
+                    ) : <td colSpan={2} className="muted">not recorded</td>}
                   </>
                 ) : <td colSpan={3} className="muted">not recorded</td>}
               </tr>,
               isOpen && v.recorded && (
                 <tr key={`${tb.id}-items`} className="items"><td colSpan={4}>
-                  {v.at === 0 ? <span className="muted">empty at t</span> : tb.id < 2 ? lists[tb.id]() : entryList(tb.id)}
+                  {!v.atRecorded ? <span className="muted">not recorded</span> : v.at === 0 ? <span className="muted">empty at t</span> : tb.id < 2 ? lists[tb.id]() : entryList(tb.id)}
                 </td></tr>
               ),
             ]

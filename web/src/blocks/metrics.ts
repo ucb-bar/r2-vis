@@ -3,6 +3,8 @@
 // subtree, and the traffic of the node's own links per class.
 import type { Trace } from '../data/trace'
 
+import { recorded, recordedPart } from '../timeline/rows'
+
 export type TrafficClass = 'global' | 'local' | 'control'
 export const TRAFFIC_CLASSES: TrafficClass[] = ['global', 'local', 'control']
 
@@ -12,9 +14,12 @@ export class BlockMetrics {
   private readonly tensorRes: number[][]    // per node: tensor PE resources of the subtree
   private readonly vectorRes: number[][]    // per node: vector PE resources of the subtree
   private readonly ownLinks: Record<TrafficClass, number[][]>  // per class, per node: own links
+  /** the recorded window of a windowed dump: averages are taken over their part inside it */
+  readonly window: [number, number] | null
 
   constructor(trace: Trace) {
     this.trace = trace
+    this.window = recorded(trace).window
     const nodes = trace.dims.nodes
     const children = new Map<number, number[]>()
     for (const n of nodes) {
@@ -65,14 +70,20 @@ export class BlockMetrics {
     return this.tensor(node, a, b, n, out) || this.vector(node, a, b, n, out)
   }
 
-  /** Window average of compute (the color of a small box). */
+  /** Window average of compute (the color of a small box), over the recorded part; NaN
+   * if none. */
   computeAverage(node: number, a: number, b: number): number {
+    const r = recordedPart(this.window, a, b)
     const out = new Float64Array(1)
-    return this.compute(node, a, b, 1, out) ? out[0] : NaN
+    return r && this.compute(node, r.a, r.b, 1, out) ? out[0] : NaN
   }
 
-  /** Averages over [a, b): tensor, vector and per class traffic, the ones the node has. */
-  averages(node: number, a: number, b: number): { name: string; value: number }[] {
+  /** Averages over the recorded part of [a, b): tensor, vector and per class traffic, the
+   * ones the node has; null if [a, b) is outside the recording. */
+  averages(node: number, from: number, to: number): { name: string; value: number }[] | null {
+    const r = recordedPart(this.window, from, to)
+    if (!r) return null
+    const { a, b } = r
     const out = new Float64Array(1)
     const rows: { name: string; value: number }[] = []
     if (this.tensor(node, a, b, 1, out)) rows.push({ name: 'tensor', value: out[0] })

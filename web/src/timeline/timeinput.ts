@@ -1,13 +1,16 @@
 // Time input shared by the timeline and the Instant scrubber (views-design 6.1, 7): a drag
 // on the plot or the axis selects a range, a click on the plot or the axis sets the cursor
 // there (the two exclude each other), the playhead handle drags (scrubs) the cursor,
-// right-drag zooms to a box, ctrl+wheel or pinch zooms, horizontal or shift+wheel pans, Esc
-// clears the range and the cursor.
+// right-drag zooms to a box, ctrl+wheel or pinch zooms, horizontal or shift+wheel pans, a
+// double-click on the axis fits the time (the home window), Esc clears the range and the
+// cursor.
 import type { ViewStore } from '../state/viewstore'
 import { AXIS, GUTTER, type TimeAxis } from './axis'
 import { zoomFactor } from './viewport'
 
 export const DRAG_PX = 3
+/** A click on the axis followed by a double-click within this time is a fit, not a cursor. */
+const DOUBLE_MS = 600
 
 export interface TimeInputHost {
   axis: TimeAxis
@@ -33,6 +36,8 @@ interface Drag {
 export class TimeInput {
   private readonly host: TimeInputHost
   private drag: Drag | null = null
+  /** The cursor and range before the last click on the axis (a double-click restores them). */
+  private beforeClick: { at: number; cursor: ReturnType<ViewStore['cursor']['get']>; range: { a: number; b: number } | null } | null = null
 
   constructor(host: TimeInputHost) {
     this.host = host
@@ -96,6 +101,9 @@ export class TimeInput {
         // A click sets the cursor there (it clears the range), unless the host takes a
         // click on the plot (a task bar toggles its task).
         if (d.kind === 'axis' || !this.host.plotClick?.(x, y, e)) {
+          if (d.kind === 'axis') {
+            this.beforeClick = { at: performance.now(), cursor: store.cursor.get(), range: axis.selection ? { ...axis.selection } : null }
+          }
           axis.selection = null
           this.host.rangeChanged()
           store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(x))))
@@ -122,6 +130,24 @@ export class TimeInput {
     const axis = this.host.axis
     if (horizontal) axis.pan((e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX) * scale)
     else axis.zoom(Math.max(0, x - GUTTER), zoomFactor(e.deltaY * scale))
+    this.host.changed()
+    return true
+  }
+
+  /** A double-click at (x, y): on the axis, the home window (the recorded window of a
+   * windowed dump, else the run), with the cursor and range as before its clicks; true if
+   * it was on the axis. */
+  double(x: number, y: number): boolean {
+    if (x < GUTTER || y >= AXIS) return false
+    const { axis, store } = this.host
+    const b = this.beforeClick
+    this.beforeClick = null
+    if (b && performance.now() - b.at < DOUBLE_MS) {
+      axis.selection = b.range
+      this.host.rangeChanged()
+      if (!b.range) store.cursor.set(b.cursor)
+    }
+    axis.zoomTo(axis.home)
     this.host.changed()
     return true
   }

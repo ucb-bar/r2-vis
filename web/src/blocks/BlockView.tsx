@@ -91,10 +91,11 @@ export function BlockView({ trace, store }: Props) {
       cv.style.cursor = toggle !== null ? 'pointer' : 'grab'
       // A box drawn with its strips shows its values already.
       if (box && !renderer.showsStrips(box)) {
-        const rows = renderer.metrics.averages(box.node, renderer.window.a, renderer.window.b)
-          .map((m) => ({ label: m.name, value: pct(m.value) }))
+        const avgs = renderer.metrics.averages(box.node, renderer.window.a, renderer.window.b)
+        const rows = (avgs ?? []).map((m) => ({ label: m.name, value: pct(m.value) }))
         const { name, parent } = splitPath(box.path)
-        setTip({ x, y, content: { title: name, path: parent, sections: rows.length ? [{ kind: 'rows', rows }] : [] } })
+        setTip({ x, y, content: { title: name, path: parent,
+          sections: avgs === null ? [{ kind: 'note', text: 'not recorded' }] : rows.length ? [{ kind: 'rows', rows }] : [] } })
       } else setTip(null)
     }
     const onUp = (e: PointerEvent) => {

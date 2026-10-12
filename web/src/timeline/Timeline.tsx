@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChargeCache } from '../data/charges'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
-import { sameRange, toggleTask, type ViewStore } from '../state/viewstore'
+import { sameRange, selectTask, toggleTask, type ViewStore } from '../state/viewstore'
 import { clearPrefs, loadPrefs, prefsKey, savePrefs } from '../state/viewprefs'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { BlocksPanel } from '../ui/BlocksPanel'
@@ -234,9 +234,10 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       renderer.hover = { x, y, row: renderer.rowAtY(y), t: renderer.timeAtX(x) }
     }
 
-    // Time gestures (shared with the Instant scrubber); a click on a task bar toggles the
-    // task; a click elsewhere on a plot selects the row (as a click on its label) and sets
-    // the cursor; a right click on a group header lists its hidden rows.
+    // Time gestures (shared with the Instant scrubber). A click on a task bar selects only
+    // that task, shift (or ctrl, cmd) + click adds or removes it; a click elsewhere on a plot
+    // clears the tasks, selects the row (as a click on its label) and sets the cursor; a
+    // right click on a group header lists its hidden rows.
     const time = new TimeInput({
       axis: renderer.axis, store,
       changed: () => { request(); updateTip() },
@@ -244,12 +245,15 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       plotClick: (x, y, e) => {
         setHover(x, y)
         const task = renderer.hoveredTask()
+        const additive = e.shiftKey || e.metaKey || e.ctrlKey
         if (task >= 0) {
-          toggleTask(store, task)
+          if (additive) toggleTask(store, task)
+          else selectTask(store, task)
           return true
         }
+        if (store.tasks.get().size) store.tasks.set(new Set())
         const i = renderer.rowAtY(y)
-        if (i >= 0 && renderer.model.rows[i].kind !== 'group') selectRow(i, e.shiftKey || e.metaKey || e.ctrlKey)
+        if (i >= 0 && renderer.model.rows[i].kind !== 'group') selectRow(i, additive)
         return false
       },
       plotRightClick: (x, y) => {
@@ -371,6 +375,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
 
     const onDouble = (e: MouseEvent) => {
       const { x, y } = pos(e)
+      if (time.double(x, y)) return
       if (x >= GUTTER) return
       const i = edgeRow(y)
       if (i < 0) return

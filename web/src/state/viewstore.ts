@@ -29,10 +29,11 @@ export class ViewStore {
   readonly blocks: BlockSelection
   readonly endTime: number
 
-  constructor(nodeIds: number[], endTime: number) {
+  /** `home`: the window shown first (the recorded window of a windowed dump) */
+  constructor(nodeIds: number[], endTime: number, home?: TimeRange) {
     this.blocks = new BlockSelection(nodeIds)
     this.endTime = endTime
-    this.window = new Store<TimeRange>({ a: 0, b: endTime })
+    this.window = new Store<TimeRange>(home ?? { a: 0, b: endTime })
     // The cursor and the range exclude each other: setting one clears the other.
     this.cursor.subscribe((c) => { if (c && this.range.get()) this.range.set(null) })
     this.range.subscribe((r) => { if (r && this.cursor.get()) this.cursor.set(null) })
@@ -73,6 +74,13 @@ export function sameRange(x: TimeRange | null, y: TimeRange | null): boolean {
 }
 
 /** Toggles one task in the task selection. */
+/** Selects only `task` (a plain click on its bar). */
+export function selectTask(store: ViewStore, task: number): void {
+  const cur = store.tasks.get()
+  if (cur.size !== 1 || !cur.has(task)) store.tasks.set(new Set([task]))
+}
+
+/** Adds or removes `task` (shift, ctrl or cmd + click on its bar). */
 export function toggleTask(store: ViewStore, task: number): void {
   const next = new Set(store.tasks.get())
   if (next.has(task)) next.delete(task)

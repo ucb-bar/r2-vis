@@ -3,7 +3,7 @@
 // the drawing of the axis strip (ticks, range length, playhead handle) and of the bands and
 // cursor lines over a plot area.
 import type { Theme } from '../theme/theme'
-import { clampViewport, fit, formatCycles, tickStep, zoomAt, type Viewport } from './viewport'
+import { clampViewport, formatCycles, tickStep, zoomAt, type Viewport } from './viewport'
 import { count } from '../ui/format'
 
 export const GUTTER = 300   // label column width (CSS px); the plot starts here
@@ -33,8 +33,13 @@ export class TimeAxis {
   /** A window shown before the first resize. */
   private pending: Range | null = null
 
-  constructor(endTime: number) {
+  /** the window shown first (homeRange) */
+  readonly home: Range
+
+  constructor(endTime: number, home?: Range) {
     this.endTime = endTime
+    const m = endTime * 0.025
+    this.home = home ?? { a: -m, b: endTime + m }
   }
 
   get plotWidth(): number {
@@ -52,7 +57,8 @@ export class TimeAxis {
     if (first) {
       // A window set by another view before this one had a size: keep it, else fit.
       const w = this.pending
-      this.view = w ? { t0: w.a, cpp: (w.b - w.a) / this.plotWidth } : fit(this.plotWidth, this.endTime)
+      const r = w ?? this.home
+      this.view = { t0: r.a, cpp: (r.b - r.a) / this.plotWidth }
       this.pending = null
     }
     this.setView(this.view)

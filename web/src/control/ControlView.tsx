@@ -303,7 +303,10 @@ function heatColor(th: Theme, v: number): string {
 function nodeTip(path: string, data: ControlData, node: number, m: Metric, st: Statistic, t: number, a: number, b: number): TipContent {
   const { name, parent } = splitPath(path)
   const tables = data.ready ? data.tablesOf(node, m, st, t, a, b) : []
-  if (!tables.length) return { title: name, path: parent, sections: [{ kind: 'note', text: data.ready ? 'no table with a capacity' : 'loading' }] }
+  if (!tables.length) {
+    const why = !data.ready ? 'loading' : data.recordedFor(st, t, a, b) ? 'no table with a capacity' : 'not recorded'
+    return { title: name, path: parent, sections: [{ kind: 'note', text: why }] }
+  }
   const items = tables.map((x) => ({ share: x.pressure, name: x.name, value: pct(x.pressure), note: `${num(x.value)} / ${x.cap}` }))
   return { title: name, path: parent, sections: [tipList('tables', items, items.length)] }
 }

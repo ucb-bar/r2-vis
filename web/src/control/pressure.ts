@@ -6,7 +6,7 @@ import type { Table } from '../data/columns'
 import { OccupancyIndex, type Occupancy } from '../data/occupancy'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
-import { recorded } from '../timeline/rows'
+import { recorded, recordedAt, recordedPart } from '../timeline/rows'
 
 export interface TableDef {
   id: number
@@ -44,6 +44,9 @@ export interface TableValue {
   at: number
   average: number
   peak: number
+  /** the time, and some of the range, are inside the recorded window */
+  atRecorded: boolean
+  rangeRecorded: boolean
 }
 
 export class ControlData {
@@ -56,10 +59,13 @@ export class ControlData {
   private cacheKey = ''
   private readonly caps: (number | null)[][]   // [node][table]
   private readonly tableRecorded: boolean[][]  // [node][table]
+  /** the recorded window of a windowed dump: outside it the occupancy is unknown */
+  readonly window: [number, number] | null
 
   constructor(trace: Trace) {
     this.trace = trace
     const rec = recorded(trace)
+    this.window = rec.window
     const f = trace.manifest.source.filters
     const typeKept = !f?.types || f.types.includes('entries')
     this.hasEntries = trace.reader.has('entries') && typeKept
@@ -122,14 +128,25 @@ export class ControlData {
     const ix = this.index
     const s = node * N_TABLES + table
     const rec = this.tableRecorded[node][table]
-    if (!ix || !rec) return { recorded: rec, cap: this.caps[node][table], at: 0, average: 0, peak: 0 }
-    return { recorded: true, cap: this.caps[node][table], at: ix.at(s, t), average: ix.average(s, a, b), peak: ix.peak(s, a, b) }
+    const atRecorded = recordedAt(this.window, t)
+    const part = recordedPart(this.window, a, b)
+    const base = { recorded: rec, cap: this.caps[node][table], at: 0, average: 0, peak: 0, atRecorded, rangeRecorded: part !== null }
+    if (!ix || !rec) return base
+    return { ...base, at: atRecorded ? ix.at(s, t) : 0, average: part ? ix.average(s, part.a, part.b) : 0,
+      peak: part ? ix.peak(s, part.a, part.b) : 0 }
+  }
+
+  /** The statistic is inside the recorded window: the time, or some of the range. */
+  recordedFor(stat: Statistic, t: number, a: number, b: number): boolean {
+    return stat === 'at' ? recordedAt(this.window, t) : recordedPart(this.window, a, b) !== null
   }
 
   /** One statistic of one table of one node; the range statistics are cached per range
    * (they do not change with the cursor). */
-  stat(node: number, table: number, stat: Statistic, t: number, a: number, b: number): number {
+  stat(node: number, table: number, stat: Statistic, t: number, from: number, to: number): number {
     const ix = this.index as OccupancyIndex
+    // the recorded part of the range (the callers check recordedFor)
+    const { a, b } = recordedPart(this.window, from, to) ?? { a: from, b: to }
     const s = node * N_TABLES + table
     if (stat === 'at') return ix.at(s, t)
     const key = `${a}|${b}`
@@ -146,7 +163,7 @@ export class ControlData {
   /** The heat of a node: the pressure (0..1) of the metric and statistic, or null if no
    * table of the metric is recorded with a capacity. */
   heat(node: number, metric: Metric, stat: Statistic, t: number, a: number, b: number): number | null {
-    if (!this.index) return null
+    if (!this.index || !this.recordedFor(stat, t, a, b)) return null
     const tables = metric.kind === 'table' ? [metric.table] : GROUPS[metric.group]
     let worst = 0
     let sum = 0
@@ -167,7 +184,7 @@ export class ControlData {
    * the capacity and the pressure, the fullest first. */
   tablesOf(node: number, metric: Metric, stat: Statistic, t: number, a: number, b: number):
     { name: string; value: number; cap: number; pressure: number }[] {
-    if (!this.index) return []
+    if (!this.index || !this.recordedFor(stat, t, a, b)) return []
     const tables = metric.kind === 'table' ? [metric.table] : GROUPS[metric.group]
     const out = []
     for (const id of tables) {

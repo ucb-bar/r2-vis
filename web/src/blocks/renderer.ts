@@ -6,6 +6,7 @@ import type { BlockSelection } from '../state/blocks'
 import type { TimeRange } from '../state/viewstore'
 import type { Theme } from '../theme/theme'
 import { pct } from '../ui/format'
+import { recordedPart } from '../timeline/rows'
 import { boxAt, layout, type Box } from './layout'
 import { BlockMetrics, type TrafficClass } from './metrics'
 
@@ -258,11 +259,22 @@ export class BlockRenderer {
     ctx.strokeStyle = color
     ctx.lineWidth = 1.25
     ctx.stroke(path)
-    let sum = 0
-    for (let k = 0; k < n; k++) sum += v[k]
+    // A windowed dump: the time outside the recording greyed; the label is the average over
+    // the recorded part.
+    const { a: t0, b: t1 } = this.window
+    const rec = recordedPart(this.metrics.window, t0, t1)
+    const win = this.metrics.window
+    if (win) {
+      const xOf = (t: number) => cx + Math.max(0, Math.min(1, (t - t0) / (t1 - t0))) * cw
+      ctx.fillStyle = th.page
+      ctx.globalAlpha = 0.7
+      ctx.fillRect(cx, y, xOf(win[0]) - cx, h)
+      ctx.fillRect(xOf(win[1]), y, cx + cw - xOf(win[1]), h)
+      ctx.globalAlpha = 1
+    }
     ctx.fillStyle = th.inkSecondary
     ctx.textAlign = 'right'
-    ctx.fillText(pct(sum / n), x + STRIP_LABEL_PX - 8, y + h / 2)
+    ctx.fillText(rec ? pct(this.series(b.node, kind, 1, rec).v[0]) : 'not recorded', x + STRIP_LABEL_PX - 8, y + h / 2)
     ctx.textAlign = 'left'
   }
 
@@ -291,8 +303,9 @@ export class BlockRenderer {
     ctx.restore()
   }
 
-  private series(node: number, kind: Exclude<StripKind, 'programs'>, n: number): { ok: boolean; v: Float64Array } {
-    const { a, b } = this.window
+  private series(node: number, kind: Exclude<StripKind, 'programs'>, n: number, range?: { a: number; b: number }):
+    { ok: boolean; v: Float64Array } {
+    const { a, b } = range ?? this.window
     const key = `${node}|${kind}|${n}|${a}|${b}`
     let hit = this.cache.get(key)
     if (!hit) {

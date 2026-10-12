@@ -36,7 +36,7 @@ declare global {
 export function TimeStrip({ store, timeline }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
-  const [axis] = useState(() => new TimeAxis(timeline.endTime))
+  const [axis] = useState(() => new TimeAxis(timeline.endTime, timeline.axis.home))
   const [mapVersion, setMapVersion] = useState(0)
   const [pinned, setPinned] = useState<number | null>(store.cursor.get()?.pinned ? (store.cursor.get()?.t ?? null) : null)
   const [mapHeight, setMapHeight] = useState(loadMapHeight)
@@ -148,6 +148,7 @@ export function TimeStrip({ store, timeline }: Props) {
       time.up(e, x, y)
     }
     const onLeave = () => { hoverX = null; request() }
+    const onDouble = (e: MouseEvent) => { const { x, y } = pos(e); time.double(x, y) }
     const noMenu = (e: Event) => e.preventDefault()
     cv.addEventListener('wheel', onWheel, { passive: false })
     cv.addEventListener('pointerdown', onDown)
@@ -155,6 +156,7 @@ export function TimeStrip({ store, timeline }: Props) {
     cv.addEventListener('pointerup', onUp)
     cv.addEventListener('pointercancel', onUp)
     cv.addEventListener('mouseleave', onLeave)
+    cv.addEventListener('dblclick', onDouble)
     cv.addEventListener('contextmenu', noMenu)
     return () => {
       ro.disconnect()
@@ -166,6 +168,7 @@ export function TimeStrip({ store, timeline }: Props) {
       cv.removeEventListener('pointerup', onUp)
       cv.removeEventListener('pointercancel', onUp)
       cv.removeEventListener('mouseleave', onLeave)
+      cv.removeEventListener('dblclick', onDouble)
       cv.removeEventListener('contextmenu', noMenu)
       if (frame) cancelAnimationFrame(frame)
     }

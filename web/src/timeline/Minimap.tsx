@@ -20,7 +20,8 @@ interface Props {
 }
 
 /** Minimap and scrollbar: the full-run series of the focus row, with a box for the shown
- * range. Drag the box to pan, drag its edges to zoom, click outside it to center there. */
+ * range. Drag the box to pan, drag its edges to zoom, click outside it to center there,
+ * double-click to fit the time (the home window). */
 export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: shown }: Props) {
   const axis = shown ?? renderer.axis
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -73,6 +74,17 @@ export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: sh
     ctx.fillText(label.length > 44 ? `…${label.slice(-43)}` : label, 10, height / 2)
     cv.title = row ? '' : 'click a row label in the timeline to show its series here'
     if (s.image) ctx.drawImage(s.image, GUTTER, 4, plot, height - 8)
+    // A windowed dump: the run outside the recorded window greyed, as in the timeline.
+    const w = renderer.rec.window
+    if (w) {
+      ctx.fillStyle = th.page
+      ctx.globalAlpha = 0.7
+      const l = GUTTER + w[0] / cpp
+      const r = GUTTER + w[1] / cpp
+      ctx.fillRect(GUTTER, 2, Math.max(0, l - GUTTER), height - 4)
+      ctx.fillRect(r, 2, Math.max(0, width - r), height - 4)
+      ctx.globalAlpha = 1
+    }
     // The box of the shown range.
     const v = axis.view
     const x0 = GUTTER + v.t0 / cpp
@@ -150,13 +162,17 @@ export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: sh
       else axis.zoom(axis.plotWidth / 2, zoomFactor(e.deltaY * scale))
       onChange()
     }
+    // A double-click fits the time: the home window (the recorded window of a windowed dump).
+    const double = () => { axis.zoomTo(axis.home); onChange() }
     cv.addEventListener('wheel', wheel, { passive: false })
+    cv.addEventListener('dblclick', double)
     cv.addEventListener('pointerdown', down)
     cv.addEventListener('pointermove', move)
     cv.addEventListener('pointerup', up)
     cv.addEventListener('pointercancel', up)
     return () => {
       cv.removeEventListener('wheel', wheel)
+      cv.removeEventListener('dblclick', double)
       cv.removeEventListener('pointerdown', down)
       cv.removeEventListener('pointermove', move)
       cv.removeEventListener('pointerup', up)

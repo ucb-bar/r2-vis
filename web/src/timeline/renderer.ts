@@ -17,7 +17,7 @@ import { lineSlots, taskSlots, type LegendEntry } from './colors'
 import { ArrowBatch, DepIndex, type ArrowStyle } from './deps'
 import { drawLane, taskAt, wideTasks, type ChunkIndex } from './lanes'
 import { blend, LaneRaster, pack, rgba, RowRaster, type RowColors, type SlotColors } from './raster'
-import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, recorded, rowAt, RowSource, type Recorded, type Row, type RowModel } from './rows'
+import { homeRange, MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, recorded, recordedAt, recordedPart, rowAt, RowSource, type Recorded, type Row, type RowModel } from './rows'
 import { chargesAmount, lanesHeld, rangeAmount, sampleBins, sampleCharges, sampleFabric, smooth } from './util'
 import { AXIS, GUTTER, TimeAxis, type Range } from './axis'
 import { tickStep, type Viewport } from './viewport'
@@ -59,6 +59,7 @@ interface RowValue {
   marked: boolean      // an average (window or selection), not the instant value
   exact: boolean
   member: number       // fabric rows: the port (resource) that gives the value, else -1
+  recorded: boolean    // false: the cursor or range is outside the recorded window
 }
 
 /** The pool worker of the attribution queries. */
@@ -148,7 +149,7 @@ export class TimelineRenderer {
 
   constructor(trace: Trace, charges: ChargeCache, pool: WorkerPool, blocks: BlockSelection,
     theme: Theme, prefs: ViewPrefs) {
-    this.axis = new TimeAxis(trace.manifest.end_time)
+    this.axis = new TimeAxis(trace.manifest.end_time, homeRange(trace))
     this.trace = trace
     this.charges = charges
     this.pool = pool
@@ -604,9 +605,9 @@ export class TimelineRenderer {
     const v = this.rowValue(index, row)
     const frac = v.scale > 0 ? v.value / v.scale : NaN
     const mark = v.marked ? (v.exact ? 'avg ' : 'avg ≈') : ''
-    const text = frac === frac ? `${mark}${pct(frac)}` : '–'
+    const text = !v.recorded ? 'not recorded' : frac === frac ? `${mark}${pct(frac)}` : '–'
     ctx.textAlign = 'right'
-    ctx.fillStyle = v.marked ? th.inkMuted : th.ink
+    ctx.fillStyle = v.marked || !v.recorded ? th.inkMuted : th.ink
     ctx.fillText(text, GUTTER - 10, y + row.height / 2)
     ctx.textAlign = 'left'
   }
@@ -619,10 +620,11 @@ export class TimelineRenderer {
     const s = this.sampled.get(index)
     const scale = row.kind === 'fabric' ? 1 : this.res[row.id].ceiling ?? 0
     const at = this.pinned
+    if (at !== null && !recordedAt(this.rec.window, at)) return { value: 0, scale, marked: false, exact: true, member: -1, recorded: false }
     if (at !== null) {
       const p = Math.floor(this.xOf(at) - GUTTER)
       if (s && p >= 0 && p < s.shown.length) {
-        return { value: s.shown[p], scale, marked: false, exact: true, member: s.argmax?.[p] ?? -1 }
+        return { value: s.shown[p], scale, marked: false, exact: true, member: s.argmax?.[p] ?? -1, recorded: true }
       }
     }
     const r = at !== null ? { a: at, b: at + 1 } : this.activeRange()
@@ -630,17 +632,18 @@ export class TimelineRenderer {
       let best = 0
       let member = -1
       let exact = true
-      for (const res of this.source.fabrics[row.id].members) {
+      const rec = recordedPart(this.rec.window, r.a, r.b) !== null
+      for (const res of rec ? this.source.fabrics[row.id].members : []) {
         const c = this.res[res].ceiling
         if (!c) continue
         const avg = this.average(res, r)
         exact &&= avg.exact
         if (avg.value / c >= best) { best = avg.value / c; member = res }
       }
-      return { value: best, scale, marked: true, exact, member }
+      return { value: best, scale, marked: true, exact, member, recorded: rec }
     }
     const avg = this.average(row.id, r)
-    return { value: avg.value, scale, marked: true, exact: avg.exact, member: -1 }
+    return { value: avg.value, scale, marked: true, exact: avg.exact, member: -1, recorded: avg.recorded }
   }
 
   /** The selection, else the visible window clipped to the run. */
@@ -651,16 +654,19 @@ export class TimelineRenderer {
 
   /** Average throughput of a resource over [a, b) (units per cycle). Exact from the bins
    * and, at partial bins, from the charges when they are loaded. */
-  average(resource: number, r: Range): { value: number; exact: boolean } {
+  average(resource: number, range: Range): { value: number; exact: boolean; recorded: boolean } {
     const info = this.res[resource]
+    // Over the part inside the recorded window: outside it the load is unknown.
+    const r = recordedPart(this.rec.window, range.a, range.b)
+    if (!r) return { value: 0, exact: true, recorded: false }
     const span = r.b - r.a
-    if (span <= 0 || info.levelRow < 0) return { value: 0, exact: true }
+    if (info.levelRow < 0) return { value: 0, exact: true, recorded: true }
     const edge = (x: number, y: number): number | null => {
       const g = this.chargeGroups(x, y)
       return g ? chargesAmount(g, resource, x, y) : null
     }
     const { amount, exact } = rangeAmount(this.trace.levels, info.levelRow, r.a, r.b, edge)
-    return { value: amount / span, exact }
+    return { value: amount / span, exact, recorded: true }
   }
 
   /** Line color of a series row (fabric rows and their members share the hue). */
@@ -1041,8 +1047,10 @@ export class TimelineRenderer {
   attributionQuery(): { key: string; req: AttributionRequest } | null {
     const row = this.focusRow()
     if (!row || (row.kind !== 'resource' && row.kind !== 'fabric')) return null
-    const t = this.pinned
-    const r = this.selection && this.selection.b > this.selection.a ? this.selection : null
+    // Over the recorded part of the range (an instant outside the recording: no query).
+    const t = this.pinned !== null && recordedAt(this.rec.window, this.pinned) ? this.pinned : null
+    const r = t === null && this.pinned === null && this.selection && this.selection.b > this.selection.a
+      ? recordedPart(this.rec.window, this.selection.a, this.selection.b) : null
     if (t === null && !r) return null
     const resources = row.kind === 'fabric' ? this.source.fabrics[row.id].members : [row.id]
     const files = this.trace.reader.files
@@ -1301,6 +1309,7 @@ export class TimelineRenderer {
     const p = Math.floor(h.x - GUTTER)
     if (!s || p < 0 || p >= s.shown.length) return null
     const info = this.res[row.id]
+    if (!recordedAt(this.rec.window, h.t)) return { ...this.resourceTitle(row.id), sections: [{ kind: 'note', text: 'not recorded' }] }
     const byRate = info.rate !== null
     const value = (v: number) => rate(v, byRate ? info.ceiling : null, info.unit)
     const share = (v: number) => (info.ceiling ? pct(v / info.ceiling) : undefined)
@@ -1320,7 +1329,9 @@ export class TimelineRenderer {
     if (this.selection && this.selection.b > this.selection.a) {
       const avg = this.average(row.id, this.selection)
       const approx = avg.exact ? '' : '≈'
-      sections.push({ kind: 'rows', rows: [{ label: 'range average', value: `${approx}${value(avg.value)}`, extra: share(avg.value) }] })
+      sections.push({ kind: 'rows', rows: [avg.recorded
+        ? { label: 'range average', value: `${approx}${value(avg.value)}`, extra: share(avg.value) }
+        : { label: 'range average', value: 'not recorded' }] })
     }
     return { ...this.resourceTitle(row.id), sections }
   }
@@ -1337,6 +1348,8 @@ export class TimelineRenderer {
     const p = Math.floor(h.x - GUTTER)
     if (!s || p < 0 || p >= s.shown.length) return null
     const f = this.source.fabrics[row.id]
+    const { name, parent } = splitPath(f.path)
+    if (!recordedAt(this.rec.window, h.t)) return { title: name, path: parent, sections: [{ kind: 'note', text: 'not recorded' }] }
     const port = s.argmax?.[p] ?? -1
     const rows: TipRow[] = [{ label: 'cycle', value: cycles(h.t) }]
     if (port >= 0) {
@@ -1347,11 +1360,12 @@ export class TimelineRenderer {
     } else rows.push({ label: 'load', value: '0' })
     const sections: TipSection[] = [{ kind: 'rows', rows }]
     const v = this.rowValue(h.row, row)
-    if (this.selection && this.selection.b > this.selection.a && v.member >= 0) {
+    if (this.selection && this.selection.b > this.selection.a && !v.recorded) {
+      sections.push({ kind: 'rows', rows: [{ label: 'range busiest', value: 'not recorded' }] })
+    } else if (this.selection && this.selection.b > this.selection.a && v.member >= 0) {
       sections.push({ kind: 'rows', rows: [{ label: 'range busiest', value: relative(this.res[v.member].name, f.path),
         extra: `${v.exact ? '' : '≈'}${pct(v.value)}` }] })
     }
-    const { name, parent } = splitPath(f.path)
     return { title: name, path: parent, sections }
   }
 

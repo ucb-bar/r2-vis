@@ -93,6 +93,27 @@ export function recorded(trace: Trace): Recorded {
   }
 }
 
+/** The part of [a, b) inside the recorded window of a windowed dump (all of it without a
+ * window); null when they do not meet: the load there is unknown, not zero. */
+export function recordedPart(window: [number, number] | null, a: number, b: number): { a: number; b: number } | null {
+  const lo = window ? Math.max(a, window[0]) : a
+  const hi = window ? Math.min(b, window[1]) : b
+  return hi > lo ? { a: lo, b: hi } : null
+}
+
+/** The cycle t is inside the recorded window (always without a window). */
+export function recordedAt(window: [number, number] | null, t: number): boolean {
+  return !window || (t >= window[0] && t < window[1])
+}
+
+/** What the time views show first: the recorded window of a windowed dump, else the run,
+ * with a margin of 2.5 % of its span on each side. */
+export function homeRange(trace: Trace): { a: number; b: number } {
+  const [a, b] = trace.manifest.source.filters?.window ?? [0, trace.manifest.end_time]
+  const m = (b - a) * 0.025
+  return { a: a - m, b: b + m }
+}
+
 /** The static parts of the row model: tree, own rows of every node, fabric nodes. */
 export class RowSource {
   readonly trace: Trace
