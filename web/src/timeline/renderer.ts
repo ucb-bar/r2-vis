@@ -4,10 +4,12 @@
 import type { Attribution, AttributionRequest, OwnerGroup } from '../data/attribution'
 import type { ChargeCache, ChargeGroup } from '../data/charges'
 import { isDict } from '../data/columns'
-import { taskLabel } from '../data/labels'
-import { programSpans } from '../data/programs'
+import { taskLabel, taskName } from '../data/labels'
+import { programSpans, type ProgramSpan } from '../data/programs'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
+import { count, cycles, num, pct, rate, relative, short, splitPath } from '../ui/format'
+import { TIP_ITEMS, tipList, type TipContent, type TipItem, type TipRow, type TipSection } from '../ui/Tooltip'
 import type { BlockSelection } from '../state/blocks'
 import { DEFAULT_PREFS, type ViewPrefs } from '../state/viewprefs'
 import type { Theme } from '../theme/theme'
@@ -140,7 +142,7 @@ export class TimelineRenderer {
   private gridX: number[] = []
   private dpr = 1
   private depNote = false
-  private readonly programsOf: Map<number, { start: number; end: number; name: string }[]>
+  private readonly programsOf: Map<number, ProgramSpan[]>
   /** Called after a change of the persisted view state, and after a view change. */
   onPrefs: (() => void) | null = null
 
@@ -600,9 +602,9 @@ export class TimelineRenderer {
       this.colorsFor(this.lineColorOf(row)))
     // Left label: the value at the cursor, else the average over the range or window.
     const v = this.rowValue(index, row)
-    const pct = v.scale > 0 ? (100 * v.value) / v.scale : NaN
+    const frac = v.scale > 0 ? v.value / v.scale : NaN
     const mark = v.marked ? (v.exact ? 'avg ' : 'avg ≈') : ''
-    const text = pct === pct ? `${mark}${pct.toFixed(pct >= 99.95 ? 0 : 1)} %` : '–'
+    const text = frac === frac ? `${mark}${pct(frac)}` : '–'
     ctx.textAlign = 'right'
     ctx.fillStyle = v.marked ? th.inkMuted : th.ink
     ctx.fillText(text, GUTTER - 10, y + row.height / 2)
@@ -780,7 +782,7 @@ export class TimelineRenderer {
 
   private laneName(task: number): string {
     const lane = (this.trace.facts.tasks.cols.lane as Int32Array)[task]
-    return String(this.trace.dims.lanes[lane]?.path ?? '')
+    return short(String(this.trace.dims.lanes[lane]?.path ?? ''))
   }
 
   isNeutrinoLane(lane: number): boolean {
@@ -1077,10 +1079,10 @@ export class TimelineRenderer {
       const i = -2 - owner
       const name = pc.name as { dict: string[]; codes: Int32Array }
       const nu = (pc.nu as Int32Array)[i]
-      return `program ${name.dict?.[name.codes?.[i]] ?? i} (${String(this.trace.dims.nodes[nu]?.path ?? nu)})`
+      return `program ${name.dict?.[name.codes?.[i]] ?? i} · ${short(String(this.trace.dims.nodes[nu]?.path ?? nu))}`
     }
     const task = this.taskOfGid(owner)
-    return task < 0 ? `task ${owner} (not in the trace)` : (this.taskName(task) ?? `task ${owner}`)
+    return task < 0 ? `gid ${owner} · not in the trace` : taskName(this.trace, task)
   }
 
   /** The tasks table row of a gid (the table is sorted by gid), or -1. */
@@ -1154,12 +1156,12 @@ export class TimelineRenderer {
       point: () => this.groupPoint(g) })) }
   }
 
-  /** A group's name: 'dma_w on root.gpc1.sm0.dma', 'dma_w (16 lanes)', or the owner's name. */
+  /** A group's name: 'dma_w on gpc1.sm0.dma', 'dma_w · 16 lanes', or the owner's name. */
   private groupName(g: OwnerGroup, mode: 'laneKind' | 'kind'): string {
     if (g.owner !== null) return this.ownerName(g.owner)
     if (g.lane < 0) return `${g.kind}`
-    if (mode === 'kind') return `${g.kind} (${g.lanes} lane${g.lanes === 1 ? '' : 's'})`
-    return `${g.kind} on ${String(this.trace.dims.lanes[g.lane]?.path ?? g.lane)}`
+    if (mode === 'kind') return g.lanes > 1 ? `${g.kind} · ${g.lanes} lanes` : g.kind
+    return `${g.kind} on ${short(String(this.trace.dims.lanes[g.lane]?.path ?? g.lane))}`
   }
 
   /** Where a group's flightline ends: its lane row (a kind group: the lane with the largest
@@ -1211,9 +1213,9 @@ export class TimelineRenderer {
       const share = total > 0 ? v / total : 0
       const x = Math.max(GUTTER, Math.min(this.width, p.x))
       const y = Math.max(top, Math.min(bottom, p.y))
-      const amount = t !== null ? `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} lanes` : `${(100 * share).toFixed(share >= 0.1 ? 0 : 1)} %`
+      const amount = t !== null ? `${num(v)} lanes` : pct(share)
       const label = targets[k].short ? `${amount} ${targets[k].short}` : amount
-      const text = p.shown && y === p.y ? label : `${label} · ${p.name}`
+      const text = p.shown && y === p.y ? label : `${label} · ${short(p.name)}`
       const w = ctx.measureText(text).width + 4
       const lx = Math.min(this.width - w - 2, x + 7)
       if (labels.some((q) => lx < q.x + q.w && q.x < lx + w && Math.abs(q.y - y) < 14)) continue
@@ -1256,99 +1258,101 @@ export class TimelineRenderer {
     ctx.restore()
   }
 
-  /** Tooltip lines of the attribution of the selected row: the top owners or groups, with
-   * shares (and task counts for groups). */
-  private attributionLines(): string[] {
+  /** The owners section of the selected row's tooltip: the top owners or groups with their
+   * shares, and lanes held (instant) or task counts (groups). */
+  private attributionSection(): TipSection | null {
     const a = this.attribution
-    if (!a || a.key !== this.attributionAsked) return this.attributionQuery() ? ['owners: loading…'] : []
+    if (!a || a.key !== this.attributionAsked) return this.attributionQuery() ? { kind: 'note', text: 'owners …' } : null
     const { owners, total } = a.res
     const instant = this.pinned !== null
     const mode = this.attributionMode(a.res)
-    const { targets, count } = this.attributionTargets(a.res, 8)
-    const where = instant ? 'at the cursor' : 'over the range'
-    const out = [mode === 'task' ? `owners ${where} (${owners.length.toLocaleString()}):`
-      : `owners ${where}: ${owners.length.toLocaleString()} in ${count.toLocaleString()} ${MODE_NAME[mode]} groups:`]
-    for (let k = 0; k < targets.length; k++) {
-      const g = targets[k]
+    const { targets, count: n } = this.attributionTargets(a.res, TIP_ITEMS)
+    const items: TipItem[] = targets.map((g) => {
       const share = total > 0 ? g.value / total : 0
-      const tasks = mode !== 'task' && g.tasks > 0 ? ` · ${g.tasks.toLocaleString()} task${g.tasks === 1 ? '' : 's'}` : ''
-      out.push(`  ${(100 * share).toFixed(1)} %${instant ? ` · ${g.value.toFixed(2)} lanes` : ''} · ${g.name()}${tasks}`)
-    }
-    if (count > 8) out.push(`  +${(count - 8).toLocaleString()} more`)
-    return out
+      const note = instant ? `${num(g.value)} lanes` : mode !== 'task' && g.tasks > 1 ? `${count(g.tasks)} tasks` : ''
+      return { share, name: g.name(), value: pct(share), note }
+    })
+    const what = owners.length === 1 ? '1 owner' : `${count(owners.length)} owners`
+    return tipList(instant ? 'owners' : 'owners over the range', items, n,
+      mode === 'task' ? what : `${what} · ${count(n)} groups`)
   }
 
-  tooltip(): string[] | null {
-    const lines = this.baseTooltip()
+  tooltip(): TipContent | null {
+    const tip = this.baseTooltip()
     const h = this.hover
-    if (!lines || !h || this.model.rows[h.row]?.key !== this.focusKey) return lines
-    return [...lines, ...this.attributionLines()]
+    if (!tip || !h || this.model.rows[h.row]?.key !== this.focusKey) return tip
+    const owners = this.attributionSection()
+    return owners ? { ...tip, sections: [...tip.sections, owners] } : tip
   }
 
-  private baseTooltip(): string[] | null {
+  private baseTooltip(): TipContent | null {
     const h = this.hover
     if (!h || h.row < 0 || h.x < GUTTER) return null
     const row = this.model.rows[h.row]
-    if (row.notRecorded) return [row.label, 'not recorded in this dump']
+    if (row.notRecorded) return { title: row.label, sections: [{ kind: 'note', text: 'not recorded' }] }
     if (row.kind === 'lane') {
       const task = this.hoveredTask()
-      return task < 0 ? null : this.taskLines(task)
+      return task < 0 ? null : this.taskTip(task)
     }
-    if (row.kind === 'fabric') return this.fabricLines(row, h)
+    if (row.kind === 'group') return this.programTip(row.id, h.t)
+    if (row.kind === 'fabric') return this.fabricTip(row, h)
     if (row.kind !== 'resource') return null
     const s = this.sampled.get(h.row)
     const p = Math.floor(h.x - GUTTER)
     if (!s || p < 0 || p >= s.shown.length) return null
     const info = this.res[row.id]
-    const unit = `${info.unit}/cycle`
-    const pct = (v: number) => (info.ceiling ? ` · ${((100 * v) / info.ceiling).toFixed(1)} %` : '')
-    const lines = [info.name, `t = ${Math.round(h.t).toLocaleString('en-US')} cycles`]
+    const byRate = info.rate !== null
+    const value = (v: number) => rate(v, byRate ? info.ceiling : null, info.unit)
+    const share = (v: number) => (info.ceiling ? pct(v / info.ceiling) : undefined)
+    const rows: TipRow[] = [{ label: 'cycle', value: cycles(h.t) }]
     if (this.smoothing > 1) {
-      lines.push(`${fmt(s.shown[p])} ${unit}${pct(s.shown[p])} (smoothed over ${this.smoothing} px)`)
-      lines.push(`raw ${fmt(s.raw[p])} ${unit}${pct(s.raw[p])}`)
-    } else lines.push(`${fmt(s.raw[p])} ${unit}${pct(s.raw[p])}`)
-    if (info.ceiling) {
-      lines.push(`100 % = ${fmt(info.ceiling)} ${unit} (${info.rate === null ? 'peak of the run' : 'rate'})`)
-    }
-    // Zoomed to charges: the link lanes held at the cursor cycle (trace v1.1).
+      rows.push({ label: 'smoothed', value: value(s.shown[p]), extra: share(s.shown[p]) })
+      rows.push({ label: 'raw', value: value(s.raw[p]), extra: share(s.raw[p]) })
+    } else rows.push({ label: 'load', value: value(s.raw[p]), extra: share(s.raw[p]) })
+    if (!byRate && info.ceiling) rows.push({ label: 'peak', value: rate(info.ceiling, null, info.unit) })
+    // Zoomed to charges: the link lanes held at the cycle shown.
     if (info.linkLanes !== null && this.view.cpp < this.trace.levels.width) {
-      const t = Math.round(h.t)   // the cycle printed as t above
+      const t = Math.round(h.t)
       const g = this.chargeGroups(t, t + 1)
-      if (g) {
-        const held = lanesHeld(g, row.id, t)
-        const k = Math.abs(held - Math.round(held)) < 1e-9 ? String(Math.round(held)) : held.toFixed(2)
-        lines.push(`link lanes held ${k} of ${info.linkLanes}`)
-      }
+      if (g) rows.push({ label: 'lanes held', value: `${num(lanesHeld(g, row.id, t))} / ${info.linkLanes}` })
     }
+    const sections: TipSection[] = [{ kind: 'rows', rows }]
     if (this.selection && this.selection.b > this.selection.a) {
       const avg = this.average(row.id, this.selection)
-      lines.push(`selection avg ${avg.exact ? '' : '≈'}${fmt(avg.value)} ${unit}${pct(avg.value)}`)
+      const approx = avg.exact ? '' : '≈'
+      sections.push({ kind: 'rows', rows: [{ label: 'range average', value: `${approx}${value(avg.value)}`, extra: share(avg.value) }] })
     }
-    lines.push(`${info.cls} · ${fmt(this.view.cpp)} cycles per px (${this.view.cpp < this.trace.levels.width ? 'charges' : 'bins'})`)
-    return lines
+    return { ...this.resourceTitle(row.id), sections }
   }
 
-  private fabricLines(row: Row, h: Hover): string[] | null {
+  /** A resource's title: its name below its node (hbm.port), and the node path. */
+  private resourceTitle(r: number): { title: string; path: string } {
+    const node = String(this.trace.dims.nodes[this.trace.dims.resources[r].node as number]?.path ?? '')
+    const name = this.res[r].name
+    return node && name.startsWith(`${node}.`) ? { title: relative(name, node), path: short(node) } : { title: name, path: '' }
+  }
+
+  private fabricTip(row: Row, h: Hover): TipContent | null {
     const s = this.sampled.get(h.row)
     const p = Math.floor(h.x - GUTTER)
     if (!s || p < 0 || p >= s.shown.length) return null
     const f = this.source.fabrics[row.id]
     const port = s.argmax?.[p] ?? -1
-    const what = { bus: 'ports', link: 'directions', channel: 'channels', memory: 'ports', bank: 'ports' }[f.kind]
-    const lines = [`${f.path} (${f.kind}: ${f.members.length} ${what})`,
-      `t = ${Math.round(h.t).toLocaleString('en-US')} cycles`]
-    const pct = (v: number) => `${(100 * v).toFixed(1)} %`
+    const rows: TipRow[] = [{ label: 'cycle', value: cycles(h.t) }]
     if (port >= 0) {
       const info = this.res[port]
-      lines.push(`max ${pct(s.raw[p])} of ceiling: ${info.name}` + (this.smoothing > 1 ? ` (smoothed max ${pct(s.shown[p])})` : ''))
-      if (info.ceiling) lines.push(`${fmt(s.raw[p] * info.ceiling)} ${info.unit}/cycle of ${fmt(info.ceiling)} ${info.unit}/cycle`)
-    } else lines.push('no charge')
+      rows.push({ label: 'busiest', value: relative(info.name, f.path), extra: pct(s.raw[p]) })
+      if (info.ceiling) rows.push({ label: 'load', value: rate(s.raw[p] * info.ceiling, info.ceiling, info.unit) })
+      if (this.smoothing > 1) rows.push({ label: 'smoothed', value: pct(s.shown[p]) })
+    } else rows.push({ label: 'load', value: '0' })
+    const sections: TipSection[] = [{ kind: 'rows', rows }]
     const v = this.rowValue(h.row, row)
     if (this.selection && this.selection.b > this.selection.a && v.member >= 0) {
-      lines.push(`selection: busiest ${this.res[v.member].name}, avg ${v.exact ? '' : '≈'}${pct(v.value)}`)
+      sections.push({ kind: 'rows', rows: [{ label: 'range busiest', value: relative(this.res[v.member].name, f.path),
+        extra: `${v.exact ? '' : '≈'}${pct(v.value)}` }] })
     }
-    lines.push(`${this.res[f.members[0]].cls} · ${fmt(this.view.cpp)} cycles per px`)
-    return lines
+    const { name, parent } = splitPath(f.path)
+    return { title: name, path: parent, sections }
   }
 
   /** The task's label in the manifest format, or null if it has none. */
@@ -1356,46 +1360,52 @@ export class TimelineRenderer {
     return taskLabel(this.trace, task)
   }
 
-  private taskLines(task: number): string[] {
+  private taskTip(task: number): TipContent {
     const c = this.trace.facts.tasks.cols
-    const num = (name: string): number | null => {
+    const num_ = (name: string): number | null => {
       const col = c[name]
       if (!col || isDict(col)) return null
       const v = col[task]
       return col instanceof Int32Array ? (v === -1 ? null : v) : v === v ? v : null
     }
-    const time = (name: string) => {
-      const v = num(name)
-      return v === null ? '–' : v.toLocaleString('en-US')
-    }
-    const opcode = this.trace.dims.opcodes[num('opcode') ?? 0]?.name
-    const nu = this.trace.dims.nodes[num('nu') ?? 0]?.path
-    const version = num('version')
-    const issue = num('issue')
-    const complete = num('complete')
-    const lines = [this.taskName(task) ?? `${opcode} (no label)`,
-      `gid ${num('gid')} · ${opcode} · ${nu}${version !== null ? ` · version ${version}` : ''}`,
-      `invoke ${time('invoke')} · ready ${time('ready')}`,
-      `issue ${time('issue')} · complete ${time('complete')} · retire ${time('retire')}`]
-    if (issue !== null && complete !== null) {
-      lines.push(`exec ${(complete - issue).toLocaleString('en-US')} cycles · ${num('n_chunks')} chunks · ${num('n_deps')} deps`)
-    }
-    const lane = (c.lane as Int32Array)[task]
-    const depth = this.trace.lanes.depth[lane]
-    if (depth > 1) lines.push(`lane ${this.laneName(task)}: up to ${depth} tasks at once (sub-row ${this.trace.lanes.taskSub[task] + 1})`)
+    const dur = (a: number | null, b: number | null) => (a === null || b === null ? '–' : `${count(b - a)} cycles`)
+    const invoke = num_('invoke')
+    const ready = num_('ready')
+    const issue = num_('issue')
+    const complete = num_('complete')
+    const rows: TipRow[] = [
+      { label: 'issue', value: issue === null ? '–' : cycles(issue) },
+      { label: 'wait', value: dur(invoke, ready) },
+      { label: 'queue', value: dur(ready, issue) },
+      { label: 'exec', value: complete === null ? '–' : dur(issue, complete) },
+    ]
+    const retire = num_('retire')
+    if (retire !== null && complete !== null && retire > complete) rows.push({ label: 'retire', value: `+${count(retire - complete)} cycles` })
     const consumers = this.deps.consumers(task, this.pool)
-    lines.push(`${this.deps.producers(task).length} producers · ${consumers ? consumers.length : '…'} consumers` +
-      (this.arrowsFor(task) ? '' : ' (zoom in for arrows, or click to select)'))
-    return lines
+    const links: TipRow[] = [
+      { label: 'producers', value: String(this.deps.producers(task).length) },
+      { label: 'consumers', value: consumers ? String(consumers.length) : '…' },
+    ]
+    const chunks = num_('n_chunks')
+    if (chunks !== null && chunks > 1) links.push({ label: 'chunks', value: String(chunks) })
+    // The Neutrino that tracks the task, when it is not the one of the lane.
+    const lanePath = String(this.trace.dims.lanes[(c.lane as Int32Array)[task]]?.path ?? '')
+    const nu = String(this.trace.dims.nodes[num_('nu') ?? -1]?.path ?? '')
+    if (nu && !lanePath.startsWith(`${nu}.`)) links.push({ label: 'tracked by', value: short(nu) })
+    const version = num_('version')
+    const name = taskName(this.trace, task)
+    const sub = [`gid ${num_('gid')}`]
+    if (version !== null && !name.endsWith(` v${version}`)) sub.push(`v${version}`)
+    return { title: name, sub: sub.join(' · '), sections: [{ kind: 'rows', rows }, { kind: 'rows', rows: links }] }
   }
-}
 
-
-function fmt(v: number): string {
-  const a = Math.abs(v)
-  if (a >= 1e6) return `${(v / 1e6).toFixed(2)} M`
-  if (a >= 1e3) return `${(v / 1e3).toFixed(2)} k`
-  if (a >= 100) return v.toFixed(0)
-  if (a >= 10) return v.toFixed(1)
-  return v.toFixed(2)
+  /** A program bar in a group header: its name, start, duration and spawning task. */
+  private programTip(node: number, t: number): TipContent | null {
+    const p = this.programsOf.get(node)?.find((s) => s.start <= t && t < s.end)
+    if (!p) return null
+    const rows: TipRow[] = [{ label: 'start', value: cycles(p.start) }, { label: 'duration', value: `${count(p.end - p.start)} cycles` }]
+    const spawn = p.spawn >= 0 ? this.taskOfGid(p.spawn) : -1
+    if (spawn >= 0) rows.push({ label: 'spawned by', value: taskLabel(this.trace, spawn) === null ? `gid ${p.spawn}` : taskName(this.trace, spawn) })
+    return { title: p.name || 'program', path: short(String(this.trace.dims.nodes[node]?.path ?? '')), sections: [{ kind: 'rows', rows }] }
+  }
 }

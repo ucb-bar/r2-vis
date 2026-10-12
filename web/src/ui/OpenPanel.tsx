@@ -28,7 +28,7 @@ export function OpenPanel({ onFiles, onDrop, compact, children }: Props) {
   return (
     <div
       className={over ? 'drop active' : 'drop'}
-      title="files stay in this browser; nothing is uploaded"
+      title="local files only, no upload"
       onDragOver={(e) => { e.preventDefault(); setOver(true) }}
       onDragLeave={() => setOver(false)}
       onDrop={(e) => { e.preventDefault(); setOver(false); onDrop(e.dataTransfer) }}

@@ -71,6 +71,16 @@ export class BlockMetrics {
     return this.compute(node, a, b, 1, out) ? out[0] : NaN
   }
 
+  /** Averages over [a, b): tensor, vector and per class traffic, the ones the node has. */
+  averages(node: number, a: number, b: number): { name: string; value: number }[] {
+    const out = new Float64Array(1)
+    const rows: { name: string; value: number }[] = []
+    if (this.tensor(node, a, b, 1, out)) rows.push({ name: 'tensor', value: out[0] })
+    if (this.vector(node, a, b, 1, out)) rows.push({ name: 'vector', value: out[0] })
+    for (const c of this.classesAt(node)) if (this.traffic(node, c, a, b, 1, out)) rows.push({ name: c, value: out[0] })
+    return rows
+  }
+
   private rate(r: number): number {
     return (this.trace.dims.resources[r].rate as number | null) ?? 0
   }

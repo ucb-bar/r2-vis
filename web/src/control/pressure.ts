@@ -163,6 +163,22 @@ export class ControlData {
     return metric.kind === 'average' ? sum / n : worst
   }
 
+  /** The recorded tables (with a capacity) of a metric at a node: the statistic's value,
+   * the capacity and the pressure, the fullest first. */
+  tablesOf(node: number, metric: Metric, stat: Statistic, t: number, a: number, b: number):
+    { name: string; value: number; cap: number; pressure: number }[] {
+    if (!this.index) return []
+    const tables = metric.kind === 'table' ? [metric.table] : GROUPS[metric.group]
+    const out = []
+    for (const id of tables) {
+      const cap = this.caps[node][id]
+      if (!this.tableRecorded[node][id] || !cap) continue
+      const value = this.stat(node, id, stat, t, a, b)
+      out.push({ name: TABLES[id].name, value, cap, pressure: value / cap })
+    }
+    return out.sort((x, y) => y.pressure - x.pressure)
+  }
+
   /** The entry rows (of the entries table) of a node's table present at t. */
   entriesAt(node: number, table: number, t: number): number[] {
     const e = this.entries?.cols

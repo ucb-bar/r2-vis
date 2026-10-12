@@ -26,7 +26,9 @@ export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: sh
   const canvas = useRef<HTMLCanvasElement>(null)
   const series = useRef<{ key: string | null; width: number; height: number; theme: string; image: HTMLCanvasElement | null }>({ key: null, width: 0, height: 0, theme: '', image: null })
 
-  useEffect(() => onThemeChange(() => { series.current.theme = ''; draw() }), [])
+  // Drawn on the next frame: the timeline renderer (the series' line color) takes the new
+  // tokens in its own handler, which may run after this one.
+  useEffect(() => onThemeChange(() => { series.current.theme = ''; requestAnimationFrame(draw) }), [])
 
   const geometry = () => {
     const cv = canvas.current as HTMLCanvasElement
@@ -50,7 +52,8 @@ export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: sh
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     const row = renderer.focusRow()
     const s = series.current
-    const themeKey = th.accent + th.surface
+    // the renderer's tokens: the series is drawn with its line colors
+    const themeKey = renderer.theme.accent + renderer.theme.surface
     if (s.key !== (row?.key ?? null) || s.width !== width || s.theme !== themeKey || s.height !== height) {
       s.key = row?.key ?? null
       s.width = width

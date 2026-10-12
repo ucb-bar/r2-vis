@@ -1,3 +1,5 @@
+import { Tooltip, type TipContent } from '../ui/Tooltip'
+import { cycles } from '../ui/format'
 import { useEffect, useRef, useState } from 'react'
 import type { ChargeCache } from '../data/charges'
 import type { Trace } from '../data/trace'
@@ -21,8 +23,7 @@ interface Props {
 interface Tip {
   x: number
   y: number
-  title: string
-  lines: string[]
+  content: TipContent
 }
 
 interface Prefs {
@@ -121,15 +122,9 @@ export function TrafficView({ trace, charges, store }: Props) {
       const l = renderer.linkAt(hover.x, hover.y)
       const key = l?.key ?? null
       if (key !== renderer.hoverKey) renderer.hoverKey = key
-      if (!l) { setTip(null); return }
-      const lines = renderer.notRecorded(l) ? ['not recorded in this dump'] : renderer.detail(l)
-      if (!renderer.notRecorded(l)) {
-        const top = renderer.topKinds(l)
-        if (top === 'loading') lines.push('task kinds: loading the charges…')
-        else if (top === 'too long') lines.push('task kinds: select a shorter range')
-        else if (top.length) lines.push(`task kinds: ${top.map((k) => `${k.name} ${(100 * k.share).toFixed(0)} %`).join(', ')}`)
-      }
-      setTip({ x: hover.x, y: hover.y, title: `${l.name} · ${l.cls}`, lines })
+      if (l) { setTip({ x: hover.x, y: hover.y, content: renderer.linkTip(l) }); return }
+      const b = renderer.busAt(hover.x, hover.y)
+      setTip(b ? { x: hover.x, y: hover.y, content: renderer.busTip(b) } : null)
     }
     const tick = () => {
       loop = 0
@@ -258,8 +253,8 @@ export function TrafficView({ trace, charges, store }: Props) {
       <div className="traffic-main">
         <div className="traffic-head">
           <span className="muted">depth {level} / {renderer.model.depth}</span>
-          {renderer.rec.window && <span className="badge" title="loads average over the recorded time window only">windowed</span>}
-          {undrawn.length > 0 && <span className="badge" title={`not drawn (caches, or links that join no node to its parent): ${undrawn.join(', ')}`}>
+          {renderer.rec.window && <span className="badge" title={renderer.rec.window ? `recorded ${cycles(renderer.rec.window[0])} – ${cycles(renderer.rec.window[1])}` : undefined}>windowed</span>}
+          {undrawn.length > 0 && <span className="badge" title={`not drawn: ${undrawn.join(', ')}`}>
             {undrawn.length} links not drawn</span>}
           <span className="spacer" />
           {zoom.stops.length > 1 && (
@@ -275,14 +270,11 @@ export function TrafficView({ trace, charges, store }: Props) {
           <canvas ref={animCanvas} />
           <canvas ref={topCanvas} />
           {tip && (
-            <div className="tooltip" style={{
+            <Tooltip tip={tip.content} style={{
               left: tip.x > renderer.width - 440 ? undefined : tip.x + 14,
               right: tip.x > renderer.width - 440 ? renderer.width - tip.x + 14 : undefined,
-              top: tip.y > renderer.height - 120 ? undefined : tip.y + 14,
-              bottom: tip.y > renderer.height - 120 ? renderer.height - tip.y + 14 : undefined }}>
-              <div className="tooltip-title">{tip.title}</div>
-              {tip.lines.map((l, i) => <div key={i}>{l}</div>)}
-            </div>
+              top: tip.y > renderer.height - 240 ? undefined : tip.y + 14,
+              bottom: tip.y > renderer.height - 240 ? renderer.height - tip.y + 14 : undefined }} />
           )}
         </div>
       </div>
@@ -318,7 +310,7 @@ export function TrafficView({ trace, charges, store }: Props) {
           ))}
         </Section>
         <Section title="Motion">
-          <label className="tool" title={reducedMotion ? 'off: the system asks for reduced motion' : undefined}>
+          <label className="tool" title={reducedMotion ? 'off: reduced motion in the system settings' : undefined}>
             <input type="checkbox" checked={prefs.animate && !reducedMotion} disabled={reducedMotion}
               onChange={(e) => setPrefs((p) => ({ ...p, animate: e.target.checked }))} />
             animate the patterns

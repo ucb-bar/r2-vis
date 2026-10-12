@@ -9,6 +9,7 @@ import { BlocksPanel } from '../ui/BlocksPanel'
 import { Section, Sidebar } from '../ui/Sidebar'
 import { OTHER } from './colors'
 import { Minimap } from './Minimap'
+import { Tooltip, type TipContent } from '../ui/Tooltip'
 import { AXIS, GUTTER, MAX_SMOOTH, MODE_NAME, TimelineRenderer, type AttributeTo } from './renderer'
 import { DRAG_PX, TimeInput } from './timeinput'
 
@@ -85,7 +86,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
   const [contentHeight, setContentHeight] = useState(renderer.model.height + AXIS)
   // The scroller's height as last laid out (the spacer under the sticky canvas uses it).
   const [viewHeight, setViewHeight] = useState(0)
-  const [tip, setTip] = useState<{ x: number; y: number; lines: string[] } | null>(null)
+  const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
   const [menu, setMenu] = useState<Menu | null>(null)
   const [smoothing, setSmoothing] = useState(renderer.smoothing)
   const [showAll, setShowAll] = useState(false)
@@ -123,7 +124,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       if (!frame.current) frame.current = requestAnimationFrame(draw)
     }
     charges.onLoad = request
-    renderer.deps.onReady = request
+    renderer.deps.onReady = () => { request(); updateTip() }
     renderer.onPrefs = () => savePrefs(prefsKeyRef.current, renderer.prefs())
     let mapPending = false
     const publishWindow = () => {
@@ -225,9 +226,9 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       return { x: e.clientX - rect.left, y: e.clientY - rect.top }
     }
     const updateTip = () => {
-      const lines = renderer.tooltip()
+      const content = renderer.tooltip()
       const h = renderer.hover
-      setTip(lines && h ? { x: h.x, y: h.y, lines } : null)
+      setTip(content && h ? { x: h.x, y: h.y, content } : null)
     }
     const setHover = (x: number, y: number) => {
       renderer.hover = { x, y, row: renderer.rowAtY(y), t: renderer.timeAtX(x) }
@@ -453,9 +454,9 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
             <canvas className="tl-canvas" ref={canvas} />
             <div style={{ height: Math.max(0, contentHeight - viewHeight) }} />
             {tip && (
-              <div className="tooltip" style={{ left: tip.x + 14, top: tip.y + 14 + (scroller.current?.scrollTop ?? 0) }}>
-                {tip.lines.map((l, i) => <div key={i} className={i === 0 ? 'tooltip-title' : undefined}>{l}</div>)}
-              </div>
+              <Tooltip tip={tip.content} style={{ left: tip.x > renderer.width - 440 ? undefined : tip.x + 14,
+                right: tip.x > renderer.width - 440 ? renderer.width - tip.x + 14 : undefined,
+                top: tip.y + 14 + (scroller.current?.scrollTop ?? 0) }} />
             )}
             {menu && (
               <div className="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>

@@ -5,6 +5,7 @@ import type { Trace } from '../data/trace'
 import type { BlockSelection } from '../state/blocks'
 import type { TimeRange } from '../state/viewstore'
 import type { Theme } from '../theme/theme'
+import { pct } from '../ui/format'
 import { boxAt, layout, type Box } from './layout'
 import { BlockMetrics, type TrafficClass } from './metrics'
 
@@ -125,6 +126,15 @@ export class BlockRenderer {
   private screen(b: Box): { x: number; y: number; w: number; h: number } {
     const c = this.cam
     return { x: b.x * c.s + c.ox, y: b.y * c.s + c.oy, w: b.w * c.s, h: b.h * c.s }
+  }
+
+  /** The box is drawn with its strips (their values are on screen). */
+  showsStrips(b: Box): boolean {
+    const r = this.screen(b)
+    if (r.h < FILL_ONLY_PX || r.w < NAME_W_PX || r.h < NAME_H_PX) return false
+    const strips = this.stripsOf(b.node)
+    const room = (b.band * this.cam.s - HEADER_PX - 6) / strips.length
+    return strips.length > 0 && (b.children.length ? Math.min(STRIP_MAX_PX, room) : room) >= 10
   }
 
   private drawBox(ctx: CanvasRenderingContext2D, b: Box): void {
@@ -252,7 +262,7 @@ export class BlockRenderer {
     for (let k = 0; k < n; k++) sum += v[k]
     ctx.fillStyle = th.inkSecondary
     ctx.textAlign = 'right'
-    ctx.fillText(`${((100 * sum) / n).toFixed(1)} %`, x + STRIP_LABEL_PX - 8, y + h / 2)
+    ctx.fillText(pct(sum / n), x + STRIP_LABEL_PX - 8, y + h / 2)
     ctx.textAlign = 'left'
   }
 

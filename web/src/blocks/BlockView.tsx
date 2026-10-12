@@ -3,6 +3,8 @@ import type { Trace } from '../data/trace'
 import type { ViewStore } from '../state/viewstore'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { BlockRenderer } from './renderer'
+import { tipPlace, Tooltip, type TipContent } from '../ui/Tooltip'
+import { pct, splitPath } from '../ui/format'
 
 declare global {
   interface Window { __r2blocks?: BlockRenderer }
@@ -20,7 +22,7 @@ export function BlockView({ trace, store }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null)
   const [renderer] = useState(() => new BlockRenderer(trace, store.blocks, store.window.get(), readTheme()))
   const [checked, setChecked] = useState(store.blocks.get())
-  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null)
+  const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
 
   useEffect(() => {
     window.__r2blocks = renderer
@@ -87,10 +89,12 @@ export function BlockView({ trace, store }: Props) {
       if (node !== renderer.hoverNode) { renderer.hoverNode = node; request() }
       const toggle = renderer.toggleAt(x, y)
       cv.style.cursor = toggle !== null ? 'pointer' : 'grab'
-      if (box) {
-        const u = renderer.metrics.computeAverage(box.node, renderer.window.a, renderer.window.b)
-        const inTl = store.blocks.has(box.node) ? 'in the timeline' : 'not in the timeline'
-        setTip({ x, y, text: `${box.path} · tensor ${u === u ? `${(100 * u).toFixed(1)} %` : 'none'} over the window · ${inTl}` })
+      // A box drawn with its strips shows its values already.
+      if (box && !renderer.showsStrips(box)) {
+        const rows = renderer.metrics.averages(box.node, renderer.window.a, renderer.window.b)
+          .map((m) => ({ label: m.name, value: pct(m.value) }))
+        const { name, parent } = splitPath(box.path)
+        setTip({ x, y, content: { title: name, path: parent, sections: rows.length ? [{ kind: 'rows', rows }] : [] } })
       } else setTip(null)
     }
     const onUp = (e: PointerEvent) => {
@@ -133,7 +137,7 @@ export function BlockView({ trace, store }: Props) {
   return (
     <div className="block-view" ref={host}>
       <canvas ref={canvas} className="block-canvas" />
-      {tip && <div className="tooltip" style={{ left: tip.x + 14, top: tip.y + 14 }}>{tip.text}</div>}
+      {tip && <Tooltip tip={tip.content} style={tipPlace(tip, host.current)} />}
       <div className="float-panel">
         <div className="float-panel-head">
           <strong>In the timeline</strong>

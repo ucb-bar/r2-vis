@@ -7,6 +7,7 @@ import { ViewStore } from './state/viewstore'
 import { OpenPanel } from './ui/OpenPanel'
 import { LoadReport } from './ui/LoadReport'
 import { Workspace } from './ui/Workspace'
+import { ThemeToggle } from './ui/ThemeToggle'
 
 type State =
   | { kind: 'idle' }
@@ -69,6 +70,7 @@ export function App() {
           </button>
         )}
         {state.kind === 'loaded' && <OpenPanel compact onFiles={onFiles} onDrop={onDrop} />}
+        <ThemeToggle />
       </header>
       <main className="main">
         {state.kind !== 'loaded' && (

@@ -6,6 +6,8 @@ import type { ChargeCache } from '../data/charges'
 import type { Trace } from '../data/trace'
 import type { Theme } from '../theme/theme'
 import { isDict } from '../data/columns'
+import { num, pct, rate, relative, short, splitPath } from '../ui/format'
+import { tipList, type TipContent, type TipRow } from '../ui/Tooltip'
 import { recorded, type Recorded } from '../timeline/rows'
 import { rgba } from '../timeline/raster'
 import { chargesAmount, rangeAmount } from '../timeline/util'
@@ -70,8 +72,11 @@ interface Box {
   open?: string
 }
 
-interface BusBox {
+export interface BusBox {
   x: number
+  /** the bus path and its attachments */
+  path: string
+  atts: number[]
   y0: number
   y1: number
   label: string
@@ -117,6 +122,8 @@ export class TrafficRenderer {
   private strips: Strip[] = []
   private boxes: Box[] = []
   private busBoxes: BusBox[] = []
+  /** bus port resource -> bus id */
+  private readonly busOfPort = new Map<number, number>()
   private readonly patterns = new Map<string, { pattern: CanvasPattern; period: number }>()
   private dpr = 1
   private readonly layouts = new Map<string, Layout>()
@@ -144,6 +151,12 @@ export class TrafficRenderer {
     this.tree = new MergeTree(this.model)
     this.rec = recorded(trace)
     this.bidir = new Map(trace.dims.resources.map((r) => [r.id as number, (r.amount as number) > 0]))
+    for (const at of trace.dims.attachments) {
+      for (const f of ['in_resource', 'out_resource', 'in_wr_resource', 'out_wr_resource']) {
+        const r = at[f] as number | null
+        if (r !== null && r !== undefined && r >= 0) this.busOfPort.set(r, at.bus as number)
+      }
+    }
   }
 
   private get visibleClasses(): Record<LinkClass, boolean> {
@@ -512,49 +525,111 @@ export class TrafficRenderer {
     return { ...best, exact, charged, kinds: [...kinds.values()] }
   }
 
-  /** Tooltip lines of a link: per direction its resources (or, for a group, its kinds of
-   * resources summed) with the rate and the % of ceiling. */
-  detail(l: PLink): string[] {
+  /** The tooltip of a link, attachment or link group: per direction the load of each of its
+   * resources (a group: of each kind of resource, summed) in a table, then the task kinds. */
+  linkTip(l: PLink): TipContent {
+    const node = String(this.trace.dims.nodes[l.node]?.path ?? '')
+    const tip: TipContent = { title: relative(l.name, node), path: short(node), sections: [] }
+    if (this.notRecorded(l)) {
+      tip.sections.push({ kind: 'note', text: 'not recorded' })
+      return tip
+    }
     const res = this.trace.dims.resources
-    const unit = (r: number) => String(res[r].unit ?? '')
-    const fmt = (rate: number, cap: number, u: string) =>
-      `${num(rate)} ${u}/cycle${cap > 0 ? ` · ${(100 * rate / cap).toFixed(1)} % of ${num(cap)} ${u}/cycle` : ''}`
     const heads = this.headsOf(l)
+    // Per row (a resource, or a kind of resource): its cells per direction, and whether it
+    // carried anything (an idle write channel adds nothing: the strips show the write load).
+    const rows = new Map<string, { cells: string[]; busy: boolean; write: boolean }>()
+    const put = (key: string, k: 0 | 1, v: number, cap: number, exact: boolean, write: boolean) => {
+      const row = rows.get(key) ?? { cells: [key, '', '', '', ''], busy: false, write }
+      row.cells[1 + 2 * k] = `${exact ? '' : '≈'}${cap > 0 ? `${num(v)} / ${num(cap)}` : num(v)}`
+      row.cells[2 + 2 * k] = cap > 0 ? pct(v / cap) : ''
+      row.busy ||= v > 0
+      rows.set(key, row)
+    }
+    let unit = ''
     if (l.kind === 'cross' || l.kind === 'self') {
-      const out: string[] = []
       for (const k of [0, 1] as const) {
         const g = this.groupLoad(k === 0 ? l.fwdMembers : l.revMembers)
-        if (!g.kinds.length) continue
-        out.push(`${heads[k]}:`)
-        for (const x of g.kinds) out.push(`  ${x.n} ${x.key}: ${fmt(x.rate, x.cap, x.unit)}${g.exact ? '' : ' (approx.)'}`)
+        for (const x of g.kinds) {
+          unit ||= x.unit
+          put(x.n > 1 ? `${x.key} ×${x.n}` : x.key, k, x.rate, x.cap, g.exact, x.key.endsWith(' write'))
+        }
       }
-      return out
+    } else {
+      for (const k of [0, 1] as const) {
+        for (const r of directionSet(l, k)) {
+          unit ||= String(res[r].unit ?? '')
+          const x = this.rate(r)
+          put(this.resourceRole(l, r), k, x.value, (res[r].ceiling as number | null) ?? 0, x.exact, !!res[r].write)
+        }
+      }
     }
-    const out: string[] = []
-    const line = (r: number, head: string) => {
-      const x = this.rate(r)
-      out.push(`${head}: ${fmt(x.value, (res[r].ceiling as number | null) ?? 0, unit(r))}${x.exact ? '' : ' (approx.)'}`)
+    const shown = [...rows.values()].filter((r) => r.busy || !r.write).map((r) => r.cells)
+    if (shown.length) tip.sections.push({ kind: 'table', head: [`${unit}/cycle`, heads[0], '', heads[1], ''], rows: shown })
+    const top = this.topKinds(l)
+    if (top === 'loading') tip.sections.push({ kind: 'note', text: 'task kinds …' })
+    else if (top !== 'too long' && top.length) {
+      tip.sections.push(tipList('task kinds', top.map((k) => ({ share: k.share, name: k.name, value: pct(k.share) })), top.length))
     }
-    // Per direction the MAX over its resources: the link direction or port, the ports it
-    // passes, and the write channels.
-    for (const k of [0, 1] as const) {
-      const rs = directionSet(l, k)
-      if (!rs.length) continue
-      out.push(`${heads[k]}:`)
-      for (const r of rs) line(r, `  ${String(res[r].name)}`)
+    return tip
+  }
+
+  /** A resource's row in a link tooltip: the link, the port of its bus (by the bus name), or
+   * its role; ' write' for a write channel. */
+  private resourceRole(l: PLink, r: number): string {
+    const res = this.trace.dims.resources[r]
+    const write = res.write ? ' write' : ''
+    if (r === l.fwd || r === l.rev) return `${l.kind === 'att' ? 'port' : 'link'}${write}`
+    const bus = this.busOfPort.get(r)
+    if (bus !== undefined) return `${splitPath(String(this.trace.dims.buses[bus]?.path ?? '')).name} port${write}`
+    return `${String(res.role ?? '')}${write}`
+  }
+
+  /** The bus box under (x, y), or null. */
+  busAt(x: number, y: number): BusBox | null {
+    for (const b of this.busBoxes) if (Math.abs(x - b.x) <= BUS_HALF + 2 && y >= b.y0 && y <= b.y1) return b
+    return null
+  }
+
+  /** The tooltip of a bus box: its busiest port over the range and that port's load. */
+  busTip(b: BusBox): TipContent {
+    const res = this.trace.dims.resources
+    const atts = this.trace.dims.attachments
+    let best = -1
+    let bestU = -1
+    let exact = true
+    let v = 0
+    for (const a of b.atts) {
+      for (const f of ['in_resource', 'out_resource', 'in_wr_resource', 'out_wr_resource']) {
+        const r = atts[a]?.[f] as number | null | undefined
+        if (r === null || r === undefined || r < 0) continue
+        const cap = (res[r].ceiling as number | null) ?? 0
+        const x = this.rate(r)
+        exact &&= x.exact
+        const u = cap > 0 ? x.value / cap : 0
+        if (u > bestU) { bestU = u; best = r; v = x.value }
+      }
     }
-    return out
+    const { name, parent } = splitPath(b.path)
+    const rows: TipRow[] = []
+    if (best >= 0) {
+      const cap = (res[best].ceiling as number | null) ?? null
+      rows.push({ label: 'busiest', value: relative(String(res[best].name), b.path), extra: `${exact ? '' : '≈'}${pct(bestU)}` })
+      rows.push({ label: 'load', value: `${exact ? '' : '≈'}${rate(v, cap, String(res[best].unit ?? ''))}` })
+    }
+    rows.push({ label: 'ports', value: String(b.atts.length) })
+    return { title: name, path: parent, sections: [{ kind: 'rows', rows }] }
   }
 
   /** The names of a link's two directions in its tooltip. */
   private headsOf(l: PLink): [string, string] {
-    if (l.kind === 'att') return ['in (to the bus)', 'out (from the bus)']
+    if (l.kind === 'att') return ['in', 'out']
     if (l.kind === 'link') {
       const d = this.trace.dims
       const [a, b] = l.ends.map((e) => d.buses[d.attachments[e].bus as number].node)
-      if (a === b) return ['ab (from -> to)', 'ba (to -> from)']
+      if (a === b) return ['ab', 'ba']
     }
-    return ['up (to the parent)', 'down (to the child)']
+    return ['up', 'down']
   }
 
   /** forward, reverse or both: the directions that carried traffic over the whole run. */
@@ -625,14 +700,14 @@ export class TrafficRenderer {
   private kindOf(gid: number, msg: number): string {
     if (gid >= 0) {
       const row = this.taskRow(gid)
-      if (row < 0) return 'tasks not in the tasks table'
+      if (row < 0) return 'not in the trace'
       const kind = this.trace.facts.tasks.cols.kind
       if (kind && isDict(kind) && kind.codes[row] >= 0) return kind.dict[kind.codes[row]]
       const op = (this.trace.facts.tasks.cols.opcode as Int32Array)[row]
       return String(this.trace.dims.opcodes[op]?.name ?? `opcode ${op}`)
     }
     if (msg >= 0) return `message ${String(this.trace.dims.message_kinds[msg]?.name ?? msg)}`
-    return 'load, store or program'
+    return 'no task'
   }
 
   private taskRow(gid: number): number {
@@ -862,7 +937,7 @@ export class TrafficRenderer {
       const ends = b.atts.flatMap((a) => endY.get(a) ?? [])
       if (!ends.length) continue
       this.busBoxes.push({ x: X(b.x), y0: Math.min(...ends.map((e) => e.y - e.w / 2)) - BOX_PAD,
-        y1: Math.max(...ends.map((e) => e.y + e.w / 2)) + BOX_PAD, label: b.label, cls: b.cls })
+        y1: Math.max(...ends.map((e) => e.y + e.w / 2)) + BOX_PAD, label: b.label, cls: b.cls, path: b.path, atts: b.atts })
     }
     this.stats.drawMs.push(performance.now() - t0)
     if (this.stats.drawMs.length > 2000) this.stats.drawMs.splice(0, 1000)
@@ -1032,7 +1107,7 @@ export class TrafficRenderer {
     }
   }
 
-  /** "32 % · 164 B/cycle" on a strip, in its longest segment free of the boxes drawn over
+  /** "32 % · 164 B/cycle" on a strip (format.ts: "<0.1 % · 0.01 B/cycle"), in its longest segment free of the boxes drawn over
    * it; when that does not fit, the short form "32 %"; when neither fits, nothing (the
    * tooltip has the values). Each strip (and loop leg) shows its own direction. */
   private stripText(ctx: CanvasRenderingContext2D, s: Strip, boxes: { x0: number; x1: number; y0: number; y1: number }[]): 'full' | 'short' | null {
@@ -1041,11 +1116,11 @@ export class TrafficRenderer {
     const ch = s.ch ?? 'all'
     const v = this.dirLoad(l, s.dir, ch)
     const unit = String(this.trace.dims.resources[l.fwd ?? l.members[0] ?? 0]?.unit ?? 'B')
-    const pct = `${(100 * v.util).toFixed(v.util >= 0.1 || v.util === 0 ? 0 : 1)} %`
+    const share = pct(v.util)
     // A write channel or write port sets it (or it is a write strip): marked "w".
     const w = (ch === 'write' || (ch === 'all' && v.write)) && v.rate > 0 ? 'w ' : ''
-    const full = v.rate > 0 ? `${w}${pct} · ${num(v.rate)} ${unit}/cycle` : pct
-    const short = `${w}${pct}`
+    const full = v.rate > 0 ? `${w}${share} · ${rate(v.rate, null, unit)}` : share
+    const short = `${w}${share}`
     ctx.font = `600 ${th.fontSizeXs + TEXT_UP}px ${th.fontSans}`
     let segs: [number, number][] = [[s.a, s.b]]
     for (const bx of boxes) {
@@ -1232,10 +1307,6 @@ function hairpinPath(ctx: CanvasRenderingContext2D, xa: number, xe: number, yt: 
   ctx.lineTo(xe, yt)
   ctx.arc(xe, (yt + yb) / 2, (yb - yt) / 2, -Math.PI / 2, Math.PI / 2)
   ctx.lineTo(xa, yb)
-}
-
-function num(v: number): string {
-  return v.toFixed(v >= 100 || Number.isInteger(v) ? 0 : v >= 10 ? 1 : 2)
 }
 
 function clip(ctx: CanvasRenderingContext2D, s: string, x: number, y: number, max: number): void {

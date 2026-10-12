@@ -7,6 +7,7 @@ import { ControlView } from '../control/ControlView'
 import type { TimelineRenderer } from '../timeline/renderer'
 import { TrafficView } from '../traffic/TrafficView'
 import { TimeStrip } from './TimeStrip'
+import { cycles, span } from './format'
 
 type Mode = 'traffic' | 'control'
 
@@ -33,10 +34,7 @@ export function InstantView({ trace, charges, store, strip, pool }: Props) {
   }, [store])
   const active = store.activeRange()
   const cursor = store.cursor.get()
-  const n = (t: number) => Math.round(t).toLocaleString('en-US')
-  const what = active.kind === 'cursor'
-    ? `t = ${n(cursor?.t ?? active.a)} · [${n(active.a)}, ${n(active.b)})`
-    : `[${n(active.a)}, ${n(active.b)}) · ${n(active.b - active.a)} cycles`
+  const what = active.kind === 'cursor' ? `t = ${cycles(cursor?.t ?? active.a)}` : span(active.a, active.b)
   return (
     <div className="instant">
       {strip && <TimeStrip store={store} timeline={strip} />}

@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from 'react'
 import { isDict } from '../data/columns'
-import { taskLabel } from '../data/labels'
+import { taskLabel, taskName } from '../data/labels'
 import type { Trace } from '../data/trace'
 import type { ViewStore } from '../state/viewstore'
+import { count, cycles, num, pct, span } from '../ui/format'
 import type { ControlIndex } from './index'
 import { TABLES, type ControlData } from './pressure'
 
@@ -29,7 +30,6 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
   const c = trace.facts.tasks.cols
   const gid = c.gid as Int32Array
   const kindCol = c.kind && isDict(c.kind) ? c.kind : null
-  const fmt = (v: number) => Math.round(v).toLocaleString('en-US')
   const label = (task: number) => taskLabel(trace, task) ?? `task ${gid[task]}`
   const reveal = (task: number) => store.reveal.set(task)
   const keep = (task: number) => kind < 0 || (kindCol !== null && kindCol.codes[task] === kind)
@@ -43,7 +43,7 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
   const more = (id: number, n: number) => n > ROW_LIMIT && (
     <button className="button small" onClick={() => setAll(toggle(all, id))}>{all.has(id) ? 'show fewer' : `show all ${n}`}</button>
   )
-  const pct = (v: number, cap: number | null) => (cap ? ` (${((100 * v) / cap).toFixed(v / cap >= 0.1 ? 0 : 1)} %)` : '')
+  const share = (v: number, cap: number | null) => (cap ? ` · ${pct(v / cap)}` : '')
   const tasks = index.at(node, t)
   const nodes = trace.dims.nodes
 
@@ -66,7 +66,7 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
                     <td>{taskCell(task)}</td>
                     <td className="num">{gid[task]}</td>
                     <td className="num">{version >= 0 ? version : ''}</td>
-                    <td className="num">{fmt(t - (c.invoke as Float64Array)[task])}</td>
+                    <td className="num">{count(t - (c.invoke as Float64Array)[task])}</td>
                     <td className="num">{deps.length}</td>
                     <td className="producers">
                       {deps.slice(0, 8).map((d, k) => {
@@ -74,7 +74,7 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
                         const row = index.rowOf(d.producer)
                         return row < 0
                           ? <span key={k} className="muted" title="not in the trace">{d.producer} </span>
-                          : <button key={k} className="link" title={`${label(row)}${d.remote ? ' (remote)' : ''}`}
+                          : <button key={k} className="link" title={`${taskName(trace, row)}${d.remote ? ' · remote' : ''}`}
                             onClick={() => reveal(row)}>{d.producer}{d.remote ? '*' : ''}</button>
                       })}
                       {deps.length > 8 && <span className="muted">+{deps.length - 8}</span>}
@@ -104,7 +104,7 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
                     <td className="num">{gid[task]}</td>
                     <td className="num">{version >= 0 ? version : ''}</td>
                     <td>{done ? 'done' : 'executing'}</td>
-                    <td className="num">{fmt(t - (c.issue as Float64Array)[task])}</td>
+                    <td className="num">{count(t - (c.issue as Float64Array)[task])}</td>
                   </tr>
                 )
               })}
@@ -133,10 +133,10 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
           <tbody>
             {limit(table, rows).map((i) => (
               <tr key={i}>
-                <td className="mono">0x{base[i].toString(16)}{version[i] >= 0 ? ` v${version[i]}` : ''}{len[i] > 0 ? ` +${fmt(len[i])} B` : ''}</td>
+                <td className="mono">0x{base[i].toString(16)}{version[i] >= 0 ? ` v${version[i]}` : ''}{len[i] > 0 ? ` +${count(len[i])} B` : ''}</td>
                 <td>{egid[i] >= 0 ? taskCell(index.rowOf(egid[i])) : <span className="muted">none</span>}</td>
                 <td>{peer[i] >= 0 ? String(nodes[peer[i]]?.name ?? peer[i]) : ''}</td>
-                <td className="num">{fmt(t - start[i])}</td>
+                <td className="num">{count(t - start[i])}</td>
                 <td className="muted">{flagText(table, flags[i])}</td>
               </tr>
             ))}
@@ -150,7 +150,7 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
   return (
     <div className="node-panel">
       <h3>{String(nodes[node].path)}</h3>
-      <div className="muted">t = {fmt(t)} · range [{fmt(range.a)}, {fmt(range.b)})</div>
+      <div className="muted">t = {cycles(t)} · {span(range.a, range.b)}</div>
       {kindCol && (
         <label className="tool">
           task kind
@@ -171,9 +171,9 @@ export function NodePanel({ trace, store, data, index, node, t, range }: Props) 
                 <td><span className="fold">{v.recorded ? (isOpen ? '▾' : '▸') : ''}</span>{tb.name}</td>
                 {v.recorded ? (
                   <>
-                    <td className="num">{fmt(v.at)}{v.cap ? ` of ${v.cap}` : ''}</td>
-                    <td className="num">{v.average.toFixed(1)}{pct(v.average, v.cap)}</td>
-                    <td className="num">{fmt(v.peak)}{pct(v.peak, v.cap)}</td>
+                    <td className="num">{v.cap ? `${v.at} / ${v.cap}` : v.at}</td>
+                    <td className="num">{num(v.average)}{share(v.average, v.cap)}</td>
+                    <td className="num">{v.peak}{share(v.peak, v.cap)}</td>
                   </>
                 ) : <td colSpan={3} className="muted">not recorded</td>}
               </tr>,

@@ -4,6 +4,7 @@
 // cursor lines over a plot area.
 import type { Theme } from '../theme/theme'
 import { clampViewport, fit, formatCycles, tickStep, zoomAt, type Viewport } from './viewport'
+import { count } from '../ui/format'
 
 export const GUTTER = 300   // label column width (CSS px); the plot starts here
 export const AXIS = 28      // axis strip height
@@ -133,7 +134,7 @@ export class TimeAxis {
       const b = Math.max(r.a, r.b)
       const xa = this.xOf(a)
       const xb = this.xOf(b)
-      const text = `${Math.round(b - a).toLocaleString('en-US')} cycles`
+      const text = `${count(b - a)} cycles`
       ctx.font = `600 ${th.fontSizeXs}px ${th.fontSans}`
       const w = ctx.measureText(text).width + 10
       const cx = Math.max(GUTTER + w / 2, Math.min(this.width - w / 2, (xa + xb) / 2))

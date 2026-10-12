@@ -5,6 +5,9 @@ import type { ViewStore } from '../state/viewstore'
 import { onThemeChange, readTheme, type Theme } from '../theme/theme'
 import { rgba } from '../timeline/raster'
 import { Sidebar } from '../ui/Sidebar'
+import { useThemeVersion } from '../ui/ThemeToggle'
+import { tipPlace, Tooltip, tipList, type TipContent } from '../ui/Tooltip'
+import { cycles, num, pct, span, splitPath } from '../ui/format'
 import { ControlIndex } from './index'
 import { NodePanel } from './NodePanel'
 import { ControlData, TABLES, type Metric, type Statistic } from './pressure'
@@ -48,7 +51,7 @@ export function ControlView({ trace, store, pool }: Props) {
   const [selected, setSelected] = useState<number | null>(null)
   const [time, setTime] = useState<{ t: number; pinned: boolean } | null>(store.cursor.get())
   const [range, setRange] = useState(() => rangeOf(store, trace))
-  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null)
+  const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
   const state = useRef({ metric: METRICS[0].metric, stat: 'at' as Statistic, selected: null as number | null, t: 0, range })
   const redraw = useRef<() => void>(() => {})
 
@@ -197,8 +200,7 @@ export function ControlView({ trace, store, pool }: Props) {
       if (n !== hovered) { hovered = n; request() }
       if (!n) { setTip(null); return }
       const { metric: m, stat: st, t: tt, range: rg } = state.current
-      const v = data.ready ? data.heat(n.id, m, st, tt, rg.a, rg.b) : null
-      setTip({ x, y, text: `${n.path} · ${v === null ? 'no recorded table with a capacity' : `${(100 * v).toFixed(1)} %`}` })
+      setTip({ x, y, content: nodeTip(n.path, data, n.id, m, st, tt, rg.a, rg.b) })
       cv.style.cursor = 'pointer'
     }
     const onUp = (e: PointerEvent) => {
@@ -232,7 +234,7 @@ export function ControlView({ trace, store, pool }: Props) {
     }
   }, [tree, data])
 
-  const fmt = (v: number) => Math.round(v).toLocaleString('en-US')
+  useThemeVersion()   // the legend reads the tokens
   const theme = readTheme()
   return (
     <div className="control2">
@@ -254,23 +256,23 @@ export function ControlView({ trace, store, pool }: Props) {
           </select>
           <span className="heat-legend">
             0 %<span className="ramp heat-ramp" style={{ background: `linear-gradient(90deg, ${theme.seq.join(', ')})` }} />100 %
-            <span className="swatch heat-none" title="not recorded, or no capacity" /> n/a
+            <span className="swatch heat-none" title="not recorded or no capacity" /> n/a
           </span>
           <span className="spacer" />
-          <span className="instant-active" title={stat === 'at' && !time ? 'no cursor yet: the range start' : undefined}>
-            {stat === 'at' ? `t = ${fmt(t)}` : `[${fmt(range.a)}, ${fmt(range.b)})`}
+          <span className="instant-active" title={stat === 'at' && !time ? 'range start' : undefined}>
+            {stat === 'at' ? `t = ${cycles(t)}` : span(range.a, range.b)}
           </span>
           {!ready && <span className="badge">loading</span>}
-          {ready && !data.hasEntries && <span className="badge" title="no entries in this trace: 6 of 8 tables not recorded">no entries</span>}
+          {ready && !data.hasEntries && <span className="badge" title="6 of 8 tables not recorded">no entries</span>}
         </div>
         <div className="control-tree" ref={host}>
           <canvas ref={canvas} />
-          {tip && <div className="tooltip" style={{ left: tip.x + 14, top: tip.y + 14 }}>{tip.text}</div>}
+          {tip && <Tooltip tip={tip.content} style={tipPlace(tip, host.current)} />}
         </div>
       </div>
       <Sidebar name="control" width={460}>
         {selected === null
-          ? <div className="muted" title="click a Neutrino to list its tables">no Neutrino selected</div>
+          ? <div className="muted" title="click a Neutrino">no Neutrino selected</div>
           : <NodePanel trace={trace} store={store} data={data} index={index} node={selected} t={panelT} range={range} key={ready ? 1 : 0} />}
       </Sidebar>
     </div>
@@ -295,4 +297,13 @@ function heatColor(th: Theme, v: number): string {
   const b = rgba(steps[i + 1])
   const mix = (k: number) => Math.round(a[k] + (b[k] - a[k]) * f)
   return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`
+}
+
+/** A node's tooltip: the tables of the metric, the fullest first, with their occupancy. */
+function nodeTip(path: string, data: ControlData, node: number, m: Metric, st: Statistic, t: number, a: number, b: number): TipContent {
+  const { name, parent } = splitPath(path)
+  const tables = data.ready ? data.tablesOf(node, m, st, t, a, b) : []
+  if (!tables.length) return { title: name, path: parent, sections: [{ kind: 'note', text: data.ready ? 'no table with a capacity' : 'loading' }] }
+  const items = tables.map((x) => ({ share: x.pressure, name: x.name, value: pct(x.pressure), note: `${num(x.value)} / ${x.cap}` }))
+  return { title: name, path: parent, sections: [tipList('tables', items, items.length)] }
 }
