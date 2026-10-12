@@ -1,5 +1,6 @@
-// The state that all views share (views-design Section 1): the timeline's time window and
-// range selection, the cursor time (or a pinned time), the block selection and smoothing.
+// The state that all views share (views-design Sections 1 and 7): the timeline's time
+// window, the cursor (an instant, set by a click) or the range selection (set by a drag),
+// which exclude each other, the block selection and smoothing.
 import { BlockSelection } from './blocks'
 import { Store } from './store'
 
@@ -25,8 +26,6 @@ export class ViewStore {
   /** A request to show a task (task row) in the timeline and select it: the timeline
    * scrolls and pans to it, the workspace switches to the timeline. */
   readonly reveal = new Store<number | null>(null)
-  /** Instant views: show the value at the cursor instead of the range or window. */
-  readonly followCursor = new Store<boolean>(false)
   readonly blocks: BlockSelection
   readonly endTime: number
 
@@ -34,13 +33,15 @@ export class ViewStore {
     this.blocks = new BlockSelection(nodeIds)
     this.endTime = endTime
     this.window = new Store<TimeRange>({ a: 0, b: endTime })
+    // The cursor and the range exclude each other: setting one clears the other.
+    this.cursor.subscribe((c) => { if (c && this.range.get()) this.range.set(null) })
+    this.range.subscribe((r) => { if (r && this.cursor.get()) this.cursor.set(null) })
   }
 
-  /** What an instant view shows: the cursor time (follow cursor), else the range, else the
-   * window. */
+  /** What an instant view shows: the cursor, else the range, else the window. */
   active(): { kind: 'cursor' | 'range' | 'window'; a: number; b: number } {
     const c = this.cursor.get()
-    if (this.followCursor.get() && c) return { kind: 'cursor', a: c.t, b: c.t }
+    if (c) return { kind: 'cursor', a: c.t, b: c.t }
     const r = this.range.get()
     if (r && r.b > r.a) return { kind: 'range', ...r }
     return { kind: 'window', ...this.window.get() }
@@ -56,15 +57,7 @@ export class ViewStore {
     return { kind: act.kind, a, b: Math.max(a + 1, Math.min(act.b + w / 2, this.endTime)) }
   }
 
-  /** Sets the cursor from a hover; a pinned cursor stays until unpinned. */
-  hover(t: number | null): void {
-    const c = this.cursor.get()
-    if (c?.pinned) return
-    if (t === null) {
-      if (c) this.cursor.set(null)
-    } else this.cursor.set({ t, pinned: false })
-  }
-
+  /** Sets the cursor (a click on a plot or on the axis): an instant; it clears the range. */
   pin(t: number): void {
     this.cursor.set({ t, pinned: true })
   }

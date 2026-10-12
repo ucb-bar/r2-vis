@@ -18,8 +18,18 @@ MIN_BIN, MAX_BINS = 1024, 32768
 CHARGE_SCHEMA = pa.schema([
     ("resource", pa.int32()), ("start", pa.int64()), ("end", pa.int64()),
     ("cycles", pa.int32()), ("amount", pa.int64()), ("dir", pa.int8()),
-    ("gid", pa.int32()), ("msg", pa.int8()),
+    ("gid", pa.int32()), ("program", pa.int32()), ("msg", pa.int8()),
 ])
+
+USAGE_SCHEMA = pa.schema([
+    ("resource", pa.int32()), ("block", pa.int32()), ("gid", pa.int32()), ("program", pa.int32()),
+    ("amount", pa.int64()), ("cycles", pa.int64()), ("n", pa.int32()), ("first", pa.int64()),
+    ("last", pa.int64()),
+])
+
+PROGRAM_REF = 0x80000000        # raw 1.6: an owner with bit 31 set is a program (its spawn gid)
+ROOT_PROGRAM = 0xFFFFFFFE       # raw 1.6: the root program (no spawn task)
+NULL_OWNER = 0xFFFFFFFF
 
 
 def parquet_options(schema: pa.Schema) -> dict:
@@ -45,7 +55,9 @@ def parquet_options(schema: pa.Schema) -> dict:
 
 @dataclass
 class Charges:
-    """The charge columns as numpy arrays; `gid_null` and `msg_null` are null masks."""
+    """The charge columns as numpy arrays; `gid_null`, `program_null` and `msg_null` are null
+    masks. The owner (raw 1.6) is a task (`gid`) or a program (`program` = programs.id);
+    `program_unknown` marks a program reference that names no program."""
 
     resource: np.ndarray
     start: np.ndarray
@@ -55,14 +67,21 @@ class Charges:
     dir: np.ndarray
     gid: np.ndarray
     gid_null: np.ndarray
+    program: np.ndarray
+    program_null: np.ndarray
+    program_unknown: np.ndarray
     msg: np.ndarray
     msg_null: np.ndarray
 
     @classmethod
-    def from_raw(cls, rec: np.ndarray) -> "Charges":
+    def from_raw(cls, rec: np.ndarray, programs: np.ndarray) -> "Charges":
+        """The charges of a dump; `programs` is the raw programs record (its order by
+        (nu, start) gives programs.id)."""
         start = rec["start"].astype(np.int64)
-        gid = rec["gid"]
+        owner = rec["gid"].astype(np.int64)
         msg = rec["msg"]
+        task = (owner != NULL_OWNER) & (owner < PROGRAM_REF)
+        program, unknown = program_ids(owner, programs)
         return cls(
             resource=rec["resource"].astype(np.int32),
             start=start,
@@ -70,8 +89,11 @@ class Charges:
             cycles=rec["cycles"].astype(np.int32),
             amount=rec["amount"].astype(np.int64),
             dir=rec["dir"].astype(np.int8),
-            gid=gid.astype(np.int32),
-            gid_null=gid == raw.null_of(gid.dtype),
+            gid=np.where(task, owner, 0).astype(np.int32),
+            gid_null=~task,
+            program=np.maximum(program, 0).astype(np.int32),
+            program_null=program < 0,
+            program_unknown=unknown,
             msg=msg.astype(np.int8),
             msg_null=msg == raw.null_of(msg.dtype),
         )
@@ -81,6 +103,36 @@ class Charges:
 
     def take(self, order: np.ndarray) -> "Charges":
         return Charges(**{k: getattr(self, k)[order] for k in self.__dataclass_fields__})
+
+
+def program_ids(owner: np.ndarray, programs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """programs.id of each program owner (-1 for a task or no owner), and the program
+    references that name no program: `0x80000000 | spawn` by the program's spawn task, the
+    root reference by the program without a spawn task."""
+    order = np.lexsort((programs["start"], programs["nu"]))
+    spawn = programs["spawn"][order].astype(np.int64)
+    no_spawn = spawn == raw.null_of(programs["spawn"].dtype)
+    ref = (owner >= PROGRAM_REF) & (owner != NULL_OWNER)
+    out = np.full(len(owner), -1, dtype=np.int64)
+    unknown = np.zeros(len(owner), dtype=bool)
+    root = ref & (owner == ROOT_PROGRAM)
+    roots = np.flatnonzero(no_spawn)
+    if len(roots):
+        out[root] = roots[0]
+    else:
+        unknown |= root
+    tagged = ref & ~root
+    ids = np.flatnonzero(~no_spawn)
+    keys = spawn[ids]
+    by = np.argsort(keys)
+    want = owner[tagged] - PROGRAM_REF
+    pos = np.searchsorted(keys[by], want)
+    found = (pos < len(keys)) & (keys[by][np.minimum(pos, len(keys) - 1)] == want) if len(keys) \
+        else np.zeros(len(want), dtype=bool)
+    hit = np.flatnonzero(tagged)
+    out[hit[found]] = ids[by][pos[found]]
+    unknown[hit[~found]] = True
+    return out, unknown
 
 
 def block_size(end_time: int, rows: int) -> int:
@@ -119,6 +171,7 @@ def write_charges(path: Path, ch: Charges, block: np.ndarray, span: int) -> list
         "resource": ch.resource, "start": ch.start, "end": ch.end, "cycles": ch.cycles,
         "amount": ch.amount, "dir": ch.dir,
         "gid": pa.array(ch.gid, mask=ch.gid_null),
+        "program": pa.array(ch.program, mask=ch.program_null),
         "msg": pa.array(ch.msg, mask=ch.msg_null),
     }, schema=CHARGE_SCHEMA)
     blocks: list[dict] = []
@@ -136,6 +189,34 @@ def write_charges(path: Path, ch: Charges, block: np.ndarray, span: int) -> list
             blocks.append({"group": group, "t0": t0, "t1": t0 + span,
                            "max_end": int(max_end[group]), "rows": int(b - a)})
     return blocks
+
+
+def usage_table(ch: Charges, block: np.ndarray) -> pa.Table:
+    """The charges (sorted by sort_charges) summed per resource, charge block (the row
+    group of charges.parquet) and owner, resource-major: amount, lane-cycles, count, the
+    earliest start and the latest end (trace-format 4.2, usage)."""
+    if not len(ch):
+        return USAGE_SCHEMA.empty_table()
+    group = np.concatenate(([0], np.cumsum(np.diff(block) != 0))).astype(np.int64)
+    # owner: a task gid (>= 0), a program (-2 - id) or none (-1)
+    owner = np.where(~ch.gid_null, ch.gid.astype(np.int64),
+                     np.where(~ch.program_null, -2 - ch.program.astype(np.int64), -1))
+    order = np.lexsort((owner, group, ch.resource))
+    res, grp, own = ch.resource[order], group[order], owner[order]
+    cut = np.flatnonzero((np.diff(res) != 0) | (np.diff(grp) != 0) | (np.diff(own) != 0)) + 1
+    first = np.concatenate(([0], cut))
+    own_f = own[first]
+    return pa.table({
+        "resource": res[first].astype(np.int32),
+        "block": grp[first].astype(np.int32),
+        "gid": pa.array(np.maximum(own_f, 0).astype(np.int32), mask=own_f < 0),
+        "program": pa.array(np.maximum(-2 - own_f, 0).astype(np.int32), mask=own_f > -2),
+        "amount": np.add.reduceat(ch.amount[order], first).astype(np.int64),
+        "cycles": np.add.reduceat(ch.cycles[order].astype(np.int64), first),
+        "n": np.diff(np.concatenate((first, [len(order)]))).astype(np.int32),
+        "first": np.minimum.reduceat(ch.start[order], first),
+        "last": np.maximum.reduceat(ch.end[order], first),
+    }, schema=USAGE_SCHEMA)
 
 
 def bin_grid(lo: int, hi: int) -> tuple[int, int, int]:

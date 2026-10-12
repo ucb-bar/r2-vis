@@ -175,6 +175,10 @@ class Engine:
         self.pes = [Pe() for _ in topo.pes]
         self.tasks: list[Task] = []
         self.programs: list[Program] = []
+        # Charge owners (raw 1.6): a task key (>= 0), none (-1), or a program -2 - k with
+        # owner_programs[k] the program.
+        self.owner_programs: list[Program] = []
+        self._owner_key: dict[int, int] = {}
         self.last_writer: dict[tuple[int, int], Task] = {}
         self._routes: dict[tuple[int, int], list[tuple[int, int]]] = {}
         self.res = topo.res_id
@@ -262,12 +266,22 @@ class Engine:
                 charges.append((start, amount, longest, cyc, key, rid, d, msg_code))
         return start, end, culprit, queue_culprit
 
-    def scalar_work(self, nu: int, t: int, cycles: int) -> int:
-        """Program work on the Neutrino's scalar resource (one lane); returns its end."""
+    def program_owner(self, prog: Program) -> int:
+        """The charge owner key of a program (raw 1.6: its loads, stores, scalar work and
+        messages of no task)."""
+        k = self._owner_key.get(id(prog))
+        if k is None:
+            k = self._owner_key[id(prog)] = len(self.owner_programs)
+            self.owner_programs.append(prog)
+        return -2 - k
+
+    def scalar_work(self, nu: int, t: int, cycles: int, owner: int) -> int:
+        """Scalar work on the Neutrino's scalar resource (one lane) for `owner` (the invoked
+        task of an invoke call, else the program); returns its end."""
         rid = self.scalar[nu]
         start = max(t, self.lanes_free(rid, 1))
         self.hold(rid, 1, start + cycles)
-        self.rec.charges.append((start, cycles, cycles, cycles, -1, rid, raw.DIR_WORK,
+        self.rec.charges.append((start, cycles, cycles, cycles, owner, rid, raw.DIR_WORK,
                                  raw_null(8)))
         return start + cycles
 
@@ -319,8 +333,11 @@ class Engine:
         names.append((f"{hub_of(dst)}.neutrino.out", 0))
         return [(self.res[n], lat) for n, lat in names]
 
-    def send(self, src: int, dst: int, kind: str, nbytes: int, t: int) -> tuple[int, int]:
-        """Sends a protocol message; returns (departure on the first rated hop, arrival).
+    def send(self, src: int, dst: int, kind: str, nbytes: int, t: int,
+             owner: int) -> tuple[int, int]:
+        """Sends a protocol message for `owner` (raw 1.6: the invoked task of an Invoke, the
+        consumer of an Await, AwaitAck or Resolve, the spawn task of a Start or Return, else
+        the sending program); returns (departure on the first rated hop, arrival).
 
         Each rated hop transmits the message once it arrived and a lane is free: it holds
         one lane for one cycle per beat (ceil(bytes / beat_bytes), at least 1), whatever
@@ -358,9 +375,9 @@ class Engine:
             span = e - s
             if self.rates[rid] is None:
                 span = max(1, span)   # folded into a 0-cycle hop: [start, start + 1)
-                charges.append((s, nbytes, span, span, -1, rid, raw.DIR_WRITE, msg))
+                charges.append((s, nbytes, span, span, owner, rid, raw.DIR_WRITE, msg))
             else:
-                charges.append((s, nbytes, span, k * span, -1, rid, raw.DIR_WRITE, msg))
+                charges.append((s, nbytes, span, k * span, owner, rid, raw.DIR_WRITE, msg))
         self.first_hop_end = first[1]
         return first[0], t
 
@@ -420,12 +437,12 @@ class Engine:
         version = producer.version if producer is not None and dep.versioned else None
         key = dep.consumer.key
         rec = self.rec
-        _, arrival = self.send(consumer, dep.owner, "Await", MSG_BYTES, t)
+        _, arrival = self.send(consumer, dep.owner, "Await", MSG_BYTES, t, key)
 
         def at_owner(ta: int) -> None:
             if producer is not None and producer.invoke is None:
                 rec.pending.append((ta, producer, base, version, dep.owner, consumer, 2))
-            _, back = self.send(dep.owner, consumer, "AwaitAck", MSG_BYTES, ta)
+            _, back = self.send(dep.owner, consumer, "AwaitAck", MSG_BYTES, ta, key)
             if producer is None or producer.complete is not None:
                 rec.entries.append((t, back, base, 0, key, version, consumer, dep.owner,
                                     OUTBOUND_DEPS, 0))
@@ -433,7 +450,7 @@ class Engine:
                 return
 
             def on_complete(tc: int) -> None:
-                _, tr = self.send(dep.owner, consumer, "Resolve", MSG_BYTES, tc)
+                _, tr = self.send(dep.owner, consumer, "Resolve", MSG_BYTES, tc, key)
                 rec.entries.append((ta, tc, base, 0, key, version, dep.owner, consumer,
                                     INBOUND_REFS, 0))
                 rec.entries.append((t, tr, base, 0, key, version, consumer, dep.owner,
@@ -457,7 +474,7 @@ class Engine:
         elif task.opcode == OP_SPAWN:
             task.issue = t
             child = task.child
-            _, arrival = self.send(task.nu, child.nu, "Start", MSG_BYTES, t)
+            _, arrival = self.send(task.nu, child.nu, "Start", MSG_BYTES, t, task.key)
             self.at(arrival, self.program_start, child)
         else:
             task.issue = t
@@ -533,12 +550,13 @@ class Engine:
                     return
                 prog.invoked.append(task)
                 prog.ptr += 1
-                end = self.scalar_work(prog.nu, t, C_INVOKE)
+                end = self.scalar_work(prog.nu, t, C_INVOKE, task.key)
                 if task.nu == prog.nu:
                     self.at(end, self.invoke, task)
                 else:
                     task.queued = end
-                    sent, arrival = self.send(prog.nu, task.nu, "Invoke", INVOKE_MSG_BYTES, end)
+                    sent, arrival = self.send(prog.nu, task.nu, "Invoke", INVOKE_MSG_BYTES, end,
+                                              task.key)
                     task.sent = sent
                     # outbound_invokes at the requester: c_invoke's end to the end of the
                     # first hop; inbound_invokes at the owner: the last hop to the invoke.
@@ -554,8 +572,8 @@ class Engine:
             if op == "store":
                 _, demands = action
                 prog.ptr += 1
-                end = self.scalar_work(prog.nu, t, C_STORE)
-                _, dend, _, _ = self.reserve(end, demands, -1, SMEM_LATENCY)
+                end = self.scalar_work(prog.nu, t, C_STORE, self.program_owner(prog))
+                _, dend, _, _ = self.reserve(end, demands, self.program_owner(prog), SMEM_LATENCY)
                 self.at(dend, self.advance, prog)
                 return
             if op == "wait":
@@ -572,7 +590,7 @@ class Engine:
                 continue
             if op == "send":
                 _, dst, kind = action
-                self.send(prog.nu, dst, kind, MSG_BYTES, t)
+                self.send(prog.nu, dst, kind, MSG_BYTES, t, self.program_owner(prog))
                 prog.ptr += 1
                 continue
             raise ValueError(f"unknown action {op}")
@@ -585,7 +603,7 @@ class Engine:
                 task.retire = t
         if prog.spawn is not None:
             parent = prog.spawn.nu
-            _, arrival = self.send(prog.nu, parent, "Return", MSG_BYTES, t)
+            _, arrival = self.send(prog.nu, parent, "Return", MSG_BYTES, t, prog.spawn.key)
             self.at(arrival, self.exec_done, prog.spawn)
 
 
@@ -928,7 +946,13 @@ def collect(eng: Engine, params: dict, wall: float) -> tuple[Dump, dict]:
     g_rec = np.zeros(len(ch), dtype=raw.record_dtype(raw.LAYOUTS["charges"]))
     for i, name in enumerate(("start", "amount", "span", "cycles")):
         g_rec[name] = ch[:, i]
-    g_rec["gid"] = gid_of[ch[:, 4]]
+    # owners (raw 1.6): a task's gid, a program 0x80000000 | spawn gid (the root program
+    # 0xFFFFFFFE), or null
+    owner = ch[:, 4]
+    prog_ref = np.array([0xFFFFFFFE if p.spawn is None else 0x80000000 | int(gid_of[p.spawn.key])
+                         for p in eng.owner_programs] or [0], dtype=np.int64)
+    g_rec["gid"] = np.where(owner >= 0, gid_of[np.maximum(owner, 0)],
+                            np.where(owner == -1, NULL32, prog_ref[np.maximum(-2 - owner, 0)]))
     g_rec["resource"] = ch[:, 5]
     g_rec["dir"] = ch[:, 6]
     g_rec["msg"] = ch[:, 7]

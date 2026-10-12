@@ -140,7 +140,6 @@ export function TimeStrip({ store, timeline }: Props) {
     const onMove = (e: PointerEvent) => {
       const { x, y } = pos(e)
       hoverX = x >= GUTTER ? x : null
-      store.hover(hoverX === null ? null : axis.timeAtX(x))
       if (!time.move(x)) cv.style.cursor = time.cursorAt(x, y) ?? 'default'
       request()
     }
@@ -148,7 +147,7 @@ export function TimeStrip({ store, timeline }: Props) {
       const { x, y } = pos(e)
       time.up(e, x, y)
     }
-    const onLeave = () => { hoverX = null; store.hover(null); request() }
+    const onLeave = () => { hoverX = null; request() }
     const noMenu = (e: Event) => e.preventDefault()
     cv.addEventListener('wheel', onWheel, { passive: false })
     cv.addEventListener('pointerdown', onDown)

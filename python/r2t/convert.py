@@ -26,11 +26,11 @@ from r2t import checks, dims, facts, schema, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 4)
+FORMAT_VERSION = (1, 5)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
 ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288,
-              "entries": 524288}
+              "entries": 524288, "usage": 262144}
 
 
 def end_time_of(dump: RawDump) -> int:
@@ -90,7 +90,7 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
     end_time = end_time_of(dump)
     filters = m.get("filters") or {}
     window = tuple(filters["window"]) if filters.get("window") else None
-    ch = timeline.Charges.from_raw(rec["charges"])
+    ch = timeline.Charges.from_raw(rec["charges"], rec["programs"])
     if len(ch) and int(ch.resource.max()) >= len(m["resources"]):
         raise FormatError(f"charges: resource ids up to {int(ch.resource.max())}, the "
                           f"manifest lists {len(m['resources'])} resources")
@@ -121,6 +121,7 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
     tables["entries"] = facts.entries_table(rec["entries"])
     width, origin, bin_count = timeline.bin_grid(lo, hi)
     tables["bins"] = timeline.bins(ch, width, origin, bin_count, window)
+    tables["usage"] = timeline.usage_table(ch, block)
 
     errors = checks.run(dump, gids, ch, stats)
     for name, nbytes in dump.dropped_bytes.items():

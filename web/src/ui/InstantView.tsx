@@ -19,24 +19,23 @@ interface Props {
   pool: WorkerPool
 }
 
-/** The instant views: traffic at the active time range of the shared state
- * (views-design Section 3) and control at the cursor time (Section 4). */
+/** The instant views: traffic and control at the cursor of the shared state, else over
+ * its range, else over the window (views-design Sections 3, 4 and 7). */
 export function InstantView({ trace, charges, store, strip, pool }: Props) {
   const [, setTick] = useState(0)
-  const [follow, setFollow] = useState(store.followCursor.get())
   const [mode, setMode] = useState<Mode>('traffic')
   useEffect(() => {
     let frame = 0
     const bump = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTick((t) => t + 1) }) }
     const offs = [store.window.subscribe(bump), store.range.subscribe(bump), store.cursor.subscribe(bump),
-      store.followCursor.subscribe((f) => { setFollow(f); bump() }), store.smoothing.subscribe(bump)]
+      store.smoothing.subscribe(bump)]
     return () => { offs.forEach((off) => off()); if (frame) cancelAnimationFrame(frame) }
   }, [store])
   const active = store.activeRange()
   const cursor = store.cursor.get()
   const n = (t: number) => Math.round(t).toLocaleString('en-US')
   const what = active.kind === 'cursor'
-    ? `t = ${n(cursor?.t ?? active.a)}${cursor?.pinned ? ' · pinned' : ''} · [${n(active.a)}, ${n(active.b)})`
+    ? `t = ${n(cursor?.t ?? active.a)} · [${n(active.a)}, ${n(active.b)})`
     : `[${n(active.a)}, ${n(active.b)}) · ${n(active.b - active.a)} cycles`
   return (
     <div className="instant">
@@ -50,12 +49,6 @@ export function InstantView({ trace, charges, store, strip, pool }: Props) {
         </div>
         {mode === 'traffic' && <span className="instant-active">{what}</span>}
         <span className="spacer" />
-        {mode === 'traffic' && (
-          <label className="tool">
-            <input type="checkbox" checked={follow} onChange={(e) => store.followCursor.set(e.target.checked)} />
-            follow cursor
-          </label>
-        )}
       </div>
       <div className="instant-main" style={{ display: mode === 'traffic' ? 'flex' : 'none' }}>
         <TrafficView trace={trace} charges={charges} store={store} />

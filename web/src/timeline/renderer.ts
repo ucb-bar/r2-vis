@@ -1,6 +1,7 @@
 // The timeline renderer: one canvas, the visible rows only. Layout: label gutter on the
 // left, time axis on top, rows below (group headers, task lanes, utilization lines).
 // The renderer holds the view state; Timeline.tsx turns input into calls on it.
+import type { Attribution, AttributionRequest, OwnerGroup } from '../data/attribution'
 import type { ChargeCache, ChargeGroup } from '../data/charges'
 import { isDict } from '../data/columns'
 import { taskLabel } from '../data/labels'
@@ -58,6 +59,23 @@ interface RowValue {
   member: number       // fabric rows: the port (resource) that gives the value, else -1
 }
 
+/** The pool worker of the attribution queries. */
+const ATTRIBUTION_WORKER = 0
+
+/** What a flightline goes to (views-design 7). */
+export type AttributeTo = 'auto' | 'task' | 'laneKind' | 'kind'
+export const MODE_NAME: Record<Exclude<AttributeTo, 'auto'>, string> = { task: 'task', laneKind: 'lane + kind', kind: 'kind' }
+
+/** An owner or a group of owners that a flightline goes to. */
+export interface AttributionTarget {
+  value: number
+  name: () => string
+  /** a group: its kind, in the flightline label */
+  short: string
+  tasks: number
+  point: () => { x: number; y: number; shown: boolean; name: string } | null
+}
+
 export class TimelineRenderer {
   readonly trace: Trace
   readonly charges: ChargeCache
@@ -89,6 +107,16 @@ export class TimelineRenderer {
   readonly selectedRows = new Set<string>()
   /** The row the minimap shows (the last row whose label was clicked). */
   focusKey: string | null = null
+  /** Attribution (views-design 7): the owners of the selected resource row at the cursor
+   * or over the range, and the most flightlines drawn. */
+  attribution: { key: string; res: Attribution } | null = null
+  maxFlightlines = 32
+  /** What a flightline goes to; auto: the tasks while they fit maxFlightlines, else the
+   * (lane, kind) groups, else the kind groups. */
+  attributeTo: AttributeTo = 'auto'
+  /** Called when an attribution query returns (the view redraws). */
+  onAttribution: (() => void) | null = null
+  private attributionAsked = ''
   readonly stats: FrameStats = { drawMs: [], frameAt: [] }
   /** Test switches (benchmarks only). */
   debug = { noLanes: false, flush: false, portsFabric: false }
@@ -410,6 +438,7 @@ export class TimelineRenderer {
     ctx.rect(GUTTER, AXIS, pw, H - AXIS)
     ctx.clip()
     this.drawDeps(ctx)
+    this.drawFlightlines(ctx)
     this.drawWindowShade(ctx)
     ctx.restore()
     this.axis.drawBands(ctx, th, AXIS, this.height)
@@ -569,7 +598,7 @@ export class TimelineRenderer {
     }
     this.raster.draw(ctx, this.dpr, GUTTER, y, n, row.height - 1, ys, peaks, this.gridX, LINE_PAD, base,
       this.colorsFor(this.lineColorOf(row)))
-    // Left label: the instant value with the cursor on the plot, else an average.
+    // Left label: the value at the cursor, else the average over the range or window.
     const v = this.rowValue(index, row)
     const pct = v.scale > 0 ? (100 * v.value) / v.scale : NaN
     const mark = v.marked ? (v.exact ? 'avg ' : 'avg ≈') : ''
@@ -580,19 +609,21 @@ export class TimelineRenderer {
     ctx.textAlign = 'left'
   }
 
-  /** Value of a series row for its label: instant (smoothed) at the cursor, else the
-   * average over the selection, else over the window. A fabric row gives the busiest
-   * port: the largest average fraction of ceiling. */
+  /** Value of a series row for its label (views-design 7: not the hover): at the cursor
+   * (the plotted, smoothed value when the cursor is in the window, else the cycle at the
+   * cursor), else the average over the selection, else over the window. A fabric row gives
+   * the busiest port: the largest average fraction of ceiling. */
   rowValue(index: number, row: Row): RowValue {
     const s = this.sampled.get(index)
     const scale = row.kind === 'fabric' ? 1 : this.res[row.id].ceiling ?? 0
-    if (s && this.hover && this.hover.x >= GUTTER && !this.zoomBox) {
-      const p = Math.floor(this.hover.x - GUTTER)
-      if (p >= 0 && p < s.shown.length) {
+    const at = this.pinned
+    if (at !== null) {
+      const p = Math.floor(this.xOf(at) - GUTTER)
+      if (s && p >= 0 && p < s.shown.length) {
         return { value: s.shown[p], scale, marked: false, exact: true, member: s.argmax?.[p] ?? -1 }
       }
     }
-    const r = this.activeRange()
+    const r = at !== null ? { a: at, b: at + 1 } : this.activeRange()
     if (row.kind === 'fabric') {
       let best = 0
       let member = -1
@@ -1001,7 +1032,260 @@ export class TimelineRenderer {
 
   // ---- tooltips -------------------------------------------------------------------------
 
+  // ---- attribution (views-design 7) ------------------------------------------------------
+
+  /** The attribution the view asks for: the selected resource row (a fabric or memory node:
+   * all its members) at the cursor, else over the range; null without either. */
+  attributionQuery(): { key: string; req: AttributionRequest } | null {
+    const row = this.focusRow()
+    if (!row || (row.kind !== 'resource' && row.kind !== 'fabric')) return null
+    const t = this.pinned
+    const r = this.selection && this.selection.b > this.selection.a ? this.selection : null
+    if (t === null && !r) return null
+    const resources = row.kind === 'fabric' ? this.source.fabrics[row.id].members : [row.id]
+    const files = this.trace.reader.files
+    const charges = files.get('charges.parquet')
+    const tasks = files.get('tasks.parquet')
+    if (!charges || !tasks || !resources.length) return null
+    const key = `${row.key}|${t ?? `${r?.a}-${r?.b}`}`
+    return { key, req: { usage: files.get('usage.parquet') ?? null, charges, resources, t,
+      a: r?.a ?? 0, b: r?.b ?? 0,
+      blocks: this.trace.manifest.charge_blocks.map((b) => ({ t0: b.t0, t1: b.t1, maxEnd: b.max_end })),
+      tasks, opcodes: this.trace.dims.opcodes.map((o) => String(o.name)) } }
+  }
+
+  /** Starts the query when the selection, cursor or range changed (the latest wins). */
+  private requestAttribution(): void {
+    const q = this.attributionQuery()
+    if (!q) { this.attribution = null; this.attributionAsked = ''; return }
+    if (q.key === this.attributionAsked) return
+    this.attributionAsked = q.key
+    if (this.attribution && this.attribution.key !== q.key) this.attribution = null
+    // one worker: its task-kind cache is read once per trace
+    void this.pool.compute<Attribution>({ op: 'attribute', req: q.req }, [], ATTRIBUTION_WORKER).then((res) => {
+      if (this.attributionAsked !== q.key) return
+      this.attribution = { key: q.key, res }
+      this.onAttribution?.()
+    })
+  }
+
+  /** An owner's name: a task's label, a program and its Neutrino, or no owner. */
+  ownerName(owner: number): string {
+    if (owner === -1) return 'no owner'
+    if (owner <= -2) {
+      const pc = this.trace.facts.programs.cols
+      const i = -2 - owner
+      const name = pc.name as { dict: string[]; codes: Int32Array }
+      const nu = (pc.nu as Int32Array)[i]
+      return `program ${name.dict?.[name.codes?.[i]] ?? i} (${String(this.trace.dims.nodes[nu]?.path ?? nu)})`
+    }
+    const task = this.taskOfGid(owner)
+    return task < 0 ? `task ${owner} (not in the trace)` : (this.taskName(task) ?? `task ${owner}`)
+  }
+
+  /** The tasks table row of a gid (the table is sorted by gid), or -1. */
+  private taskOfGid(gid: number): number {
+    const g = this.trace.facts.tasks.cols.gid as Int32Array
+    let lo = 0
+    let hi = g.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (g[mid] < gid) lo = mid + 1
+      else hi = mid
+    }
+    return lo < g.length && g[lo] === gid ? lo : -1
+  }
+
+  /** Where a flightline ends: a task's bar at the time (an instant, or the middle of its
+   * overlap with the range) on its lane, a program's bar in its Neutrino's group header;
+   * null for no owner. `shown` is false when the lane or group is not drawn (the edge rule
+   * of the dependency arrows: the plot edge, with its name). */
+  private ownerPoint(owner: number): { x: number; y: number; shown: boolean; name: string } | null {
+    if (owner === -1) return null
+    const t = this.pinned
+    const r = this.selection
+    const at = (s: number, e: number) => {
+      const ee = e === e ? e : this.endTime
+      if (t !== null) return Math.max(s, Math.min(ee, t))
+      const a = Math.max(s, r?.a ?? s)
+      const b = Math.min(ee, r?.b ?? ee)
+      return b > a ? (a + b) / 2 : (s + ee) / 2
+    }
+    if (owner <= -2) {
+      const pc = this.trace.facts.programs.cols
+      const i = -2 - owner
+      const nu = (pc.nu as Int32Array)[i]
+      const x = this.xOf(at((pc.start as Float64Array)[i], (pc.end as Float64Array)[i]))
+      const ri = this.model.rows.findIndex((row) => row.kind === 'group' && row.id === nu)
+      const name = String(this.trace.dims.nodes[nu]?.path ?? nu)
+      if (ri < 0) return { x, y: AXIS + 3, shown: false, name }
+      return { x, y: this.rowTop(ri) + this.model.rows[ri].height / 2, shown: true, name }
+    }
+    const task = this.taskOfGid(owner)
+    if (task < 0) return null
+    const c = this.trace.facts.tasks.cols
+    const iss = (c.issue as Float64Array)[task]
+    const x = this.xOf(at(iss === iss ? iss : (c.invoke as Float64Array)[task], (c.complete as Float64Array)[task]))
+    const ri = this.model.rowOfLane[(c.lane as Int32Array)[task]]
+    if (ri < 0) return { x, y: AXIS + 3, shown: false, name: this.laneName(task) }
+    const { pad, subH } = this.laneBox(this.model.rows[ri])
+    return { x, y: this.rowTop(ri) + pad + (this.trace.lanes.taskSub[task] + 0.5) * subH, shown: true, name: this.laneName(task) }
+  }
+
+  /** The mode attributeTo resolves to for an attribution. */
+  attributionMode(res: Attribution): Exclude<AttributeTo, 'auto'> {
+    if (this.attributeTo !== 'auto') return this.attributeTo
+    if (res.owners.length <= this.maxFlightlines) return 'task'
+    return res.laneKind.length <= this.maxFlightlines ? 'laneKind' : 'kind'
+  }
+
+  /** What the flightlines and the tooltip show, the largest value first: the owners, or
+   * their groups (attributionMode); the first `limit` of `count`. */
+  attributionTargets(res: Attribution, limit: number): { targets: AttributionTarget[]; count: number } {
+    const mode = this.attributionMode(res)
+    if (mode === 'task') {
+      const owners = res.owners.subarray(0, limit)
+      return { count: res.owners.length, targets: Array.from(owners, (owner, k) => ({ value: res.values[k],
+        name: () => this.ownerName(owner), short: '', tasks: owner >= 0 ? 1 : 0, point: () => this.ownerPoint(owner) })) }
+    }
+    const groups = mode === 'laneKind' ? res.laneKind : res.kind
+    return { count: groups.length, targets: groups.slice(0, limit).map((g) => ({ value: g.value,
+      name: () => this.groupName(g, mode), short: g.owner === null ? g.kind : '', tasks: g.tasks,
+      point: () => this.groupPoint(g) })) }
+  }
+
+  /** A group's name: 'dma_w on root.gpc1.sm0.dma', 'dma_w (16 lanes)', or the owner's name. */
+  private groupName(g: OwnerGroup, mode: 'laneKind' | 'kind'): string {
+    if (g.owner !== null) return this.ownerName(g.owner)
+    if (g.lane < 0) return `${g.kind}`
+    if (mode === 'kind') return `${g.kind} (${g.lanes} lane${g.lanes === 1 ? '' : 's'})`
+    return `${g.kind} on ${String(this.trace.dims.lanes[g.lane]?.path ?? g.lane)}`
+  }
+
+  /** Where a group's flightline ends: its lane row (a kind group: the lane with the largest
+   * value) at the cursor, or the middle of the range; a program or no owner as ownerPoint. */
+  private groupPoint(g: OwnerGroup): { x: number; y: number; shown: boolean; name: string } | null {
+    if (g.owner !== null) return this.ownerPoint(g.owner)
+    if (g.lane < 0) return null
+    const t = this.pinned ?? ((this.selection?.a ?? 0) + (this.selection?.b ?? 0)) / 2
+    const x = this.xOf(t)
+    const name = String(this.trace.dims.lanes[g.lane]?.path ?? g.lane)
+    const ri = this.model.rowOfLane[g.lane]
+    if (ri < 0) return { x, y: AXIS + 3, shown: false, name }
+    return { x, y: this.rowTop(ri) + this.model.rows[ri].height / 2, shown: true, name }
+  }
+
+  /** Flightlines from the selected resource row (at the cursor, or from the middle of its
+   * range band) to the owners, the largest shares first, at most maxFlightlines ("+M" for
+   * the rest): width by share, a label with the lanes held (instant) or the share (range),
+   * a ring on the owner (selected tasks have accent outlines). */
+  private drawFlightlines(ctx: CanvasRenderingContext2D): void {
+    this.requestAttribution()
+    const a = this.attribution
+    const row = this.focusRow()
+    if (!a || !row || a.key !== this.attributionAsked) return
+    const ri = this.model.rows.indexOf(row)
+    if (ri < 0) return
+    const th = this.theme
+    const top = AXIS + 3
+    const bottom = this.height - 3
+    const t = this.pinned
+    const r = this.selection
+    const srcT = t ?? ((r?.a ?? 0) + (r?.b ?? 0)) / 2
+    const sx = Math.max(GUTTER, Math.min(this.width, this.xOf(srcT)))
+    const sy = Math.max(top, Math.min(bottom, this.rowTop(ri) + row.height / 2))
+    const color = this.lineColorOf(row)
+    const { total } = a.res
+    const { targets, count } = this.attributionTargets(a.res, this.maxFlightlines)
+    const n = targets.length
+    ctx.save()
+    ctx.font = `${th.fontSizeXs}px ${th.fontSans}`
+    ctx.textBaseline = 'middle'
+    // Labels: the largest shares first, each only where it meets no earlier label.
+    const labels: { x: number; y: number; w: number; text: string }[] = []
+    const points = targets.slice(0, n).map((g) => g.point())
+    for (let k = 0; k < n; k++) {
+      const p = points[k]
+      if (!p) continue
+      const v = targets[k].value
+      const share = total > 0 ? v / total : 0
+      const x = Math.max(GUTTER, Math.min(this.width, p.x))
+      const y = Math.max(top, Math.min(bottom, p.y))
+      const amount = t !== null ? `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} lanes` : `${(100 * share).toFixed(share >= 0.1 ? 0 : 1)} %`
+      const label = targets[k].short ? `${amount} ${targets[k].short}` : amount
+      const text = p.shown && y === p.y ? label : `${label} · ${p.name}`
+      const w = ctx.measureText(text).width + 4
+      const lx = Math.min(this.width - w - 2, x + 7)
+      if (labels.some((q) => lx < q.x + q.w && q.x < lx + w && Math.abs(q.y - y) < 14)) continue
+      labels.push({ x: lx, y, w, text })
+    }
+    for (let k = n - 1; k >= 0; k--) {
+      const p = points[k]
+      if (!p) continue
+      const share = total > 0 ? targets[k].value / total : 0
+      const x = Math.max(GUTTER, Math.min(this.width, p.x))
+      const y = Math.max(top, Math.min(bottom, p.y))
+      ctx.globalAlpha = 0.75
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1 + 7 * share
+      ctx.beginPath()
+      ctx.moveTo(sx, sy)
+      ctx.bezierCurveTo(sx, (sy + y) / 2, x, (sy + y) / 2, x, y)
+      ctx.stroke()
+      ctx.globalAlpha = 1
+      ctx.lineWidth = 1.5
+      ctx.fillStyle = th.surface
+      ctx.beginPath()
+      ctx.arc(x, y, 4, 0, 2 * Math.PI)
+      ctx.fill()
+      ctx.stroke()
+    }
+    for (const q of labels) {
+      ctx.fillStyle = th.surface
+      ctx.globalAlpha = 0.85
+      ctx.fillRect(q.x - 2, q.y - 7, q.w, 14)
+      ctx.globalAlpha = 1
+      ctx.fillStyle = th.ink
+      ctx.fillText(q.text, q.x, q.y)
+    }
+    if (count > n) {
+      const text = `+${count - n}`
+      ctx.fillStyle = th.inkSecondary
+      ctx.fillText(text, Math.min(this.width - 30, sx + 8), sy - 10)
+    }
+    ctx.restore()
+  }
+
+  /** Tooltip lines of the attribution of the selected row: the top owners or groups, with
+   * shares (and task counts for groups). */
+  private attributionLines(): string[] {
+    const a = this.attribution
+    if (!a || a.key !== this.attributionAsked) return this.attributionQuery() ? ['owners: loading…'] : []
+    const { owners, total } = a.res
+    const instant = this.pinned !== null
+    const mode = this.attributionMode(a.res)
+    const { targets, count } = this.attributionTargets(a.res, 8)
+    const where = instant ? 'at the cursor' : 'over the range'
+    const out = [mode === 'task' ? `owners ${where} (${owners.length.toLocaleString()}):`
+      : `owners ${where}: ${owners.length.toLocaleString()} in ${count.toLocaleString()} ${MODE_NAME[mode]} groups:`]
+    for (let k = 0; k < targets.length; k++) {
+      const g = targets[k]
+      const share = total > 0 ? g.value / total : 0
+      const tasks = mode !== 'task' && g.tasks > 0 ? ` · ${g.tasks.toLocaleString()} task${g.tasks === 1 ? '' : 's'}` : ''
+      out.push(`  ${(100 * share).toFixed(1)} %${instant ? ` · ${g.value.toFixed(2)} lanes` : ''} · ${g.name()}${tasks}`)
+    }
+    if (count > 8) out.push(`  +${(count - 8).toLocaleString()} more`)
+    return out
+  }
+
   tooltip(): string[] | null {
+    const lines = this.baseTooltip()
+    const h = this.hover
+    if (!lines || !h || this.model.rows[h.row]?.key !== this.focusKey) return lines
+    return [...lines, ...this.attributionLines()]
+  }
+
+  private baseTooltip(): string[] | null {
     const h = this.hover
     if (!h || h.row < 0 || h.x < GUTTER) return null
     const row = this.model.rows[h.row]

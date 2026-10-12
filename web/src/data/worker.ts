@@ -7,6 +7,7 @@ import { zstdDecoder } from './parquet/zstd'
 import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
 import { buildOccupancy } from './occupancy'
+import { attribute, resetAttribution, type AttributionRequest } from './attribution'
 
 export interface DecodeRequest {
   op: 'decode'
@@ -24,6 +25,7 @@ export type ComputeRequest =
   | { op: 'laneIndex'; id: number; args: Parameters<typeof buildLaneIndex> }
   | { op: 'depsByProducer'; id: number; args: Parameters<typeof buildDepsByProducer> }
   | { op: 'occupancy'; id: number; args: Parameters<typeof buildOccupancy> }
+  | { op: 'attribute'; id: number; req: AttributionRequest }
 
 export interface WorkerReply {
   id: number
@@ -71,6 +73,7 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
   const req = e.data
   if (req.op === 'reset') {
     footers.clear()
+    resetAttribution()
     return
   }
   const t0 = performance.now()
@@ -88,6 +91,17 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
       result = buildLaneIndex(...req.args)
     } else if (req.op === 'occupancy') {
       result = buildOccupancy(...req.args)
+    } else if (req.op === 'attribute') {
+      result = await attribute(req.req,
+        async (name, file, group, columns) => (await decode({ op: 'decode', id: 0, file, name, group, columns })).cols,
+        async (name, file, column) => (await footer(name, file)).row_groups.map((rg) => {
+          const st = rg.columns.find((c) => c.meta_data?.path_in_schema[0] === column)?.meta_data?.statistics
+          const num = (v: unknown) => (typeof v === 'bigint' ? Number(v) : typeof v === 'number' ? v : NaN)
+          const lo = num(st?.min_value ?? st?.min)
+          const hi = num(st?.max_value ?? st?.max)
+          // without statistics: the group may hold any resource
+          return [lo === lo ? lo : -Infinity, hi === hi ? hi : Infinity] as [number, number]
+        }))
     } else {
       result = buildDepsByProducer(...req.args)
     }

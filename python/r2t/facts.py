@@ -145,6 +145,7 @@ def programs_table(rec: np.ndarray, strings: list[str]) -> pa.Table:
     spawn, spawn_null = nullable(rec, "spawn")
     end, end_null = nullable(rec, "end")
     return pa.table({
+        "id": pa.array(np.arange(len(rec), dtype=np.int32)),
         "nu": pa.array(rec["nu"].astype(np.int32)),
         "name": string_column(rec["name"], strings),
         "spawn": masked(spawn, spawn_null, pa.int32()),

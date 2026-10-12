@@ -194,7 +194,7 @@ export function TrafficView({ trace, charges, store }: Props) {
     const onVisibility = () => request()
     document.addEventListener('visibilitychange', onVisibility)
     const offs = [store.window.subscribe(setRange), store.range.subscribe(setRange),
-      store.cursor.subscribe(setRange), store.followCursor.subscribe(setRange), store.smoothing.subscribe(setRange),
+      store.cursor.subscribe(setRange), store.smoothing.subscribe(setRange),
       charges.subscribe(() => request()), onThemeChange(() => { renderer.theme = readTheme(); request() })]
     const top = canvases[2]
     const pos = (e: MouseEvent) => {

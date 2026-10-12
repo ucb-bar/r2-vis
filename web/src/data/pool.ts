@@ -1,5 +1,5 @@
 // A pool of workers (worker.ts). Requests go to the next free worker; larger requests are
-// sent first.
+// sent first. A pinned request waits for its own worker (a worker that keeps a cache).
 import type { Column } from './parquet/decode'
 import type { ComputeRequest, DecodeRequest, WorkerReply } from './worker'
 
@@ -18,7 +18,10 @@ export interface PoolStats {
 }
 
 type Message = Omit<DecodeRequest, 'id'> | Omit<ComputeRequest, 'id'>
-interface Queued { msg: Message; size: number; transfer: Transferable[]; resolve: (r: unknown) => void; reject: (e: Error) => void }
+interface Queued { msg: Message; size: number; transfer: Transferable[]; pin: Worker | null; resolve: (r: unknown) => void; reject: (e: Error) => void }
+
+/** A request without its id, per variant of the union. */
+type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never
 
 export class WorkerPool {
   private readonly workers: Worker[]
@@ -47,8 +50,10 @@ export class WorkerPool {
     return this.submit(msg, job.bytes, []) as Promise<Record<string, Column>>
   }
 
-  compute<T>(msg: Omit<ComputeRequest, 'id'>, transfer: Transferable[] = []): Promise<T> {
-    return this.submit(msg, Infinity, transfer) as Promise<T>
+  /** A compute request; `pin` (a worker index) sends it to that worker only. */
+  compute<T>(msg: WithoutId<ComputeRequest>, transfer: Transferable[] = [], pin: number | null = null): Promise<T> {
+    const worker = pin === null ? null : this.workers[pin % this.workers.length]
+    return this.submit(msg, Infinity, transfer, worker) as Promise<T>
   }
 
   /** Forgets cached footers (a new trace is opened). */
@@ -60,18 +65,21 @@ export class WorkerPool {
     for (const w of this.workers) w.terminate()
   }
 
-  private submit(msg: Message, size: number, transfer: Transferable[]): Promise<unknown> {
+  private submit(msg: Message, size: number, transfer: Transferable[], pin: Worker | null = null): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      this.queue.push({ msg, size, transfer, resolve, reject })
+      this.queue.push({ msg, size, transfer, pin, resolve, reject })
       this.queue.sort((a, b) => b.size - a.size)
       this.pump()
     })
   }
 
   private pump(): void {
-    while (this.idle.length && this.queue.length) {
-      const worker = this.idle.pop() as Worker
-      const job = this.queue.shift() as Queued
+    for (let q = 0; q < this.queue.length && this.idle.length;) {
+      const job = this.queue[q]
+      const w = job.pin ? this.idle.indexOf(job.pin) : this.idle.length - 1
+      if (w < 0) { q++; continue }
+      const worker = this.idle.splice(w, 1)[0]
+      this.queue.splice(q, 1)
       const id = this.nextId++
       this.pending.set(id, job)
       worker.postMessage({ ...job.msg, id }, job.transfer)

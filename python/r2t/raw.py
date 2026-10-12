@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import zstandard
 
-RAW_VERSION = (1, 5)
+RAW_VERSION = (1, 6)
 
 # Record layouts of trace-raw.md Section 4, as [name, type] in file order.
 LAYOUTS: dict[str, list[list[str]]] = {

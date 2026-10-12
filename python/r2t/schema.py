@@ -212,11 +212,28 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "resolved": "cycle the dependency counted as resolved at the consumer; NULL if never",
     }),
     "programs": ("One row per program run on a Neutrino, sorted by (nu, start).", {
+        "id": "program id: the row index (charges.program and usage.program refer to it)",
         "nu": "node id",
         "name": "program name",
         "spawn": "gid of the spawn task in the parent; NULL for the root program",
         "start": "cycle the program started",
         "end": "cycle the program returned; NULL if never",
+    }),
+    "usage": ("Attribution (format 1.5): the charges summed per resource, charge block and "
+              "owner, sorted by (resource, block, gid, program), so that a resource's rows "
+              "are contiguous. A range [a, b): the blocks inside it from here, the two edge "
+              "blocks from charges, clipped; an instant t: the charges with start <= t < "
+              "end (lanes held = cycles / (end - start)).", {
+        "resource": "resource id",
+        "block": "charge block: the index into manifest.charge_blocks (a row group of "
+                 "charges.parquet; its charges start in [t0, t1) and end by max_end)",
+        "gid": "owner task; NULL for a program owner or no owner",
+        "program": "owner program (programs.id); NULL for a task or no owner",
+        "amount": "summed amount",
+        "cycles": "summed lane-cycles",
+        "n": "number of charges",
+        "first": "earliest start of these charges",
+        "last": "latest end of these charges",
     }),
     "charges": ("One row per charge of a resource and direction. Row group = time block "
                 "(manifest.charge_blocks); sorted by (block, resource, start).", {
@@ -228,8 +245,12 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
                   "lanes_held). On an unlimited link equal to end - start",
         "amount": "units of this direction (resources.unit)",
         "dir": "direction code (dirs)",
-        "gid": "task whose chunk made the charge; NULL for a protocol message, a load, a "
-               "store or scalar program work",
+        "gid": "owner task (raw 1.6: the task whose chunk made it, the invoked or consumer "
+               "task of a protocol message, the invoked task of invoke scalar work); NULL for a "
+               "program owner or no owner (a raw 1.5 or older dump: messages, loads, stores and "
+               "scalar work)",
+        "program": "owner program (raw 1.6): programs.id of the program whose scalar work, "
+                   "load, store or message it is; NULL otherwise",
         "msg": "message kind code for a protocol message; NULL otherwise",
     }),
     "bins": ("Overview bins: charges spread evenly over fixed-width time bins; only "

@@ -68,8 +68,8 @@ export function ControlView({ trace, store, pool }: Props) {
     let frame = 0
     let next = store.cursor.get()
     const offs = [
+      // The cursor (an instant), else the range's start (views-design 7).
       store.cursor.subscribe((c) => {
-        if (!c) return  // keep the last time: the pointer leaves the timeline to get here
         next = c
         if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTime(next) })
       }),
@@ -260,7 +260,6 @@ export function ControlView({ trace, store, pool }: Props) {
           <span className="instant-active" title={stat === 'at' && !time ? 'no cursor yet: the range start' : undefined}>
             {stat === 'at' ? `t = ${fmt(t)}` : `[${fmt(range.a)}, ${fmt(range.b)})`}
           </span>
-          {stat === 'at' && time?.pinned && <span className="badge">pinned</span>}
           {!ready && <span className="badge">loading</span>}
           {ready && !data.hasEntries && <span className="badge" title="no entries in this trace: 6 of 8 tables not recorded">no entries</span>}
         </div>

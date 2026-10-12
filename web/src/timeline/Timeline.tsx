@@ -9,7 +9,7 @@ import { BlocksPanel } from '../ui/BlocksPanel'
 import { Section, Sidebar } from '../ui/Sidebar'
 import { OTHER } from './colors'
 import { Minimap } from './Minimap'
-import { AXIS, GUTTER, MAX_SMOOTH, TimelineRenderer } from './renderer'
+import { AXIS, GUTTER, MAX_SMOOTH, MODE_NAME, TimelineRenderer, type AttributeTo } from './renderer'
 import { DRAG_PX, TimeInput } from './timeinput'
 
 interface Props {
@@ -28,6 +28,29 @@ declare global {
 }
 
 const EDGE_PX = 3
+const FLIGHTLINES_KEY = 'r2vis.flightlines'
+
+/** The most flightlines (views-design 7), kept in the browser; 32 by default. */
+function loadFlightlines(): number {
+  try {
+    const n = Number(localStorage.getItem(FLIGHTLINES_KEY))
+    return n >= 1 && n <= 128 ? n : 32
+  } catch {
+    return 32
+  }
+}
+const ATTRIBUTE_TO_KEY = 'r2vis.attributeTo'
+const ATTRIBUTE_TO: AttributeTo[] = ['auto', 'task', 'laneKind', 'kind']
+
+/** What a flightline goes to (views-design 7), kept in the browser; auto by default. */
+function loadAttributeTo(): AttributeTo {
+  try {
+    const v = localStorage.getItem(ATTRIBUTE_TO_KEY) as AttributeTo
+    return ATTRIBUTE_TO.includes(v) ? v : 'auto'
+  } catch {
+    return 'auto'
+  }
+}
 const REVEAL_MIN_SPAN = 20_000  // cycles shown at least when a task is revealed
 
 type Drag =
@@ -68,6 +91,8 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
   const [showAll, setShowAll] = useState(false)
   const [blocksOpen, setBlocksOpen] = useState(false)
   const [pinned, setPinned] = useState<number | null>(null)
+  const [flightlines, setFlightlines] = useState(loadFlightlines)
+  const [attributeTo, setAttributeTo] = useState(loadAttributeTo)
   const [mapVersion, setMapVersion] = useState(0)
   const frame = useRef(0)
   const requestRef = useRef<() => void>(() => {})
@@ -127,6 +152,9 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
     })
     renderer.selectedTasks = store.tasks.get()
     const offTasks = store.tasks.subscribe((t) => { renderer.selectedTasks = t; request(); updateTip() })
+    renderer.onAttribution = () => { request(); updateTip() }
+    renderer.maxFlightlines = loadFlightlines()
+    renderer.attributeTo = loadAttributeTo()
     const offCursor = store.cursor.subscribe((c) => {
       const p = c?.pinned ? c.t : null
       if (p !== renderer.pinned) { renderer.pinned = p; setPinned(p); request() }
@@ -203,23 +231,25 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
     }
     const setHover = (x: number, y: number) => {
       renderer.hover = { x, y, row: renderer.rowAtY(y), t: renderer.timeAtX(x) }
-      store.hover(x >= GUTTER ? renderer.hover.t : null)
     }
 
-    // Time gestures (shared with the Instant scrubber); a plain click on a plot toggles the
-    // task under it, or clears the tasks, then the range; a right click on a group header
-    // lists its hidden rows.
+    // Time gestures (shared with the Instant scrubber); a click on a task bar toggles the
+    // task; a click elsewhere on a plot selects the row (as a click on its label) and sets
+    // the cursor; a right click on a group header lists its hidden rows.
     const time = new TimeInput({
       axis: renderer.axis, store,
       changed: () => { request(); updateTip() },
       rangeChanged: () => publishRange(),
-      plotClick: (x, y) => {
+      plotClick: (x, y, e) => {
         setHover(x, y)
         const task = renderer.hoveredTask()
-        if (task >= 0) toggleTask(store, task)
-        else if (store.tasks.get().size) store.tasks.set(new Set())
-        else return false
-        return true
+        if (task >= 0) {
+          toggleTask(store, task)
+          return true
+        }
+        const i = renderer.rowAtY(y)
+        if (i >= 0 && renderer.model.rows[i].kind !== 'group') selectRow(i, e.shiftKey || e.metaKey || e.ctrlKey)
+        return false
       },
       plotRightClick: (x, y) => {
         const i = renderer.rowAtY(y)
@@ -316,18 +346,22 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
           if (target) renderer.moveRow(target.from, target.before)
         } else if (row.kind === 'fabric' && x < 10 + row.depth * 12 + 8) {
           renderer.toggleFabric(row.key)  // the triangle opens or closes a fabric node
-        } else {
-          if (!d.additive) renderer.selectedRows.clear()
-          if (d.additive && renderer.selectedRows.has(row.key)) renderer.selectedRows.delete(row.key)
-          else renderer.selectedRows.add(row.key)
-          renderer.focusKey = row.key
-        }
+        } else selectRow(d.row, d.additive)
       } else if (d.kind === 'group') {
         const row = renderer.model.rows[d.row]
         if (d.button === 0) renderer.toggle(row.id)
         else openMenu(row.id, x, y)
       }
       refresh()
+    }
+
+    /** Selects a row (its label or its plot clicked); `additive` adds or removes it. */
+    const selectRow = (i: number, additive: boolean) => {
+      const row = renderer.model.rows[i]
+      if (!additive) renderer.selectedRows.clear()
+      if (additive && renderer.selectedRows.has(row.key)) renderer.selectedRows.delete(row.key)
+      else renderer.selectedRows.add(row.key)
+      renderer.focusKey = row.key
     }
 
     const openMenu = (node: number, x: number, y: number) => {
@@ -345,7 +379,6 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
     }
     const onLeave = () => {
       renderer.hover = null
-      store.hover(null)
       request()
       setTip(null)
     }
@@ -353,7 +386,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
       if (e.key === 'Escape') {
-        // Esc clears the task selection first, then the range.
+        // Esc clears the task selection first, then the range and the cursor.
         if (store.tasks.get().size) store.tasks.set(new Set())
         else time.escape()
         renderer.zoomBox = null
@@ -455,6 +488,31 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
             <label className="tool">
               <input type="checkbox" checked={docked} onChange={(e) => onDock(e.target.checked)} />
               dock the instant view below
+            </label>
+            <label className="tool">
+              flightlines
+              <input type="range" min={1} max={128} value={flightlines}
+                onChange={(e) => {
+                  const n = Number(e.target.value)
+                  renderer.maxFlightlines = n
+                  setFlightlines(n)
+                  try { localStorage.setItem(FLIGHTLINES_KEY, String(n)) } catch { /* not kept */ }
+                  request()
+                }} />
+              <span className="tool-value">{flightlines}</span>
+            </label>
+            <label className="tool">
+              attribute to
+              <select value={attributeTo}
+                onChange={(e) => {
+                  const v = e.target.value as AttributeTo
+                  renderer.attributeTo = v
+                  setAttributeTo(v)
+                  try { localStorage.setItem(ATTRIBUTE_TO_KEY, v) } catch { /* not kept */ }
+                  request()
+                }}>
+                {ATTRIBUTE_TO.map((v) => <option key={v} value={v}>{v === 'auto' ? 'auto' : MODE_NAME[v]}</option>)}
+              </select>
             </label>
             {pinned !== null && (
               <span className="chip">pinned at {Math.round(pinned).toLocaleString('en-US')}

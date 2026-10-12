@@ -7,7 +7,7 @@ import re
 TABLES = ["nodes", "pes", "lanes", "buses", "attachments", "links", "memories",
           "memory_ranges", "resources", "opcodes", "message_kinds", "dirs", "dep_states",
           "tasks", "chunks", "deps", "programs", "charges", "bins", "marks", "phases",
-          "table_names", "entries"]
+          "table_names", "entries", "usage"]
 
 HEADER = """\
 -- r2t views. Open the trace with `r2t-sql RUN.r2t [QUERY]`, or run DuckDB from inside the

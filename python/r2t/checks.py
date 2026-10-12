@@ -25,7 +25,16 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
         errors += check_stats(ch, m["resources"], stats)
     errors += check_entries(dump, gids)
     errors += check_write_channels(m)
+    if not dump.partial:
+        errors += check_program_owners(ch)
     return errors
+
+
+def check_program_owners(ch: Charges) -> list[str]:
+    """Every program owner (raw 1.6: 0x80000000 | spawn, or the root reference) names a
+    program of programs.bin."""
+    n = int(ch.program_unknown.sum())
+    return [f"charges: {n} program owners name no program"] if n else []
 
 
 def read_channel(m: dict, r: dict) -> int | None:

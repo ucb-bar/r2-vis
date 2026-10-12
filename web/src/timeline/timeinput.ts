@@ -1,7 +1,8 @@
-// Time input shared by the timeline and the Instant scrubber (views-design 6.1): drag on
-// the plot or the axis selects a range, a click on the axis pins the cursor there, the
-// playhead handle drags (scrubs) the pin, right-drag zooms to a box, ctrl+wheel or pinch
-// zooms, horizontal or shift+wheel pans, Esc clears the range.
+// Time input shared by the timeline and the Instant scrubber (views-design 6.1, 7): a drag
+// on the plot or the axis selects a range, a click on the plot or the axis sets the cursor
+// there (the two exclude each other), the playhead handle drags (scrubs) the cursor,
+// right-drag zooms to a box, ctrl+wheel or pinch zooms, horizontal or shift+wheel pans, Esc
+// clears the range and the cursor.
 import type { ViewStore } from '../state/viewstore'
 import { AXIS, GUTTER, type TimeAxis } from './axis'
 import { zoomFactor } from './viewport'
@@ -15,7 +16,8 @@ export interface TimeInputHost {
   changed(): void
   /** The axis selection changed: publish it to the store. */
   rangeChanged(): void
-  /** A left click without a drag on the plot (not the axis); true if the host used it. */
+  /** A left click without a drag on the plot (not the axis); true if the host used it
+   * (else the click sets the cursor). */
   plotClick?(x: number, y: number, e: PointerEvent): boolean
   /** A right click without a drag on the plot. */
   plotRightClick?(x: number, y: number): void
@@ -91,12 +93,18 @@ export class TimeInput {
     const { axis, store } = this.host
     if (d.kind === 'select' || d.kind === 'axis') {
       if (!d.moved) {
-        // A click on the axis (or alt+click on the plot) pins the cursor there; a plain
-        // click on the plot goes to the host, else it clears the range.
-        if (d.kind === 'axis' || e.altKey) store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(x))))
-        else if (!this.host.plotClick?.(x, y, e)) axis.selection = null
-      } else if (axis.selection && axis.selection.b - axis.selection.a <= 0) axis.selection = null
-      this.host.rangeChanged()
+        // A click sets the cursor there (it clears the range), unless the host takes a
+        // click on the plot (a task bar toggles its task).
+        if (d.kind === 'axis' || !this.host.plotClick?.(x, y, e)) {
+          axis.selection = null
+          this.host.rangeChanged()
+          store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(x))))
+        }
+      } else {
+        // A drag sets the range (it clears the cursor).
+        if (axis.selection && axis.selection.b - axis.selection.a <= 0) axis.selection = null
+        this.host.rangeChanged()
+      }
     } else if (d.kind === 'zoom') {
       if (d.moved && axis.zoomBox) axis.zoomTo(axis.zoomBox)
       else this.host.plotRightClick?.(x, y)
@@ -118,14 +126,17 @@ export class TimeInput {
     return true
   }
 
-  /** Esc: clears the zoom box and the range; true if there was a range. */
+  /** Esc: clears the zoom box, the range and the cursor; true if there was either. */
   escape(): boolean {
-    const axis = this.host.axis
+    const { axis, store } = this.host
     axis.zoomBox = null
-    if (!axis.selection) return false
-    axis.selection = null
-    this.host.rangeChanged()
+    const had = !!axis.selection || !!store.cursor.get()
+    if (axis.selection) {
+      axis.selection = null
+      this.host.rangeChanged()
+    }
+    if (store.cursor.get()) store.unpin()
     this.host.changed()
-    return true
+    return had
   }
 }
