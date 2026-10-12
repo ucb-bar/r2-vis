@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { fromDrop, fromFileList, type TraceFiles } from './data/files'
 import { WorkerPool, defaultPoolSize } from './data/pool'
 import { loadTrace, type Trace } from './data/trace'
+import { indexLabels } from './data/labels'
 import { ChargeCache } from './data/charges'
 import { ViewStore } from './state/viewstore'
 import { homeRange } from './timeline/rows'
@@ -33,6 +34,7 @@ export function App() {
       pool().reset()
       const trace = await loadTrace(tf, pool(), (done, total) =>
         setState({ kind: 'loading', name: tf.name, done, total }))
+      void indexLabels(trace, pool())   // which task labels are shared (task names), in a worker
       const charges = new ChargeCache(trace)
       const store = new ViewStore(trace.dims.nodes.map((n) => n.id as number), trace.manifest.end_time, homeRange(trace))
       window.__r2vis = { ...window.__r2vis, trace, charges, store }

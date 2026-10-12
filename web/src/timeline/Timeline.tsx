@@ -52,6 +52,26 @@ function loadAttributeTo(): AttributeTo {
     return 'auto'
   }
 }
+const USAGE_KEY = 'r2vis.usage'
+
+/** The usage of selected tasks (views-design 7.1) is shown, kept in the browser; on by default. */
+function loadUsage(): boolean {
+  try {
+    return localStorage.getItem(USAGE_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+const CONTROL_KEY = 'r2vis.controlTraffic'
+
+/** Control traffic is attributed (views-design 7.1), kept in the browser; off by default. */
+function loadControl(): boolean {
+  try {
+    return localStorage.getItem(CONTROL_KEY) === 'on'
+  } catch {
+    return false
+  }
+}
 const REVEAL_MIN_SPAN = 20_000  // cycles shown at least when a task is revealed
 
 type Drag =
@@ -94,6 +114,8 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
   const [pinned, setPinned] = useState<number | null>(null)
   const [flightlines, setFlightlines] = useState(loadFlightlines)
   const [attributeTo, setAttributeTo] = useState(loadAttributeTo)
+  const [usage, setUsage] = useState(loadUsage)
+  const [control, setControl] = useState(loadControl)
   const [mapVersion, setMapVersion] = useState(0)
   const frame = useRef(0)
   const requestRef = useRef<() => void>(() => {})
@@ -154,8 +176,11 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
     renderer.selectedTasks = store.tasks.get()
     const offTasks = store.tasks.subscribe((t) => { renderer.selectedTasks = t; request(); updateTip() })
     renderer.onAttribution = () => { request(); updateTip() }
+    renderer.onUsage = () => request()
     renderer.maxFlightlines = loadFlightlines()
     renderer.attributeTo = loadAttributeTo()
+    renderer.showUsage = loadUsage()
+    renderer.controlTraffic = loadControl()
     const offCursor = store.cursor.subscribe((c) => {
       const p = c?.pinned ? c.t : null
       if (p !== renderer.pinned) { renderer.pinned = p; setPinned(p); request() }
@@ -506,6 +531,28 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
                   request()
                 }} />
               <span className="tool-value">{flightlines}</span>
+            </label>
+            <label className="tool">
+              <input type="checkbox" checked={usage}
+                onChange={(e) => {
+                  const on = e.target.checked
+                  renderer.showUsage = on
+                  setUsage(on)
+                  try { localStorage.setItem(USAGE_KEY, on ? 'on' : 'off') } catch { /* not kept */ }
+                  request()
+                }} />
+              usage of selected tasks
+            </label>
+            <label className="tool">
+              <input type="checkbox" checked={control}
+                onChange={(e) => {
+                  const on = e.target.checked
+                  renderer.controlTraffic = on
+                  setControl(on)
+                  try { localStorage.setItem(CONTROL_KEY, on ? 'on' : 'off') } catch { /* not kept */ }
+                  request()
+                }} />
+              control &amp; Neutrino work
             </label>
             <label className="tool">
               attribute to

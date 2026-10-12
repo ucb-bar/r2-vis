@@ -7,7 +7,8 @@ import { zstdDecoder } from './parquet/zstd'
 import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
 import { buildOccupancy } from './occupancy'
-import { attribute, resetAttribution, type AttributionRequest } from './attribution'
+import { sharedLabels } from './labels'
+import { attribute, resetAttribution, taskUsage, type AttributionRequest, type UsageRequest } from './attribution'
 
 export interface DecodeRequest {
   op: 'decode'
@@ -26,6 +27,8 @@ export type ComputeRequest =
   | { op: 'depsByProducer'; id: number; args: Parameters<typeof buildDepsByProducer> }
   | { op: 'occupancy'; id: number; args: Parameters<typeof buildOccupancy> }
   | { op: 'attribute'; id: number; req: AttributionRequest }
+  | { op: 'taskUsage'; id: number; req: UsageRequest }
+  | { op: 'sharedLabels'; id: number; args: Parameters<typeof sharedLabels> }
 
 export interface WorkerReply {
   id: number
@@ -102,6 +105,11 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
           // without statistics: the group may hold any resource
           return [lo === lo ? lo : -Infinity, hi === hi ? hi : Infinity] as [number, number]
         }))
+    } else if (req.op === 'sharedLabels') {
+      result = sharedLabels(...req.args)
+    } else if (req.op === 'taskUsage') {
+      result = await taskUsage(req.req,
+        async (name, file, group, columns) => (await decode({ op: 'decode', id: 0, file, name, group, columns })).cols)
     } else {
       result = buildDepsByProducer(...req.args)
     }

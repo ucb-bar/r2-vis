@@ -67,3 +67,15 @@ export function span(a: number, b: number): string {
   const end = (t: number) => (t === 0 ? '0' : `${(t / unit).toFixed(d)}${s}`)
   return `[${end(a)}, ${end(b)}) · ${count(b - a)} cycles`
 }
+
+/** An amount in its unit: bytes in KB/MB/GB (1024), else k/M with the unit: 64 KB,
+ * 2.1M MAC, 40 instr. */
+export function amount(v: number, unit: string): string {
+  if (unit === 'B') {
+    const a = Math.abs(v)
+    const [x, u] = a < 1024 ? [v, 'B'] : a < 1024 ** 2 ? [v / 1024, 'KB'] : a < 1024 ** 3 ? [v / 1024 ** 2, 'MB'] : [v / 1024 ** 3, 'GB']
+    const n = u === 'B' ? String(Math.round(x)) : Math.abs(x) < 10 ? x.toFixed(1).replace(/\.0$/, '') : String(Math.round(x))
+    return `${n} ${u}`
+  }
+  return `${count(v)} ${unit}`
+}

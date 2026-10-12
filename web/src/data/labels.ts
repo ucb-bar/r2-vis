@@ -1,5 +1,6 @@
 // Task labels from the label field columns, in the manifest's label format.
 import { isDict } from './columns'
+import type { WorkerPool } from './pool'
 import type { Trace } from './trace'
 
 /** Per trace: the label format without the fields that have one value in every task
@@ -61,23 +62,20 @@ export function taskLabel(trace: Trace, task: number): string | null {
   return missing ? null : s
 }
 
-/** Per trace: the number of tasks per label (a 52-bit hash of the label fields). */
-const labelCounts = new WeakMap<Trace, { hash: Float64Array; count: Map<number, number> }>()
+/** Per task: 1 if another task has the same label (sharedLabels, built in a worker at
+ * load by indexLabels); until it is ready, no label counts as shared. */
+const labelShared_ = new WeakMap<Trace, Uint8Array>()
 
-function labelHashes(trace: Trace): { hash: Float64Array; count: Map<number, number> } {
-  let v = labelCounts.get(trace)
-  if (v) return v
-  const c = trace.facts.tasks.cols
-  const rows = trace.facts.tasks.rows
+/** Which tasks share their label with another task, from the label field columns (dict
+ * codes or values): a 52-bit hash of the fields, counted. */
+export function sharedLabels(fields: (Int32Array | Float64Array)[], rows: number): Uint8Array {
   let h1 = new Int32Array(rows).fill(0x9e3779b9 | 0)
   let h2 = new Int32Array(rows).fill(0x85ebca6b | 0)
-  for (const f of trace.manifest.label.fields) {
-    const col = c[f.name]
-    if (!col) continue
+  for (const col of fields) {
     const n1 = new Int32Array(rows)
     const n2 = new Int32Array(rows)
     for (let i = 0; i < rows; i++) {
-      const x = isDict(col) ? col.codes[i] : col[i] | 0
+      const x = col[i] | 0
       n1[i] = Math.imul(h1[i] ^ x, 0x01000193)
       n2[i] = Math.imul(h2[i] + x, 0x5bd1e995) ^ (h2[i] >>> 15)
     }
@@ -91,15 +89,23 @@ function labelHashes(trace: Trace): { hash: Float64Array; count: Map<number, num
     hash[i] = k
     count.set(k, (count.get(k) ?? 0) + 1)
   }
-  v = { hash, count }
-  labelCounts.set(trace, v)
-  return v
+  const out = new Uint8Array(rows)
+  for (let i = 0; i < rows; i++) out[i] = (count.get(hash[i]) ?? 0) > 1 ? 1 : 0
+  return out
 }
 
-/** Another task has the same label. */
+/** Starts building the shared-label flags of a trace in a worker (at load). */
+export function indexLabels(trace: Trace, pool: WorkerPool): Promise<void> {
+  const c = trace.facts.tasks.cols
+  const fields = trace.manifest.label.fields.map((f) => c[f.name]).filter((col) => col !== undefined)
+    .map((col) => (isDict(col) ? Int32Array.from(col.codes) : Float64Array.from(col as ArrayLike<number>)))
+  return pool.compute<Uint8Array>({ op: 'sharedLabels', args: [fields, trace.facts.tasks.rows] })
+    .then((flags) => { labelShared_.set(trace, flags) })
+}
+
+/** Another task has the same label (false until indexLabels is done). */
 export function labelShared(trace: Trace, task: number): boolean {
-  const { hash, count } = labelHashes(trace)
-  return (count.get(hash[task]) ?? 0) > 1
+  return labelShared_.get(trace)?.[task] === 1
 }
 
 /** A task's name: its label, with the version appended when another task has the same

@@ -1,14 +1,14 @@
 // The timeline renderer: one canvas, the visible rows only. Layout: label gutter on the
 // left, time axis on top, rows below (group headers, task lanes, utilization lines).
 // The renderer holds the view state; Timeline.tsx turns input into calls on it.
-import type { Attribution, AttributionRequest, OwnerGroup } from '../data/attribution'
+import type { Attribution, AttributionRequest, OwnerGroup, Usage, UsageRequest } from '../data/attribution'
 import type { ChargeCache, ChargeGroup } from '../data/charges'
 import { isDict } from '../data/columns'
 import { taskLabel, taskName } from '../data/labels'
 import { programSpans, type ProgramSpan } from '../data/programs'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
-import { count, cycles, num, pct, rate, relative, short, splitPath } from '../ui/format'
+import { amount as formatAmount, count, cycles, num, pct, rate, relative, short, splitPath } from '../ui/format'
 import { TIP_ITEMS, tipList, type TipContent, type TipItem, type TipRow, type TipSection } from '../ui/Tooltip'
 import type { BlockSelection } from '../state/blocks'
 import { DEFAULT_PREFS, type ViewPrefs } from '../state/viewprefs'
@@ -65,6 +65,34 @@ interface RowValue {
 /** The pool worker of the attribution queries. */
 const ATTRIBUTION_WORKER = 0
 
+/** A usage arrow (views-design 7.1): a selected task to a resource row it charged. */
+export interface UsageArrow {
+  task: number
+  /** the row index, -1 if the resource has no row shown */
+  row: number
+  /** the time of the largest charge (the arrow's end) */
+  t: number
+  /** the label: the task's peak band height on the row, the largest amount / (ceiling x
+   * span) of its charges there (a node: over its members) */
+  peak: number
+  /** the task's own amount on the row (a node: its members of one unit summed, bytes if
+   * they mix units), and the unit */
+  amount: number
+  unit: string
+  /** the task's share of the row's amount over [a, b), its lifetime (the hover tooltip and
+   * the order) */
+  share: number
+  /** the most lanes the task held at once on one of the row's resources, of its lanes
+   * (null without lanes) */
+  peakLanes: number | null
+  lanes: number | null
+  exact: boolean
+  name: string
+  resources: number[]
+  a: number
+  b: number
+}
+
 /** What a flightline goes to (views-design 7). */
 export type AttributeTo = 'auto' | 'task' | 'laneKind' | 'kind'
 export const MODE_NAME: Record<Exclude<AttributeTo, 'auto'>, string> = { task: 'task', laneKind: 'lane + kind', kind: 'kind' }
@@ -117,6 +145,23 @@ export class TimelineRenderer {
   /** What a flightline goes to; auto: the tasks while they fit maxFlightlines, else the
    * (lane, kind) groups, else the kind groups. */
   attributeTo: AttributeTo = 'auto'
+  /** Reverse attribution (views-design 7.1): the charges of the selected tasks, and the
+   * sidebar switch. */
+  usage: { key: string; tasks: number[]; res: Usage; byRes: Map<number, [number, number]> } | null = null
+  showUsage = true
+  /** Control traffic (protocol messages) and Neutrino scalar work (the invoke cost at the
+   * call, planning, waits) are attributed: off by default, since the control runs ahead of
+   * the tasks. The completion port stays attributed. */
+  controlTraffic = false
+  /** Called when a usage query returns (the view redraws). */
+  onUsage: (() => void) | null = null
+  private usageAsked = ''
+  /** the usage arrow labels drawn last (their hover tooltip) */
+  private arrowHits: { x0: number; x1: number; y0: number; y1: number; arrow: UsageArrow }[] = []
+  /** resource amounts over task lifetimes (usage arrows), per usage */
+  private readonly usageTotals = new Map<string, { amount: number; exact: boolean }>()
+  private arrowCache: { usage: NonNullable<TimelineRenderer['usage']>; model: RowModel; control: boolean; arrows: UsageArrow[] } | null = null
+  private readonly usageCaps: { ceiling: Float64Array }
   /** Called when an attribution query returns (the view redraws). */
   onAttribution: (() => void) | null = null
   private attributionAsked = ''
@@ -177,6 +222,8 @@ export class TimelineRenderer {
     this.model = this.build()
     this.focusKey = this.busiestCompute()
     this.programsOf = programSpans(trace)
+    const resources = trace.dims.resources
+    this.usageCaps = { ceiling: Float64Array.from(resources, (r) => (r.ceiling as number | null) ?? 0) }
   }
 
   // ---- state ----------------------------------------------------------------------------
@@ -396,6 +443,7 @@ export class TimelineRenderer {
     const H = this.height
     const pw = this.plotWidth
     this.dpr = dpr
+    this.requestUsage()
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.fillStyle = th.surface
     ctx.fillRect(0, 0, W, H)
@@ -442,6 +490,7 @@ export class TimelineRenderer {
     ctx.clip()
     this.drawDeps(ctx)
     this.drawFlightlines(ctx)
+    this.drawUsageArrows(ctx)
     this.drawWindowShade(ctx)
     ctx.restore()
     this.axis.drawBands(ctx, th, AXIS, this.height)
@@ -601,6 +650,7 @@ export class TimelineRenderer {
     }
     this.raster.draw(ctx, this.dpr, GUTTER, y, n, row.height - 1, ys, peaks, this.gridX, LINE_PAD, base,
       this.colorsFor(this.lineColorOf(row)))
+    this.drawUsage(ctx, row, y, n, base, h)
     // Left label: the value at the cursor, else the average over the range or window.
     const v = this.rowValue(index, row)
     const frac = v.scale > 0 ? v.value / v.scale : NaN
@@ -1040,13 +1090,306 @@ export class TimelineRenderer {
 
   // ---- tooltips -------------------------------------------------------------------------
 
+  // ---- reverse attribution (views-design 7.1) -----------------------------------------------
+
+  /** The usage the view asks for: the selected tasks (sorted), or null. */
+  private usageQuery(): { key: string; req: UsageRequest; tasks: number[] } | null {
+    if (!this.showUsage || this.selectedTasks.size === 0) return null
+    const charges = this.trace.reader.files.get('charges.parquet')
+    if (!charges) return null
+    const tasks = [...this.selectedTasks].sort((x, y) => x - y)
+    const c = this.trace.facts.tasks.cols
+    const num = (col: string, t: number) => { const v = (c[col] as Float64Array | undefined)?.[t]; return v !== undefined && v === v ? v : null }
+    const req: UsageRequest = {
+      charges,
+      blocks: this.trace.manifest.charge_blocks.map((b) => ({ t0: b.t0, t1: b.t1, maxEnd: b.max_end })),
+      tasks: tasks.map((t) => {
+        const call = num('call', t)
+        const invoke = num('invoke', t) ?? 0
+        return { gid: (c.gid as Int32Array)[t], a: Math.min(invoke, call ?? invoke),
+          b: num('retire', t) ?? num('complete', t) ?? this.endTime }
+      }),
+      ceiling: this.usageCaps.ceiling,
+    }
+    return { key: tasks.join(','), req, tasks }
+  }
+
+  /** Starts the usage query when the selection changed (the latest wins). */
+  private requestUsage(): void {
+    const q = this.usageQuery()
+    if (!q) { this.usage = null; this.usageAsked = ''; return }
+    if (q.key === this.usageAsked) return
+    this.usageAsked = q.key
+    void this.pool.compute<Usage>({ op: 'taskUsage', req: q.req }, [], ATTRIBUTION_WORKER).then((res) => {
+      if (this.usageAsked !== q.key) return
+      const byRes = new Map<number, [number, number]>()
+      for (let i = 0; i < res.resource.length;) {
+        let j = i
+        while (j < res.resource.length && res.resource[j] === res.resource[i]) j++
+        byRes.set(res.resource[i], [i, j])
+        i = j
+      }
+      this.usage = { key: q.key, tasks: q.tasks, res, byRes }
+      this.usageTotals.clear()
+      this.onUsage?.()
+    })
+  }
+
+  /** Per selected task, the fraction of the row's resource it holds in each of the n pixels
+   * of the view (the average over the pixel; a fabric row: the largest member fraction);
+   * null if the row has none. */
+  usagePixels(row: Row, n: number): Float64Array[] | null {
+    const u = this.usage
+    if (!u || !this.showUsage || (row.kind !== 'resource' && row.kind !== 'fabric')) return null
+    const members = row.kind === 'fabric' ? this.source.fabrics[row.id].members : [row.id]
+    const { t0, cpp } = this.view
+    const { task, start, end, frac } = u.res
+    let out: Float64Array[] | null = null
+    const tmp = new Float64Array(n)
+    for (const r of members) {
+      const span = u.byRes.get(r)
+      if (!span || (!this.controlTraffic && this.isControl(r))) continue
+      out ??= u.tasks.map(() => new Float64Array(n))
+      for (let i = span[0]; i < span[1];) {
+        const k = task[i]
+        tmp.fill(0)
+        for (; i < span[1] && task[i] === k; i++) {
+          const f = frac[i]
+          if (!(f > 0)) continue
+          const x0 = Math.max(0, (start[i] - t0) / cpp)
+          const x1 = Math.min(n, (end[i] - t0) / cpp)
+          if (x1 <= x0) continue
+          const p0 = Math.floor(x0)
+          const p1 = Math.floor(x1)
+          if (p0 === p1) { tmp[p0] += f * (x1 - x0); continue }
+          tmp[p0] += f * (p0 + 1 - x0)
+          for (let p = p0 + 1; p < p1; p++) tmp[p] += f
+          if (p1 < n) tmp[p1] += f * (x1 - p1)
+        }
+        const acc = out[k]
+        for (let p = 0; p < n; p++) if (tmp[p] > acc[p]) acc[p] = tmp[p]
+      }
+    }
+    return out
+  }
+
+  /** The row that shows a resource: its own row, else the innermost fabric or memory node
+   * row that holds it (a closed node takes the arrows of its members); -1 if none. */
+  private resourceRows(): Map<number, number> {
+    const out = new Map<number, number>()
+    this.model.rows.forEach((row, i) => {
+      if (row.kind === 'fabric') for (const r of this.source.fabrics[row.id].members) out.set(r, i)
+    })
+    this.model.rows.forEach((row, i) => { if (row.kind === 'resource') out.set(row.id, i) })
+    return out
+  }
+
+  /** The usage arrows (views-design 7.1): per selected task and resource row it charged
+   * (a closed fabric or memory node: its members together), from the task's bar to the row
+   * at its peak charge there, labelled with the task's peak band height on the row (the
+   * largest amount / (ceiling x span) of its charges; a node: over its members). The hover
+   * tooltip adds its amount, its share of the row over its lifetime [min(call, invoke),
+   * retire) and the peak lanes held. The largest peaks first. Cached per usage and row
+   * model once exact. */
+  usageArrows(): UsageArrow[] {
+    const u = this.usage
+    if (!u || !this.showUsage) return []
+    const cached = this.arrowCache
+    if (cached && cached.usage === u && cached.model === this.model && cached.control === this.controlTraffic) return cached.arrows
+    const arrows = this.computeUsageArrows(u)
+    if (arrows.every((a) => a.exact)) this.arrowCache = { usage: u, model: this.model, control: this.controlTraffic, arrows }
+    return arrows
+  }
+
+  private computeUsageArrows(u: NonNullable<typeof this.usage>): UsageArrow[] {
+    const rows = this.resourceRows()
+    const c = this.trace.facts.tasks.cols
+    const { task, resource, start, end, amount } = u.res
+    // per (task, row): the task's amount, its resources, its largest charge
+    const resDims = this.trace.dims.resources
+    const acc = new Map<string, { k: number; row: number; amount: number; byUnit: Map<string, number>; res: Set<number>; peak: number;
+      peakLanes: number; lanes: number }>()
+    for (let i = 0; i < task.length; i++) {
+      if (!(amount[i] > 0) || (!this.controlTraffic && this.isControl(resource[i]))) continue
+      const row = rows.get(resource[i]) ?? -1
+      const key = `${task[i]}|${row < 0 ? `r${resource[i]}` : row}`
+      let e = acc.get(key)
+      if (!e) acc.set(key, (e = { k: task[i], row, amount: 0, byUnit: new Map(), res: new Set(), peak: i, peakLanes: 0, lanes: 0 }))
+      e.amount += amount[i]
+      if (u.res.frac[i] > u.res.frac[e.peak]) e.peak = i
+      const unit = String(resDims[resource[i]]?.unit ?? '')
+      e.byUnit.set(unit, (e.byUnit.get(unit) ?? 0) + amount[i])
+      e.res.add(resource[i])
+      const lanes = (resDims[resource[i]]?.lanes as number | null | undefined) ?? 0
+      const span = end[i] - start[i]
+      if (lanes > 0 && span > 0 && u.res.cycles[i] / span > e.peakLanes) { e.peakLanes = u.res.cycles[i] / span; e.lanes = lanes }
+    }
+    const out: UsageArrow[] = []
+    for (const e of acc.values()) {
+      const t = u.tasks[e.k]
+      const num = (col: string) => { const v = (c[col] as Float64Array | undefined)?.[t]; return v !== undefined && v === v ? v : null }
+      const invoke = num('invoke') ?? 0
+      const a = Math.min(invoke, num('call') ?? invoke)
+      const b = num('retire') ?? num('complete') ?? this.endTime
+      let total = 0
+      let exact = true
+      for (const res of e.res) {
+        const x = this.resourceAmount(res, a, b)
+        total += x.amount
+        exact &&= x.exact
+      }
+      const name = e.row >= 0 ? this.model.rows[e.row].label : String(this.trace.dims.resources[[...e.res][0]]?.name ?? '')
+      // the label: one unit, else bytes only
+      const [unit, own] = e.byUnit.size === 1 ? [...e.byUnit][0] : ['B', e.byUnit.get('B') ?? 0]
+      out.push({ task: t, row: e.row, t: (start[e.peak] + end[e.peak]) / 2, peak: Math.min(1, u.res.frac[e.peak]), amount: own, unit,
+        share: total > 0 ? Math.min(1, e.amount / total) : 0, peakLanes: e.lanes > 0 ? e.peakLanes : null,
+        lanes: e.lanes > 0 ? e.lanes : null, exact, name, resources: [...e.res], a, b })
+    }
+    return out.sort((x, y) => y.peak - x.peak || y.share - x.share)
+  }
+
+  /** A resource's amount over [a, b), clipped to the recorded window; cached per usage
+   * once exact. */
+  private resourceAmount(resource: number, a: number, b: number): { amount: number; exact: boolean } {
+    const key = `${resource}|${a}|${b}`
+    const hit = this.usageTotals.get(key)
+    if (hit) return hit
+    const avg = this.average(resource, { a, b })
+    const part = recordedPart(this.rec.window, a, b)
+    const v = { amount: part ? avg.value * (part.b - part.a) : 0, exact: avg.exact }
+    if (v.exact) this.usageTotals.set(key, v)
+    return v
+  }
+
+  /** The usage arrows: dotted, in the task's kind color, from the bar (at the time of the
+   * charge, within the bar) to the resource row, an arrowhead and the share there; the edge
+   * rule (a hidden row or a bar off the plot: the plot edge, with the name). */
+  private drawUsageArrows(ctx: CanvasRenderingContext2D): void {
+    this.arrowHits = []
+    const all = this.usageArrows()
+    if (!all.length) return
+    const arrows = all.slice(0, this.maxFlightlines)
+    const th = this.theme
+    const top = AXIS + 3
+    const bottom = this.height - 3
+    const colors = [...th.series, th.seriesOther]
+    const c = this.trace.facts.tasks.cols
+    ctx.save()
+    ctx.font = `${th.fontSizeXs}px ${th.fontSans}`
+    ctx.textBaseline = 'middle'
+    const labels: { x: number; y: number; w: number; text: string; color: string }[] = []
+    for (const a of arrows) {
+      const color = colors[this.slots[a.task]] ?? th.seriesOther
+      // source: the bar at the charge's time (within the bar)
+      const iss = (c.issue as Float64Array)[a.task]
+      const s0 = iss === iss ? iss : (c.invoke as Float64Array)[a.task]
+      const cmp = (c.complete as Float64Array)[a.task]
+      const s1 = cmp === cmp ? cmp : this.endTime
+      const lri = this.model.rowOfLane[(c.lane as Int32Array)[a.task]]
+      let sx = this.xOf(Math.max(s0, Math.min(s1, a.t)))
+      let sy = top
+      if (lri >= 0) {
+        const { pad, subH } = this.laneBox(this.model.rows[lri])
+        sy = this.rowTop(lri) + pad + (this.trace.lanes.taskSub[a.task] + 0.5) * subH
+      }
+      sx = Math.max(GUTTER, Math.min(this.width, sx))
+      sy = Math.max(top, Math.min(bottom, sy))
+      // target: the resource row at the charge's time
+      const shown = a.row >= 0
+      const ty0 = shown ? this.rowTop(a.row) + this.model.rows[a.row].height / 2 : top
+      const tx = Math.max(GUTTER, Math.min(this.width, this.xOf(a.t)))
+      const ty = Math.max(top, Math.min(bottom, ty0))
+      ctx.strokeStyle = color
+      ctx.fillStyle = color
+      ctx.lineWidth = 1.5 + 2.5 * a.peak
+      ctx.lineCap = 'round'
+      ctx.setLineDash([1, 4])
+      ctx.globalAlpha = 0.9
+      ctx.beginPath()
+      ctx.moveTo(sx, sy)
+      const my = (sy + ty) / 2
+      ctx.bezierCurveTo(sx, my, tx, my, tx, ty)
+      ctx.stroke()
+      ctx.setLineDash([])
+      // the arrowhead, along the curve's end (vertical)
+      const dir = ty >= my ? 1 : -1
+      ctx.beginPath()
+      ctx.moveTo(tx, ty)
+      ctx.lineTo(tx - 4, ty - dir * 7)
+      ctx.lineTo(tx + 4, ty - dir * 7)
+      ctx.closePath()
+      ctx.fill()
+      ctx.globalAlpha = 1
+      const peakText = pct(a.peak)
+      const text = shown && ty === ty0 ? peakText : `${peakText} · ${short(a.name)}`
+      const w = ctx.measureText(text).width + 8
+      const lx = Math.min(this.width - w - 2, tx + 6)
+      if (labels.some((q) => lx < q.x + q.w && q.x < lx + w && Math.abs(q.y - ty) < 14)) continue
+      labels.push({ x: lx, y: ty, w, text, color })
+      this.arrowHits.push({ x0: lx, x1: lx + w, y0: ty - 8, y1: ty + 8, arrow: a })
+    }
+    for (const q of labels) {
+      ctx.fillStyle = th.surface
+      ctx.strokeStyle = q.color
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.roundRect(q.x, q.y - 8, q.w, 16, 8)
+      ctx.fill()
+      ctx.stroke()
+      ctx.fillStyle = th.ink
+      ctx.fillText(q.text, q.x + 4, q.y)
+    }
+    if (all.length > arrows.length) {
+      ctx.fillStyle = th.inkSecondary
+      ctx.fillText(`+${all.length - arrows.length}`, GUTTER + 6, top + 8)
+    }
+    ctx.restore()
+  }
+
+  /** The selected tasks' shading on a series row: per pixel a band from the baseline up to
+   * each task's fraction, stacked in task-kind colors, below the curve (`ys`, row-relative). */
+  private drawUsage(ctx: CanvasRenderingContext2D, row: Row, y: number, n: number, base: number, h: number): void {
+    const px = this.usagePixels(row, n)
+    if (!px) return
+    const u = this.usage as NonNullable<typeof this.usage>
+    const colors = [...this.theme.series, this.theme.seriesOther]
+    const cum = new Float64Array(n)
+    ctx.save()
+    ctx.globalAlpha = 0.75
+    u.tasks.forEach((t, k) => {
+      ctx.fillStyle = colors[this.slots[t]] ?? this.theme.seriesOther
+      const v = px[k]
+      for (let p = 0; p < n; p++) {
+        if (!(v[p] > 0)) continue
+        const curve = this.ys[p] + 1
+        const lo = Math.max(curve, base - Math.min(1.08, cum[p]) * h)
+        const hi = Math.max(curve, base - Math.min(1.08, cum[p] + v[p]) * h)
+        cum[p] += v[p]
+        if (lo - hi > 0.05) ctx.fillRect(GUTTER + p, y + hi, 1, lo - hi)
+      }
+    })
+    ctx.restore()
+  }
+
   // ---- attribution (views-design 7) ------------------------------------------------------
 
   /** The attribution the view asks for: the selected resource row (a fabric or memory node:
    * all its members) at the cursor, else over the range; null without either. */
+  /** A row of control-class resources (a control bus port or link, or a node of them) or a
+   * Neutrino scalar row. */
+  isControlRow(row: Row): boolean {
+    const r = row.kind === 'fabric' ? this.source.fabrics[row.id].members[0] : row.kind === 'resource' ? row.id : -1
+    return r >= 0 && this.isControl(r)
+  }
+
+  private isControl(resource: number): boolean {
+    return this.res[resource]?.cls === 'control' || this.trace.dims.resources[resource]?.role === 'scalar'
+  }
+
   attributionQuery(): { key: string; req: AttributionRequest } | null {
     const row = this.focusRow()
     if (!row || (row.kind !== 'resource' && row.kind !== 'fabric')) return null
+    if (!this.controlTraffic && this.isControlRow(row)) return null
     // Over the recorded part of the range (an instant outside the recording: no query).
     const t = this.pinned !== null && recordedAt(this.rec.window, this.pinned) ? this.pinned : null
     const r = t === null && this.pinned === null && this.selection && this.selection.b > this.selection.a
@@ -1286,9 +1629,13 @@ export class TimelineRenderer {
   }
 
   tooltip(): TipContent | null {
-    const tip = this.baseTooltip()
     const h = this.hover
+    const hit = h && this.arrowHits.find((q) => h.x >= q.x0 && h.x <= q.x1 && h.y >= q.y0 && h.y <= q.y1)
+    if (hit) return this.arrowTip(hit.arrow)
+    const tip = this.baseTooltip()
     if (!tip || !h || this.model.rows[h.row]?.key !== this.focusKey) return tip
+    const row = this.model.rows[h.row]
+    if (!this.controlTraffic && this.isControlRow(row)) return { ...tip, sections: [...tip.sections, { kind: 'note', text: 'attribution off' }] }
     const owners = this.attributionSection()
     return owners ? { ...tip, sections: [...tip.sections, owners] } : tip
   }
@@ -1411,6 +1758,15 @@ export class TimelineRenderer {
     const sub = [`gid ${num_('gid')}`]
     if (version !== null && !name.endsWith(` v${version}`)) sub.push(`v${version}`)
     return { title: name, sub: sub.join(' · '), sections: [{ kind: 'rows', rows }, { kind: 'rows', rows: links }] }
+  }
+
+  /** A usage arrow's label: the task, the row, its peak, its amount, its share over its
+   * lifetime and the peak lanes it held. */
+  private arrowTip(a: UsageArrow): TipContent {
+    const rows: TipRow[] = [{ label: 'peak', value: pct(a.peak) }, { label: 'amount', value: formatAmount(a.amount, a.unit) },
+      { label: 'share over its life', value: `${a.exact ? '' : '≈'}${pct(a.share)}` }]
+    if (a.peakLanes !== null && a.lanes !== null) rows.push({ label: 'lanes held', value: `${num(a.peakLanes)} / ${a.lanes}` })
+    return { title: taskName(this.trace, a.task), path: short(a.name), sections: [{ kind: 'rows', rows }] }
   }
 
   /** A program bar in a group header: its name, start, duration and spawning task. */

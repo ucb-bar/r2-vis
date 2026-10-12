@@ -249,3 +249,73 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
     usageGroups, chargeGroups, ms: performance.now() - t0, groupMs,
   }
 }
+
+// ---- reverse attribution (views-design 7.1): the usage of selected tasks ----------------
+
+export interface UsageRequest {
+  charges: File
+  blocks: { t0: number; t1: number; maxEnd: number }[]
+  /** the selected tasks: gid and lifetime [a, b) (their charges lie in it) */
+  tasks: { gid: number; a: number; b: number }[]
+  /** per resource: the ceiling (0: none) */
+  ceiling: Float64Array
+}
+
+/** The charges of the selected tasks, sorted by (resource, task, start): per charge the
+ * fraction of the resource the task uses, amount / (ceiling x span), the measure of the
+ * curve (so the bands of all owners partition it; lanes held is occupancy, not throughput:
+ * a compute chunk holds all SMEM lanes); 0 for a zero-span charge or a resource without a
+ * ceiling. */
+export interface Usage {
+  /** index into UsageRequest.tasks */
+  task: Int32Array
+  resource: Int32Array
+  start: Float64Array
+  end: Float64Array
+  frac: Float64Array
+  cycles: Float64Array
+  amount: Float64Array
+  /** charge row groups read */
+  groups: number
+  ms: number
+}
+
+export async function taskUsage(req: UsageRequest, read: ReadGroup): Promise<Usage> {
+  const t0 = performance.now()
+  const byGid = new Map<number, number>()
+  req.tasks.forEach((t, i) => byGid.set(t.gid, i))
+  const rows: { task: number; resource: number; start: number; end: number; frac: number; cycles: number; amount: number }[] = []
+  let groups = 0
+  for (let g = 0; g < req.blocks.length; g++) {
+    const blk = req.blocks[g]
+    if (!req.tasks.some((t) => blk.t0 < t.b && blk.maxEnd > t.a)) continue
+    const c = await read('charges', req.charges, g, ['resource', 'start', 'end', 'cycles', 'amount', 'gid'])
+    groups++
+    const gid = c.gid as Int32Array
+    const res = c.resource as Int32Array
+    const start = c.start as Float64Array
+    const end = c.end as Float64Array
+    const cycles = c.cycles as Int32Array | Float64Array
+    const amount = c.amount as Float64Array
+    for (let i = 0; i < gid.length; i++) {
+      const task = byGid.get(gid[i])
+      if (task === undefined) continue
+      const r = res[i]
+      const span = end[i] - start[i]
+      const cap = req.ceiling[r]
+      const frac = span > 0 && cap > 0 ? amount[i] / (cap * span) : 0
+      rows.push({ task, resource: r, start: start[i], end: end[i], frac, cycles: cycles[i], amount: amount[i] })
+    }
+  }
+  rows.sort((x, y) => x.resource - y.resource || x.task - y.task || x.start - y.start)
+  return {
+    task: Int32Array.from(rows, (x) => x.task),
+    resource: Int32Array.from(rows, (x) => x.resource),
+    start: Float64Array.from(rows, (x) => x.start),
+    end: Float64Array.from(rows, (x) => x.end),
+    frac: Float64Array.from(rows, (x) => x.frac),
+    cycles: Float64Array.from(rows, (x) => x.cycles),
+    amount: Float64Array.from(rows, (x) => x.amount),
+    groups, ms: performance.now() - t0,
+  }
+}
