@@ -35,8 +35,9 @@ export interface ResourceInfo {
   unit: string
   ceiling: number | null
   rate: number | null
-  /** link lanes of the resource (resources.lanes; 1 for a v1.0 trace), null if unlimited */
-  linkLanes: number | null
+  /** slots per core cycle (resources.capacity; the lanes before format 1.6; 1 for a v1.0
+   * trace), null if unlimited */
+  capacity: number | null
   cls: string
   levelRow: number
 }
@@ -214,7 +215,7 @@ export class TimelineRenderer {
     this.res = trace.dims.resources.map((r) => ({
       name: String(r.name), unit: String(r.unit ?? ''), ceiling: r.ceiling as number | null,
       rate: r.rate as number | null, cls: String(r.class ?? ''),
-      linkLanes: (r.lanes as number | null | undefined) ?? (r.rate === null ? null : 1),
+      capacity: (r.capacity as number | null | undefined) ?? null,
       levelRow: trace.levels.rowOf[r.id as number] ?? -1,
     }))
     this.collapsed = this.source.initialCollapsed()
@@ -1109,7 +1110,7 @@ export class TimelineRenderer {
         return { gid: (c.gid as Int32Array)[t], a: Math.min(invoke, call ?? invoke),
           b: num('retire', t) ?? num('complete', t) ?? this.endTime }
       }),
-      ceiling: this.usageCaps.ceiling,
+      ceiling: this.usageCaps.ceiling, classBase: this.trace.classBase,
     }
     return { key: tasks.join(','), req, tasks }
   }
@@ -1220,7 +1221,7 @@ export class TimelineRenderer {
       const unit = String(resDims[resource[i]]?.unit ?? '')
       e.byUnit.set(unit, (e.byUnit.get(unit) ?? 0) + amount[i])
       e.res.add(resource[i])
-      const lanes = (resDims[resource[i]]?.lanes as number | null | undefined) ?? 0
+      const lanes = (resDims[resource[i]]?.capacity as number | null | undefined) ?? 0
       const span = end[i] - start[i]
       if (lanes > 0 && span > 0 && u.res.cycles[i] / span > e.peakLanes) { e.peakLanes = u.res.cycles[i] / span; e.lanes = lanes }
     }
@@ -1404,7 +1405,7 @@ export class TimelineRenderer {
     return { key, req: { usage: files.get('usage.parquet') ?? null, charges, resources, t,
       a: r?.a ?? 0, b: r?.b ?? 0,
       blocks: this.trace.manifest.charge_blocks.map((b) => ({ t0: b.t0, t1: b.t1, maxEnd: b.max_end })),
-      tasks, opcodes: this.trace.dims.opcodes.map((o) => String(o.name)) } }
+      tasks, opcodes: this.trace.dims.opcodes.map((o) => String(o.name)), classBase: this.trace.classBase } }
   }
 
   /** Starts the query when the selection, cursor or range changed (the latest wins). */
@@ -1564,7 +1565,7 @@ export class TimelineRenderer {
       const share = total > 0 ? v / total : 0
       const x = Math.max(GUTTER, Math.min(this.width, p.x))
       const y = Math.max(top, Math.min(bottom, p.y))
-      const amount = t !== null ? `${num(v)} lanes` : pct(share)
+      const amount = t !== null ? `${num(v)} slots` : pct(share)
       const label = targets[k].short ? `${amount} ${targets[k].short}` : amount
       const text = p.shown && y === p.y ? label : `${label} · ${short(p.name)}`
       const w = ctx.measureText(text).width + 4
@@ -1620,7 +1621,7 @@ export class TimelineRenderer {
     const { targets, count: n } = this.attributionTargets(a.res, TIP_ITEMS)
     const items: TipItem[] = targets.map((g) => {
       const share = total > 0 ? g.value / total : 0
-      const note = instant ? `${num(g.value)} lanes` : mode !== 'task' && g.tasks > 1 ? `${count(g.tasks)} tasks` : ''
+      const note = instant ? `${num(g.value)} slots` : mode !== 'task' && g.tasks > 1 ? `${count(g.tasks)} tasks` : ''
       return { share, name: g.name(), value: pct(share), note }
     })
     const what = owners.length === 1 ? '1 owner' : `${count(owners.length)} owners`
@@ -1666,11 +1667,11 @@ export class TimelineRenderer {
       rows.push({ label: 'raw', value: value(s.raw[p]), extra: share(s.raw[p]) })
     } else rows.push({ label: 'load', value: value(s.raw[p]), extra: share(s.raw[p]) })
     if (!byRate && info.ceiling) rows.push({ label: 'peak', value: rate(info.ceiling, null, info.unit) })
-    // Zoomed to charges: the link lanes held at the cycle shown.
-    if (info.linkLanes !== null && this.view.cpp < this.trace.levels.width) {
+    // Zoomed to charges: the slots held at the cycle shown.
+    if (info.capacity !== null && this.view.cpp < this.trace.levels.width) {
       const t = Math.round(h.t)
       const g = this.chargeGroups(t, t + 1)
-      if (g) rows.push({ label: 'lanes held', value: `${num(lanesHeld(g, row.id, t))} / ${info.linkLanes}` })
+      if (g) rows.push({ label: 'slots held', value: `${num(lanesHeld(g, row.id, t))} of ${num(info.capacity)}` })
     }
     const sections: TipSection[] = [{ kind: 'rows', rows }]
     if (this.selection && this.selection.b > this.selection.a) {
@@ -1695,7 +1696,9 @@ export class TimelineRenderer {
     const p = Math.floor(h.x - GUTTER)
     if (!s || p < 0 || p >= s.shown.length) return null
     const f = this.source.fabrics[row.id]
-    const { name, parent } = splitPath(f.path)
+    // The title: the node's path below its owner node (atlas.array, clsbus), the owner muted.
+    const owner = String(this.trace.dims.nodes[row.node]?.path ?? '')
+    const { name, parent } = owner && f.path.startsWith(`${owner}.`) ? { name: relative(f.path, owner), parent: short(owner) } : splitPath(f.path)
     if (!recordedAt(this.rec.window, h.t)) return { title: name, path: parent, sections: [{ kind: 'note', text: 'not recorded' }] }
     const port = s.argmax?.[p] ?? -1
     const rows: TipRow[] = [{ label: 'cycle', value: cycles(h.t) }]
@@ -1765,7 +1768,7 @@ export class TimelineRenderer {
   private arrowTip(a: UsageArrow): TipContent {
     const rows: TipRow[] = [{ label: 'peak', value: pct(a.peak) }, { label: 'amount', value: formatAmount(a.amount, a.unit) },
       { label: 'share over its life', value: `${a.exact ? '' : '≈'}${pct(a.share)}` }]
-    if (a.peakLanes !== null && a.lanes !== null) rows.push({ label: 'lanes held', value: `${num(a.peakLanes)} / ${a.lanes}` })
+    if (a.peakLanes !== null && a.lanes !== null) rows.push({ label: 'slots held', value: `${num(a.peakLanes)} of ${num(a.lanes)}` })
     return { title: taskName(this.trace, a.task), path: short(a.name), sections: [{ kind: 'rows', rows }] }
   }
 

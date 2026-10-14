@@ -26,7 +26,7 @@ from r2t import checks, dims, facts, schema, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 5)
+FORMAT_VERSION = (1, 6)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
 ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288,
@@ -90,7 +90,8 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
     end_time = end_time_of(dump)
     filters = m.get("filters") or {}
     window = tuple(filters["window"]) if filters.get("window") else None
-    ch = timeline.Charges.from_raw(rec["charges"], rec["programs"])
+    has_rates = np.array([bool(r.get("rates")) for r in m["resources"]], dtype=bool)
+    ch = timeline.Charges.from_raw(rec["charges"], rec["programs"], has_rates)
     if len(ch) and int(ch.resource.max()) >= len(m["resources"]):
         raise FormatError(f"charges: resource ids up to {int(ch.resource.max())}, the "
                           f"manifest lists {len(m['resources'])} resources")
@@ -108,6 +109,7 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
     busy, amount = timeline.totals(ch, len(rates))
     tables["resources"] = dims.resources_table(m, bus_class, timeline.ceilings(ch, rates),
                                                busy, amount)
+    tables["rate_classes"] = dims.rate_classes_table(m)
 
     tasks_tab, gids = facts.tasks_table(
         rec["tasks"], m.get("label", {}), lane_of_node, lane_of_pe,

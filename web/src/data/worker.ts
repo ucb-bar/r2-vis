@@ -1,7 +1,7 @@
 // Decode worker: decodes one row group of one Parquet file per request, and builds the
 // derived structures (derive.ts). Results go back as transferable typed arrays.
 import type { FileMetaData } from 'hyparquet'
-import { decodeRowGroup, Unsupported, type Column } from './parquet/decode'
+import { decodeRowGroup, isDict, Unsupported, type Column, type NumColumn } from './parquet/decode'
 import { readFooter, rowGroupRange } from './parquet/footer'
 import { zstdDecoder } from './parquet/zstd'
 import { decodeWithHyparquet } from './parquet/fallback'
@@ -19,6 +19,9 @@ export interface DecodeRequest {
   columns: string[] | null
   /** charges only: also build the per-resource index (rows sorted by resource, start) */
   indexResources?: number
+  /** charges only: per real resource, the virtual id of its rate class 0 (-1: none); the
+   * charges with a class are copied onto their class's virtual resource (views-design 7.2) */
+  classBase?: Int32Array
 }
 
 export type ComputeRequest =
@@ -85,6 +88,7 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
     let fallback = false
     if (req.op === 'decode') {
       const d = await decode(req)
+      if (req.classBase) d.cols = withClassCharges(d.cols, req.classBase)
       if (req.indexResources) Object.assign(d.cols, indexCharges(d.cols, req.indexResources))
       result = d.cols
       fallback = d.fallback
@@ -119,6 +123,39 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
     const reply: WorkerReply = { id: req.id, error: String((err as Error).stack ?? err) }
     ;(self as unknown as Worker).postMessage(reply)
   }
+}
+
+/** The charges of a row group with a copy of each charge that has a rate class, on that
+ * class's virtual resource (classBase[resource] + class), appended in (resource, start)
+ * order after the real rows (virtual ids follow the real ones). */
+export function withClassCharges(cols: Record<string, Column>, classBase: Int32Array): Record<string, Column> {
+  const cls = cols.class as Int32Array | undefined
+  const res = cols.resource as Int32Array
+  if (!cls) return cols
+  const extra: number[] = []
+  for (let i = 0; i < res.length; i++) if (cls[i] >= 0 && res[i] < classBase.length && classBase[res[i]] >= 0) extra.push(i)
+  if (!extra.length) return cols
+  const start = cols.start as Float64Array
+  const virt = (i: number) => classBase[res[i]] + cls[i]
+  extra.sort((a, b) => virt(a) - virt(b) || start[a] - start[b])
+  const n = res.length
+  const out: Record<string, Column> = {}
+  for (const [name, col] of Object.entries(cols)) {
+    if (isDict(col)) {
+      const codes = new Int32Array(n + extra.length)
+      codes.set(col.codes)
+      extra.forEach((i, k) => { codes[n + k] = col.codes[i] })
+      out[name] = { ...col, codes }
+      continue
+    }
+    const num = col as NumColumn
+    const Ctor = num.constructor as new (len: number) => NumColumn
+    const a = new Ctor(n + extra.length)
+    a.set(num)
+    extra.forEach((i, k) => { a[n + k] = name === 'resource' ? virt(i) : num[i] })
+    out[name] = a
+  }
+  return out
 }
 
 /** Per resource: the rows [__from, __to) of a charges row group and its longest charge. */

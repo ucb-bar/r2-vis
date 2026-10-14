@@ -53,10 +53,10 @@ export class TraceReader {
 
   /** All columns of one charges row group, with the per-resource index built in the
    * worker (columns __from, __to, __maxSpan). */
-  async readChargeGroup(group: number, nResources: number): Promise<Record<string, Column>> {
+  async readChargeGroup(group: number, nResources: number, classBase?: Int32Array): Promise<Record<string, Column>> {
     const info = await this.rowGroups('charges')
     return this.pool.decode({ name: 'charges', file: this.file('charges'), group, columns: null,
-      bytes: info[group].bytes, indexResources: nResources })
+      bytes: info[group].bytes, indexResources: nResources, classBase })
   }
 
   /** Columns (all if null) of the given row groups (all if omitted), concatenated. */

@@ -29,8 +29,9 @@ export class BlockMetrics {
     const collect = (id: number): number[] => [id, ...(children.get(id) ?? []).flatMap(collect)]
     this.subtree = nodes.map((n) => collect(n.id as number))
     const res = trace.dims.resources
+    // The real resources only (a rate class is a virtual resource of the timeline, 7.2).
     const byNode = (pred: (r: (typeof res)[number]) => boolean) =>
-      nodes.map((n) => res.filter((r) => r.node === n.id && pred(r)).map((r) => r.id as number))
+      nodes.map((n) => res.filter((r) => r.node === n.id && r.class_of === undefined && pred(r)).map((r) => r.id as number))
     const tensorOwn = byNode((r) => r.kind === 'TensorOps' && r.role === 'pe')
     const vectorOwn = byNode((r) => r.kind === 'VectorOps' && r.role === 'pe')
     this.tensorRes = this.subtree.map((ids) => ids.flatMap((id) => tensorOwn[id]))

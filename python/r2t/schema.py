@@ -115,9 +115,11 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "kind": "TensorOps, VectorOps, ScalarOps, Bandwidth or Slots",
         "unit": "unit of amount: MAC, lane-op, instr, B or slot",
         "rate": "units per cycle; NULL if unlimited",
-        "lanes": "link lanes of the resource (each carries rate / lanes; a charge holds whole "
-                 "lanes); 1 for compute arrays, scalar units and raw 1.0 dumps; NULL if "
-                 "unlimited. Not related to the lanes table (task timeline lanes)",
+        "capacity": "slots per core cycle (format 1.6): rate / beat_bytes x clock for a "
+                    "bandwidth resource, the clock for a compute PE; charges hold fractions "
+                    "of it. Raw 1.6 and older dumps: the lanes. NULL if unlimited. Not related "
+                    "to the lanes table (task timeline lanes)",
+        "clock": "the resource's clock relative to the core clock (format 1.6; 1 before)",
         "beat_bytes": "bytes per beat of a bandwidth resource; NULL otherwise, if unlimited "
                       "and for raw 1.0 dumps",
         "ceiling": "100 % line in units per cycle: the rate, or for an unlimited link the "
@@ -134,8 +136,16 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "write": "true for a memory write port or a write channel (raw 1.4, 1.5)",
         "class": "global, local, control (links and memory ports), compute (PEs) or "
                  "scalar (Neutrino scalar and completion ports)",
-        "busy_cycles": "sum of charge cycles over the dump, in lane-cycles",
+        "busy_cycles": "sum of charge slot-cycles over the dump, rounded",
         "amount": "sum of charge amounts over the dump",
+    }),
+    "rate_classes": ("Rate classes of compute resources whose rate depends on the operand "
+                     "type (format 1.6, raw 1.7 rates); a mixed-type operation runs at the "
+                     "class of its slower operand.", {
+        "resource": "resource id",
+        "class": "class index (charges.class, bins.class)",
+        "name": "class name, e.g. bf16, fp8, mxfp4",
+        "rate": "units per core cycle of this class",
     }),
     "opcodes": ("Opcode names.", {"id": "opcode", "name": "opcode name"}),
     "message_kinds": ("Protocol message kind names.", {"id": "msg code", "name": "kind name"}),
@@ -223,14 +233,14 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
               "owner, sorted by (resource, block, gid, program), so that a resource's rows "
               "are contiguous. A range [a, b): the blocks inside it from here, the two edge "
               "blocks from charges, clipped; an instant t: the charges with start <= t < "
-              "end (lanes held = cycles / (end - start)).", {
+              "end (slots held = usage).", {
         "resource": "resource id",
         "block": "charge block: the index into manifest.charge_blocks (a row group of "
                  "charges.parquet; its charges start in [t0, t1) and end by max_end)",
         "gid": "owner task; NULL for a program owner or no owner",
         "program": "owner program (programs.id); NULL for a task or no owner",
         "amount": "summed amount",
-        "cycles": "summed lane-cycles",
+        "cycles": "summed slot-cycles (DOUBLE)",
         "n": "number of charges",
         "first": "earliest start of these charges",
         "last": "latest end of these charges",
@@ -240,9 +250,13 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "resource": "resource id",
         "start": "first cycle of the charge",
         "end": "start + span: end of the whole charge (exclusive)",
-        "cycles": "lane-cycles of this direction; the rows of one charge sum to lanes held "
-                  "x (end - start), so a row holds cycles / (end - start) lanes (v_charges."
-                  "lanes_held). On an unlimited link equal to end - start",
+        "cycles": "slot-cycles of this direction, usage x (end - start) (DOUBLE). On an "
+                  "unlimited link equal to end - start",
+        "usage": "slots held by this direction over the whole charge (raw 1.7 usage / 65536; "
+                 "raw 1.6 and older: lane-cycles / span); the rows of one charge sum to its "
+                 "usage, at most the resource's capacity",
+        "class": "rate class (rate_classes.class) of a charge on a resource with rate "
+                 "classes (raw 1.7); NULL otherwise",
         "amount": "units of this direction (resources.unit)",
         "dir": "direction code (dirs)",
         "gid": "owner task (raw 1.6: the task whose chunk made it, the invoked or consumer "
@@ -254,14 +268,16 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "msg": "message kind code for a protocol message; NULL otherwise",
     }),
     "bins": ("Overview bins: charges spread evenly over fixed-width time bins; only "
-             "non-empty bins. Sorted by (resource, dir, bin).", {
+             "non-empty bins. Sorted by (resource, dir, class, bin).", {
         "resource": "resource id",
         "dir": "direction code",
+        "class": "rate class: a resource with rate classes has one series per (dir, class); "
+                 "NULL for the others",
         "bin": "bin index; the bin starts at manifest.bins.origin + bin * manifest.bins.width "
                "(v_bins adds it as t)",
-        "busy": "busy lane-cycles in the bin, rounded to whole cycles: at most lanes * "
-                "width on a resource with a rate (busy fraction = busy / (lanes * width)); "
-                "can exceed the width on an unlimited link",
+        "busy": "busy slot-cycles in the bin (FLOAT): at most capacity * width on a "
+                "resource with a rate (busy fraction = busy / (capacity * width)); can exceed "
+                "the width on an unlimited link",
         "amount": "units moved in the bin (float32); on a rated link at most rate * width "
                   "(traces made before 2026-10-02 can exceed it by one cycle of the rate)",
     }),

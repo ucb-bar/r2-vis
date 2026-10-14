@@ -56,7 +56,7 @@ export class ChargeCache {
     if (hit) return Promise.resolve(hit)
     let p = this.inflight.get(block.group)
     if (!p) {
-      p = this.trace.reader.readChargeGroup(block.group, this.trace.dims.resources.length).then((cols) => {
+      p = this.trace.reader.readChargeGroup(block.group, this.trace.dims.resources.length, this.trace.classBase).then((cols) => {
         const g = toGroup(block, cols)
         this.inflight.delete(block.group)
         this.groups.set(block.group, g)

@@ -17,13 +17,14 @@ MIN_BIN, MAX_BINS = 1024, 32768
 
 CHARGE_SCHEMA = pa.schema([
     ("resource", pa.int32()), ("start", pa.int64()), ("end", pa.int64()),
-    ("cycles", pa.int32()), ("amount", pa.int64()), ("dir", pa.int8()),
+    ("cycles", pa.float64()), ("usage", pa.float64()), ("class", pa.int8()),
+    ("amount", pa.int64()), ("dir", pa.int8()),
     ("gid", pa.int32()), ("program", pa.int32()), ("msg", pa.int8()),
 ])
 
 USAGE_SCHEMA = pa.schema([
     ("resource", pa.int32()), ("block", pa.int32()), ("gid", pa.int32()), ("program", pa.int32()),
-    ("amount", pa.int64()), ("cycles", pa.int64()), ("n", pa.int32()), ("first", pa.int64()),
+    ("amount", pa.int64()), ("cycles", pa.float64()), ("n", pa.int32()), ("first", pa.int64()),
     ("last", pa.int64()),
 ])
 
@@ -55,14 +56,20 @@ def parquet_options(schema: pa.Schema) -> dict:
 
 @dataclass
 class Charges:
-    """The charge columns as numpy arrays; `gid_null`, `program_null` and `msg_null` are null
-    masks. The owner (raw 1.6) is a task (`gid`) or a program (`program` = programs.id);
-    `program_unknown` marks a program reference that names no program."""
+    """The charge columns as numpy arrays; `gid_null`, `program_null`, `cls_null` and
+    `msg_null` are null masks. `usage` is the slots held (raw 1.7: usage / 65536; up to
+    1.6: lane-cycles / span), `cycles` the slot-cycles usage x span, `cls` the rate class of
+    a charge on a resource with rate classes (raw 1.7). The owner (raw 1.6) is a task
+    (`gid`) or a program (`program` = programs.id); `program_unknown` marks a program
+    reference that names no program."""
 
     resource: np.ndarray
     start: np.ndarray
     end: np.ndarray
     cycles: np.ndarray
+    usage: np.ndarray
+    cls: np.ndarray
+    cls_null: np.ndarray
     amount: np.ndarray
     dir: np.ndarray
     gid: np.ndarray
@@ -74,19 +81,36 @@ class Charges:
     msg_null: np.ndarray
 
     @classmethod
-    def from_raw(cls, rec: np.ndarray, programs: np.ndarray) -> "Charges":
+    def from_raw(cls, rec: np.ndarray, programs: np.ndarray, has_rates: np.ndarray) -> "Charges":
         """The charges of a dump; `programs` is the raw programs record (its order by
-        (nu, start) gives programs.id)."""
+        (nu, start) gives programs.id); `has_rates` per resource: it has rate classes (raw
+        1.7, where `sub` is the class instead of a message kind)."""
         start = rec["start"].astype(np.int64)
+        span = rec["span"].astype(np.int64)
         owner = rec["gid"].astype(np.int64)
-        msg = rec["msg"]
+        resource = rec["resource"].astype(np.int32)
+        if "usage" in rec.dtype.names:
+            usage = rec["usage"].astype(np.float64) / raw.USAGE_ONE
+            cycles = usage * span
+            sub = rec["sub"]
+        else:
+            cycles = rec["cycles"].astype(np.float64)
+            usage = np.where(span > 0, cycles / np.maximum(span, 1), 0.0)
+            sub = rec["msg"]
+        sub_null = sub == raw.null_of(sub.dtype)
+        on_rates = has_rates[resource] if len(has_rates) else np.zeros(len(resource), dtype=bool)
+        is_cls = ~sub_null & on_rates
+        is_msg = ~sub_null & ~on_rates
         task = (owner != NULL_OWNER) & (owner < PROGRAM_REF)
         program, unknown = program_ids(owner, programs)
         return cls(
-            resource=rec["resource"].astype(np.int32),
+            resource=resource,
             start=start,
-            end=start + rec["span"].astype(np.int64),
-            cycles=rec["cycles"].astype(np.int32),
+            end=start + span,
+            cycles=cycles,
+            usage=usage,
+            cls=np.where(is_cls, sub, 0).astype(np.int8),
+            cls_null=~is_cls,
             amount=rec["amount"].astype(np.int64),
             dir=rec["dir"].astype(np.int8),
             gid=np.where(task, owner, 0).astype(np.int32),
@@ -94,8 +118,8 @@ class Charges:
             program=np.maximum(program, 0).astype(np.int32),
             program_null=program < 0,
             program_unknown=unknown,
-            msg=msg.astype(np.int8),
-            msg_null=msg == raw.null_of(msg.dtype),
+            msg=np.where(is_msg, sub, 0).astype(np.int8),
+            msg_null=~is_msg,
         )
 
     def __len__(self) -> int:
@@ -169,6 +193,7 @@ def write_charges(path: Path, ch: Charges, block: np.ndarray, span: int) -> list
     time block. Returns manifest.charge_blocks."""
     tab = pa.table({
         "resource": ch.resource, "start": ch.start, "end": ch.end, "cycles": ch.cycles,
+        "usage": ch.usage, "class": pa.array(ch.cls, mask=ch.cls_null),
         "amount": ch.amount, "dir": ch.dir,
         "gid": pa.array(ch.gid, mask=ch.gid_null),
         "program": pa.array(ch.program, mask=ch.program_null),
@@ -193,7 +218,7 @@ def write_charges(path: Path, ch: Charges, block: np.ndarray, span: int) -> list
 
 def usage_table(ch: Charges, block: np.ndarray) -> pa.Table:
     """The charges (sorted by sort_charges) summed per resource, charge block (the row
-    group of charges.parquet) and owner, resource-major: amount, lane-cycles, count, the
+    group of charges.parquet) and owner, resource-major: amount, slot-cycles, count, the
     earliest start and the latest end (trace-format 4.2, usage)."""
     if not len(ch):
         return USAGE_SCHEMA.empty_table()
@@ -212,7 +237,7 @@ def usage_table(ch: Charges, block: np.ndarray) -> pa.Table:
         "gid": pa.array(np.maximum(own_f, 0).astype(np.int32), mask=own_f < 0),
         "program": pa.array(np.maximum(-2 - own_f, 0).astype(np.int32), mask=own_f > -2),
         "amount": np.add.reduceat(ch.amount[order], first).astype(np.int64),
-        "cycles": np.add.reduceat(ch.cycles[order].astype(np.int64), first),
+        "cycles": np.add.reduceat(ch.cycles[order], first),
         "n": np.diff(np.concatenate((first, [len(order)]))).astype(np.int32),
         "first": np.minimum.reduceat(ch.start[order], first),
         "last": np.maximum.reduceat(ch.end[order], first),
@@ -235,15 +260,18 @@ SLICE_ROWS = 1 << 21   # charges per slice of the bin computation (bounds the me
 
 def bins(ch: Charges, width: int, origin: int, count: int,
          window: tuple[int, int] | None) -> pa.Table:
-    """Spreads each charge's cycles and amount evenly over the bins it covers.
+    """Spreads each charge's slot-cycles and amount evenly over the bins it covers.
 
     A zero-cycle charge adds its amount to the bin of its start. In a partial dump the
-    charges are clipped to the window first. busy is rounded to whole cycles (INT32) and
-    amount stored as FLOAT (trace-format 4.2). Returns the table of non-empty bins
-    (sorted by resource, dir, bin); bin b covers [origin + b * width, ...).
+    charges are clipped to the window first. busy (slot-cycles) and amount are stored as
+    FLOAT (trace-format 4.2, 1.6). A resource with rate classes has one series per (dir,
+    class); `class` is NULL for the others. Returns the table of non-empty bins (sorted by
+    resource, dir, class, bin); bin b covers [origin + b * width, ...).
     """
     win = None if window is None else (window[0] - origin, window[1] - origin)
-    pair = ch.resource.astype(np.int64) * 3 + ch.dir
+    classes = np.where(ch.cls_null, 0, ch.cls.astype(np.int64) + 1)   # 0: no class
+    width_cls = int(classes.max()) + 1 if len(classes) else 1
+    pair = (ch.resource.astype(np.int64) * 3 + ch.dir) * width_cls + classes
     keys = np.unique(pair)
     acc = BinAccumulator(len(keys), count, width)
     for a in range(0, len(ch), SLICE_ROWS):
@@ -251,11 +279,13 @@ def bins(ch: Charges, width: int, origin: int, count: int,
         acc.add(np.searchsorted(keys, pair[a:b]), ch.start[a:b] - origin, ch.end[a:b] - origin,
                 ch.cycles[a:b], ch.amount[a:b], win)
     k, b, busy, amount = acc.result()
+    key, cls = keys[k] // width_cls, keys[k] % width_cls
     tab = pa.table({
-        "resource": (keys[k] // 3).astype(np.int32),
-        "dir": (keys[k] % 3).astype(np.int8),
+        "resource": (key // 3).astype(np.int32),
+        "dir": (key % 3).astype(np.int8),
+        "class": pa.array(np.maximum(cls - 1, 0).astype(np.int8), mask=cls == 0),
         "bin": b.astype(np.int32),
-        "busy": np.rint(busy).astype(np.int32),
+        "busy": busy.astype(np.float32),
         "amount": amount.astype(np.float32),
     })
     return tab
@@ -349,7 +379,7 @@ def ceilings(ch: Charges, rates: list[float | None]) -> np.ndarray:
 
 
 def totals(ch: Charges, n: int) -> tuple[np.ndarray, np.ndarray]:
-    """Run totals per resource: busy cycles and amount."""
+    """Run totals per resource: busy slot-cycles and amount."""
     busy = np.bincount(ch.resource, weights=ch.cycles, minlength=n)
     amount = np.bincount(ch.resource, weights=ch.amount, minlength=n)
     return np.rint(busy).astype(np.int64), np.rint(amount).astype(np.int64)

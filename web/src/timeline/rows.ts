@@ -181,9 +181,14 @@ export class RowSource {
     const fabricByPath = new Map<string, Fabric>()
     const fabricRows: Row[] = []   // this node's fabric rows, outer before inner
     for (const r of res) {
+      // A compute array with rate classes shows as the node of its classes (7.2).
+      if ((r.id as number) < t.classBase.length && t.classBase[r.id as number] >= 0) continue
       const typeKept = r.class === 'control' ? this.rec.messages : this.rec.charges
       const charged = (r.busy_cycles as number) > 0 || (r.amount as number) > 0
-      if (!charged && typeKept) continue  // no charge in the whole run: hidden
+      // No charge in the whole run: hidden; a rate class shows whenever its array ran (7.2).
+      const real = r.class_of === undefined ? null : t.dims.resources[r.class_of as number]
+      const shown = charged || (real !== null && ((real.busy_cycles as number) > 0 || (real.amount as number) > 0))
+      if (!shown && typeKept) continue
       const name = String(r.name)
       const chain = fabricChain(t.dims, r)
       const row: Row = { kind: 'resource', key: `r:${name}`, depth: 0, height: ROW_HEIGHT.resource,

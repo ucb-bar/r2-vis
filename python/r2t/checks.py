@@ -1,4 +1,4 @@
-"""The checks of trace-raw.md Section 8 (v1.1), plus a few format checks. Vectorized."""
+"""The checks of trace-raw.md Section 8 (v1.7), plus a few format checks. Vectorized."""
 
 from __future__ import annotations
 
@@ -14,17 +14,20 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
     """Violations as messages. The gid and stats checks need a whole dump: they are
     skipped for a partial dump (filters) and for an incomplete one (no summary.json)."""
     m = dump.manifest
+    slots = tuple(m.get("version", (1, 0))) >= (1, 7)
     errors: list[str] = []
     errors += check_unique_gids(gids)
     if not dump.partial and dump.complete:
         errors += check_gid_refs(dump, gids, ch)
     errors += check_ids(dump, ch)
-    errors += check_lane_capacity(ch, [r["lanes"] for r in m["resources"]],
-                                  [r["name"] for r in m["resources"]])
+    capacity = [r["capacity"] for r in m["resources"]]
+    names = [r["name"] for r in m["resources"]]
+    errors += (check_slot_capacity(ch, capacity, names) if slots
+               else check_lane_capacity(ch, capacity, names))
     if stats is not None and not dump.partial and dump.complete:
-        errors += check_stats(ch, m["resources"], stats)
+        errors += check_stats(ch, m["resources"], stats, slots)
     errors += check_entries(dump, gids)
-    errors += check_write_channels(m)
+    errors += check_write_channels(m, slots)
     if not dump.partial:
         errors += check_program_owners(ch)
     return errors
@@ -53,9 +56,10 @@ def read_channel(m: dict, r: dict) -> int | None:
     return None
 
 
-def check_write_channels(m: dict) -> list[str]:
+def check_write_channels(m: dict, slots: bool) -> list[str]:
     """A write channel or write port (raw 1.4, 1.5) has a read channel, the same
-    beat_bytes, and lanes = ceil(rate / beat_bytes)."""
+    beat_bytes, and capacity = rate / beat_bytes x clock (raw 1.7; up to 1.6 lanes =
+    ceil(rate / beat_bytes))."""
     errors = []
     res = m["resources"]
     for r in res:
@@ -69,10 +73,16 @@ def check_write_channels(m: dict) -> list[str]:
             errors.append(f"{r['name']}: beat_bytes {r.get('beat_bytes')}, its read channel "
                           f"{res[rd].get('beat_bytes')}")
         if r["rate"] is not None and r.get("beat_bytes"):
-            lanes = -(-r["rate"][0] // (r["rate"][1] * r["beat_bytes"]))
-            if r.get("lanes") != lanes:
-                errors.append(f"{r['name']}: lanes {r.get('lanes')}, "
-                              f"rate / beat_bytes gives {lanes}")
+            if slots:
+                want = r["rate"][0] / (r["rate"][1] * r["beat_bytes"]) * r["clock"]
+                if r["capacity"] is None or abs(r["capacity"] - want) > 1e-9 * max(1.0, want):
+                    errors.append(f"{r['name']}: capacity {r['capacity']}, "
+                                  f"rate / beat_bytes x clock gives {want}")
+            else:
+                lanes = -(-r["rate"][0] // (r["rate"][1] * r["beat_bytes"]))
+                if r["capacity"] != lanes:
+                    errors.append(f"{r['name']}: lanes {r['capacity']}, "
+                                  f"rate / beat_bytes gives {lanes}")
     return errors
 
 
@@ -149,13 +159,45 @@ def check_ids(dump: RawDump, ch: Charges) -> list[str]:
         bad_msg = ~ch.msg_null & ((ch.msg < 0) | (ch.msg >= len(m["message_kinds"])))
         if bad_msg.any():
             errors.append(f"charges: {int(bad_msg.sum())} msg codes outside message_kinds")
+        n_classes = np.array([len(r.get("rates") or []) for r in m["resources"]])
+        bad_cls = ~ch.cls_null & ((ch.cls < 0) | (ch.cls >= n_classes[ch.resource]))
+        if bad_cls.any():
+            errors.append(f"charges: {int(bad_cls.sum())} rate classes outside the "
+                          "resource's rates")
         opcodes = dump.records["tasks"]["opcode"]
         if len(opcodes) and opcodes.max() >= len(m["opcodes"]):
             errors.append("tasks: opcode outside opcodes")
     return errors
 
 
-def check_lane_capacity(ch: Charges, lanes: list[int | None], names: list[str]) -> list[str]:
+def check_slot_capacity(ch: Charges, capacity: list[float | None], names: list[str]) -> list[str]:
+    """Raw 1.7: on a resource with a rate, at every cycle the usage of the active records,
+    summed in 1/65536 slot, is at most floor(capacity x 65536). Zero-span records cover no
+    cycle and are left out."""
+    cap = np.array([0 if c is None else np.floor(c * raw.USAGE_ONE) for c in capacity],
+                   dtype=np.int64)
+    sel = (cap[ch.resource] > 0) & (ch.end > ch.start)
+    if not sel.any():
+        return []
+    res, start, end = ch.resource[sel], ch.start[sel], ch.end[sel]
+    held = np.rint(ch.usage[sel] * raw.USAGE_ONE).astype(np.int64)
+    # Sweep per resource: +held at a start, -held at an end; ends first at one time.
+    t = np.concatenate((start, end))
+    r = np.concatenate((res, res))
+    d = np.concatenate((held, -held))
+    order = np.lexsort((d, t, r))
+    t, r, d = t[order], r[order], d[order]
+    level = np.cumsum(d)
+    over = np.flatnonzero(level > cap[r])
+    if not len(over):
+        return []
+    k = over[0]
+    return [f"charges: slots held exceed the resource's capacity at {len(over)} events, first on "
+            f"{names[r[k]]} at {int(t[k])}: {level[k] / raw.USAGE_ONE:.4f} of "
+            f"{cap[r[k]] / raw.USAGE_ONE:.4f}"]
+
+
+def check_lane_capacity(ch: Charges, lanes: list[float | None], names: list[str]) -> list[str]:
     """On a resource with a rate, the records of one charge (same start and span) hold a
     whole number of lanes, and at every cycle the lanes held by the active records,
     cycles / span summed, are at most the resource's lanes. Zero-cycle records cover no
@@ -168,7 +210,7 @@ def check_lane_capacity(ch: Charges, lanes: list[int | None], names: list[str]) 
         return errors
     order = np.lexsort((end, start, res))
     res, start, end = res[order], start[order], end[order]
-    cycles = cycles[order].astype(np.int64)
+    cycles = np.rint(cycles[order]).astype(np.int64)
     new = np.concatenate(([True], (res[1:] != res[:-1]) | (start[1:] != start[:-1])
                           | (end[1:] != end[:-1])))
     heads = np.flatnonzero(new)
@@ -199,15 +241,24 @@ def check_lane_capacity(ch: Charges, lanes: list[int | None], names: list[str]) 
     return errors
 
 
-def check_stats(ch: Charges, resources: list[dict], stats: dict) -> list[str]:
-    """The cycles per resource sum to busy_cycles of the --stats JSON."""
+def check_stats(ch: Charges, resources: list[dict], stats: dict, slots: bool) -> list[str]:
+    """The cycles per resource sum to busy_cycles of the --stats JSON; raw 1.7: the
+    slot-cycles to busy_slot_cycles within the rounding of the usages, the sum of
+    span / 65536."""
     busy = np.bincount(ch.resource, weights=ch.cycles, minlength=len(resources))
+    slack = np.bincount(ch.resource, weights=(ch.end - ch.start) / raw.USAGE_ONE,
+                        minlength=len(resources))
     by_name = {r["name"]: r["id"] for r in resources}
     errors = []
     for entry in stats.get("resources", []):
         rid = by_name.get(entry["name"])
         if rid is None:
             errors.append(f"stats: resource {entry['name']} is not in the manifest")
+        elif slots:
+            want = entry.get("busy_slot_cycles", entry.get("busy_cycles"))
+            if abs(busy[rid] - want) > slack[rid] + 1e-6:
+                errors.append(f"stats: {entry['name']} busy_slot_cycles {want}, charges sum to "
+                              f"{busy[rid]:.3f} (rounding allows {slack[rid]:.3f})")
         elif int(round(busy[rid])) != entry["busy_cycles"]:
             errors.append(f"stats: {entry['name']} busy_cycles {entry['busy_cycles']}, "
                           f"charges sum to {int(round(busy[rid]))}")

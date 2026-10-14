@@ -43,7 +43,7 @@ def load(raw_dir: Path) -> RawDump:
     major = manifest.get("version", [None])[0]
     if major != raw.RAW_VERSION[0]:
         raise FormatError(f"{raw_dir}: raw version {manifest.get('version')} not supported")
-    add_lane_defaults(manifest)
+    add_capacity(manifest)
     bridges_to_links(manifest)
     strings_path = raw_dir / "strings.txt"
     strings = strings_path.read_text().split("\n") if strings_path.exists() else []
@@ -75,12 +75,28 @@ def load(raw_dir: Path) -> RawDump:
     return dump
 
 
-def add_lane_defaults(manifest: dict) -> None:
-    """A 1.0 dump reads as 1.1 with one lane per resource with a rate (trace-raw header)."""
+def ratio(value) -> float | None:
+    """A `[num, den]` rational (or a number) as a float; None stays None."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return value[0] / value[1]
+    return float(value)
+
+
+def add_capacity(manifest: dict) -> None:
+    """Every resource gets `capacity` (slots per core cycle, float or None) and `clock`
+    (float): raw 1.7 gives them as rationals; up to 1.6 `capacity` = `lanes`, and a 1.0
+    dump has one lane per resource with a rate (trace-raw header)."""
     for r in manifest.get("resources", []):
-        if "lanes" not in r:
-            r["lanes"] = None if r.get("rate") is None else 1
+        if "capacity" in r:
+            r["capacity"] = ratio(r["capacity"])
+        else:
+            lanes = r.get("lanes", None if r.get("rate") is None else 1)
+            r["capacity"] = None if lanes is None else float(lanes)
+        r["clock"] = ratio(r.get("clock")) or 1.0
         r.setdefault("beat_bytes", None)
+        r.setdefault("rates", None)
 
 
 def bridges_to_links(manifest: dict) -> None:
@@ -114,9 +130,11 @@ def bridges_to_links(manifest: dict) -> None:
 
 
 def check_layout(name: str, layout: list[list[str]]) -> None:
-    """The manifest layout must start with the Section 4 fields; later fields are allowed."""
+    """The manifest layout must start with the Section 4 fields (the charges: of 1.6 or of
+    1.7); later fields are allowed."""
     expected = raw.LAYOUTS[name]
-    if [list(f) for f in layout[: len(expected)]] != expected:
+    head = [list(f) for f in layout[: len(expected)]]
+    if head != expected and not (name == "charges" and head == raw.CHARGES_17):
         raise FormatError(f"layout of {name} does not match trace-raw v1.3: {layout}")
 
 

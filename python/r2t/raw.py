@@ -1,4 +1,4 @@
-"""The raw dump format of trace-raw.md v1.3 (reads 1.0 to 1.2): record layouts, null values, file
+"""The raw dump format of trace-raw.md v1.7 (reads 1.0 to 1.6): record layouts, null values, file
 access."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import zstandard
 
-RAW_VERSION = (1, 6)
+RAW_VERSION = (1, 7)
 
 # Record layouts of trace-raw.md Section 4, as [name, type] in file order.
 LAYOUTS: dict[str, list[list[str]]] = {
@@ -44,6 +44,15 @@ LAYOUTS: dict[str, list[list[str]]] = {
         ["pad", "u16"],
     ],
 }
+
+# Version 1.7 names two charge fields after their new meaning (trace-raw 4.4): the u32 at
+# offset 20 is `usage` (slots x 65536, was lane-cycles `cycles`) and the u8 at offset 31 is
+# `sub` (a message kind or a rate class, was `msg`). The layout is otherwise unchanged.
+CHARGES_17 = [
+    ["start", "u64"], ["amount", "u64"], ["span", "u32"], ["usage", "u32"],
+    ["gid", "u32"], ["resource", "u16"], ["dir", "u8"], ["sub", "u8"],
+]
+USAGE_ONE = 65536   # usage of one slot (raw 1.7)
 
 # Record files that a dump of an earlier version does not list (read as absent).
 OPTIONAL_RECORDS = {"entries"}

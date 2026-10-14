@@ -10,6 +10,7 @@ export interface DecodeJob {
   columns: string[] | null
   bytes: number
   indexResources?: number
+  classBase?: Int32Array
 }
 
 export interface PoolStats {
@@ -46,7 +47,7 @@ export class WorkerPool {
 
   decode(job: DecodeJob): Promise<Record<string, Column>> {
     const msg: Message = { op: 'decode', file: job.file, name: job.name, group: job.group, columns: job.columns,
-      indexResources: job.indexResources }
+      indexResources: job.indexResources, classBase: job.classBase }
     return this.submit(msg, job.bytes, []) as Promise<Record<string, Column>>
   }
 

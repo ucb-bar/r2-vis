@@ -7,7 +7,7 @@ import re
 TABLES = ["nodes", "pes", "lanes", "buses", "attachments", "links", "memories",
           "memory_ranges", "resources", "opcodes", "message_kinds", "dirs", "dep_states",
           "tasks", "chunks", "deps", "programs", "charges", "bins", "marks", "phases",
-          "table_names", "entries", "usage"]
+          "table_names", "entries", "usage", "rate_classes"]
 
 HEADER = """\
 -- r2t views. Open the trace with `r2t-sql RUN.r2t [QUERY]`, or run DuckDB from inside the
@@ -50,33 +50,37 @@ FROM entries e
 LEFT JOIN table_names tn ON tn.id = e."table"
 LEFT JOIN nodes n ON n.id = e.nu;
 
--- Bins with their start cycle t and the resource name and class.
+-- Bins with their start cycle t, the resource name and link class, and the rate class
+-- (rate_class; bins."class").
 CREATE OR REPLACE VIEW v_bins AS
-SELECT b.*, {bin_origin} + b.bin::BIGINT * {bin_width} AS t, r.name AS resource_name, r.class,
+SELECT b.* EXCLUDE ("class"), b."class" AS rate_class,
+       {bin_origin} + b.bin::BIGINT * {bin_width} AS t, r.name AS resource_name, r.class,
        dn.name AS dir_name
 FROM bins b
 LEFT JOIN resources r ON r.id = b.resource
 LEFT JOIN dirs dn ON dn.id = b.dir;
 
--- Charges with the resource name and class, the direction and the message name, and the
--- link lanes the row holds (cycles / span; NULL for a zero-cycle charge).
+-- Charges with the resource name and link class, the direction, the message name, the rate
+-- class (rate_class, rate_class_name; charges."class") and slots_held = usage (the slots
+-- the row holds over its span).
 CREATE OR REPLACE VIEW v_charges AS
-SELECT c.*, r.name AS resource_name, r.class, r.kind, r.unit, dn.name AS dir_name,
-       mk.name AS msg_name,
-       CASE WHEN c."end" > c.start THEN c.cycles::DOUBLE / (c."end" - c.start) END AS lanes_held
+SELECT c.* EXCLUDE ("class"), c."class" AS rate_class, r.name AS resource_name, r.class,
+       r.kind, r.unit, dn.name AS dir_name, mk.name AS msg_name, rc.name AS rate_class_name,
+       c.usage AS slots_held
 FROM charges c
 LEFT JOIN resources r ON r.id = c.resource
 LEFT JOIN dirs dn ON dn.id = c.dir
-LEFT JOIN message_kinds mk ON mk.id = c.msg;
+LEFT JOIN message_kinds mk ON mk.id = c.msg
+LEFT JOIN rate_classes rc ON rc.resource = c.resource AND rc.class = c."class";
 """
 
 MACROS = """
 -- The end of the run in cycles.
 CREATE OR REPLACE MACRO end_time() AS {end_time};
 
--- Per resource over [a, b): busy lane-cycles and amount of the charges clipped to the
+-- Per resource over [a, b): busy slot-cycles and amount of the charges clipped to the
 -- range (a charge counts in proportion to its overlap; a zero-cycle charge counts if its
--- start is in the range), the busy fraction busy / (lanes * (b - a)) (NULL if unlimited)
+-- start is in the range), the busy fraction busy / (capacity * (b - a)) (NULL if unlimited)
 -- and the utilization amount / (ceiling * (b - a)).
 CREATE OR REPLACE MACRO util(a, b) AS TABLE
 WITH c AS (
@@ -90,9 +94,9 @@ WITH c AS (
     SELECT resource, sum(cycles * f) AS busy, sum(amount * f) AS amount
     FROM c GROUP BY resource
 )
-SELECT r.id, r.name, r.node, r.kind, r.unit, r.class, r.is_link, r.rate, r.lanes, r.ceiling,
+SELECT r.id, r.name, r.node, r.kind, r.unit, r.class, r.is_link, r.rate, r.capacity, r.ceiling,
        coalesce(s.busy, 0) AS busy, coalesce(s.amount, 0) AS amount,
-       coalesce(s.busy, 0) / (r.lanes * (b - a)) AS busy_frac,
+       coalesce(s.busy, 0) / (r.capacity * (b - a)) AS busy_frac,
        coalesce(s.amount, 0) / (r.ceiling * (b - a)) AS util
 FROM resources r LEFT JOIN s ON s.resource = r.id
 ORDER BY r.id;

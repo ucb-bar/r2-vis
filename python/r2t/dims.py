@@ -191,7 +191,8 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
         "kind": ([r["kind"] for r in res], pa.string()),
         "unit": ([UNITS.get(r["kind"]) for r in res], pa.string()),
         "rate": (rate, pa.float64()),
-        "lanes": ([r.get("lanes") for r in res], pa.int32()),
+        "capacity": ([r.get("capacity") for r in res], pa.float64()),
+        "clock": ([r.get("clock") for r in res], pa.float64()),
         "beat_bytes": ([r.get("beat_bytes") for r in res], pa.int32()),
         "ceiling": ([None if np.isnan(c) else float(c) for c in ceiling], pa.float64()),
         "role": ([r["role"]["type"] for r in res], pa.string()),
@@ -206,6 +207,19 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
         "class": (classes, pa.string()),
         "busy_cycles": ([int(x) for x in busy_cycles], pa.int64()),
         "amount": ([int(x) for x in amount], pa.int64()),
+    })
+
+
+def rate_classes_table(m: dict) -> pa.Table:
+    """The rate classes of compute resources with per-type rates (raw 1.7 `rates`): per
+    resource and class index, the name and the rate in units per core cycle."""
+    rows = [(r["id"], k, c["name"], c["rate"][0] / c["rate"][1])
+            for r in m["resources"] for k, c in enumerate(r.get("rates") or [])]
+    return table({
+        "resource": ([x[0] for x in rows], pa.int32()),
+        "class": ([x[1] for x in rows], pa.int8()),
+        "name": ([x[2] for x in rows], pa.string()),
+        "rate": ([x[3] for x in rows], pa.float64()),
     })
 
 

@@ -20,6 +20,14 @@ export interface AttributionRequest {
    * task without a label kind) */
   tasks: File
   opcodes: string[]
+  /** per real resource: the virtual id of its rate class 0, else -1 (views-design 7.2) */
+  classBase?: Int32Array
+}
+
+/** A charge's resource, or for a charge with a rate class its class's virtual resource. */
+function classResource(res: Int32Array, cls: Int32Array | undefined, base: Int32Array | undefined, i: number): number {
+  const r = res[i]
+  return cls && base && cls[i] >= 0 && r < base.length && base[r] >= 0 ? base[r] + cls[i] : r
 }
 
 /** A group of owners: tasks of one lane and kind, tasks of one kind, a program, or no owner. */
@@ -170,18 +178,25 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
   const add = (owner: number, v: number) => acc.set(owner, (acc.get(owner) ?? 0) + v)
   let usageGroups = 0
   let chargeGroups = 0
-  const chargeCols = ['resource', 'start', 'end', 'cycles', 'amount', 'gid', 'program']
+  const chargeCols = ['resource', 'start', 'end', 'cycles', 'usage', 'class', 'amount', 'gid', 'program']
+  // A rate class (a virtual resource) is not in the usage table: its range reads charges.
+  const virtual = !!req.classBase && req.resources.some((r) => r >= (req.classBase as Int32Array).length)
   const charges = async (g: number, take: (i: number, c: Record<string, Column>) => void) => {
     const c = await read('charges', req.charges, g, chargeCols)
     chargeGroups++
     const res = c.resource as Int32Array
-    for (let i = 0; i < res.length; i++) if (res[i] >= lo && res[i] <= hi && wanted.has(res[i])) take(i, c)
+    const cls = c.class as Int32Array | undefined
+    for (let i = 0; i < res.length; i++) {
+      const r = virtual ? classResource(res, cls, req.classBase, i) : res[i]
+      if (r >= lo && r <= hi && wanted.has(r)) take(i, c)
+    }
   }
   const gidOf = (c: Record<string, Column>) => c.gid as Int32Array
   const progOf = (c: Record<string, Column>) => (c.program as Int32Array | undefined) ?? null
 
   if (req.t !== null) {
-    // An instant: the charges with start <= t < end hold cycles / (end - start) lanes.
+    // An instant: the charges with start <= t < end hold their usage (slots; format 1.6),
+    // cycles / (end - start) lanes before.
     const t = req.t
     for (let g = 0; g < req.blocks.length; g++) {
       const blk = req.blocks[g]
@@ -191,7 +206,8 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
         const e = (c.end as Float64Array)[i]
         if (s <= t && t < e) {
           const p = progOf(c)
-          add(ownerOf(gidOf(c)[i], p ? p[i] : -1), (c.cycles as Int32Array)[i] / (e - s))
+          const usage = c.usage as Float64Array | undefined
+          add(ownerOf(gidOf(c)[i], p ? p[i] : -1), usage ? usage[i] : (c.cycles as Float64Array)[i] / (e - s))
         }
       })
     }
@@ -203,7 +219,7 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
     const edge: number[] = []
     req.blocks.forEach((blk, g) => {
       if (blk.t0 >= b || blk.maxEnd <= a) return
-      if (req.usage && blk.t0 >= a && blk.maxEnd <= b) inside.add(g)
+      if (req.usage && !virtual && blk.t0 >= a && blk.maxEnd <= b) inside.add(g)
       else edge.push(g)
     })
     if (req.usage && inside.size) {
@@ -259,6 +275,9 @@ export interface UsageRequest {
   tasks: { gid: number; a: number; b: number }[]
   /** per resource: the ceiling (0: none) */
   ceiling: Float64Array
+  /** per real resource: the virtual id of its rate class 0, else -1: a charge with a class
+   * counts on its class (views-design 7.2) */
+  classBase?: Int32Array
 }
 
 /** The charges of the selected tasks, sorted by (resource, task, start): per charge the
@@ -289,10 +308,12 @@ export async function taskUsage(req: UsageRequest, read: ReadGroup): Promise<Usa
   for (let g = 0; g < req.blocks.length; g++) {
     const blk = req.blocks[g]
     if (!req.tasks.some((t) => blk.t0 < t.b && blk.maxEnd > t.a)) continue
-    const c = await read('charges', req.charges, g, ['resource', 'start', 'end', 'cycles', 'amount', 'gid'])
+    const c = await read('charges', req.charges, g, ['resource', 'start', 'end', 'cycles', 'class', 'amount', 'gid'])
     groups++
     const gid = c.gid as Int32Array
-    const res = c.resource as Int32Array
+    const raw = c.resource as Int32Array
+    const cls = c.class as Int32Array | undefined
+    const res = Int32Array.from(raw, (_, i) => classResource(raw, cls, req.classBase, i))
     const start = c.start as Float64Array
     const end = c.end as Float64Array
     const cycles = c.cycles as Int32Array | Float64Array

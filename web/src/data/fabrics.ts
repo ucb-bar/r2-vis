@@ -8,7 +8,7 @@ export interface FabricEntity {
   /** bus, link: the fabric; channel: a port or link direction with a write channel (its
    * read and write channels); memory: a memory with banks or a write port; bank: a bank
    * with a write port (its port and write port) */
-  kind: 'bus' | 'link' | 'channel' | 'memory' | 'bank'
+  kind: 'bus' | 'link' | 'channel' | 'memory' | 'bank' | 'array'
 }
 
 /** The bank memories `<mem>.b<i>` (raw 1.4) by path: their memory's path. */
@@ -29,13 +29,16 @@ function banksOf(dims: Record<DimName, Row[]>): Map<string, string> {
 
 const banksCache = new WeakMap<object, Map<string, string>>()
 
-/** The fabric nodes a resource is in, outermost first (empty: a plain row): a port is in
+/** The fabric nodes a resource is in, outermost first (empty: a plain row): a rate class
+ * (a virtual resource) is in its compute array's node; a port is in
  * its bus, a link direction in its link, each also in a channel node when it has a write
  * channel; a memory port or write port is in its memory node when the memory has banks or
  * a write port, and in its bank node when the bank has a write port. A cache link's
  * directions are its memory port, which is not a fabric resource. */
 export function fabricChain(dims: Record<DimName, Row[]>, r: Row): FabricEntity[] {
   const has = (v: unknown) => v !== null && v !== undefined
+  // A rate class (views-design 7.2) is in its compute array's node.
+  if (has(r.class_of)) return [{ path: String(dims.resources[r.class_of as number].name), kind: 'array' }]
   if (r.role === 'port' || r.role === 'bus') {
     const bus = r.bus as number | null
     if (bus === null) return []

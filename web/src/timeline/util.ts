@@ -164,7 +164,8 @@ export function sampleCharges(groups: ChargeGroup[], resource: number, t0: numbe
 }
 
 /** Link lanes (resources.lanes, not task lanes) held on a resource at cycle t: the sum
- * of cycles / span over the charges active at t (trace v1.1; zero-cycle charges hold none).
+ * of cycles / span over the charges active at t: slots (format 1.6, cycles = usage x span),
+ * lanes before (trace v1.1); zero-cycle charges hold none.
  * All groups that overlap t must be given. */
 export function lanesHeld(groups: ChargeGroup[], resource: number, t: number): number {
   let held = 0

@@ -48,6 +48,13 @@ export interface Trace {
   lanes: LaneIndex
   /** fabric node path -> its row in levels.fabric */
   fabricRow: Map<string, number>
+  /** Rate classes (format 1.6, views-design 7.2): each class of a compute resource with
+   * per-type rates is a virtual resource appended to dims.resources (class_of: the real
+   * resource, rate_class: the class; rate and ceiling: the class's rate), with its own bins
+   * and charges. classBase[r]: the virtual id of class 0 of real resource r, else -1;
+   * realResources: the number of real resources. */
+  classBase: Int32Array
+  realResources: number
   load: LoadStats
 }
 
@@ -89,6 +96,10 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   const dims = Object.fromEntries(DIM_TABLES.map((n) => [n, toRows(byName[n])])) as Record<DimName, Row[]>
   if (legacy) bridgesAsLinks(dims)
   const facts = Object.fromEntries(FACT_TABLES.map((n) => [n, byName[n]])) as Record<FactName, Table>
+  for (const r of dims.resources) r.capacity = capacityOf(r)
+  const realResources = dims.resources.length
+  const rateClasses = reader.has('rate_classes') ? toRows(await reader.readColumns('rate_classes', null)) : []
+  const classBase = addClassResources(dims, rateClasses)
 
   const t1 = performance.now()
   const bins = facts.bins.cols
@@ -97,8 +108,8 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   // The fabric nodes' MAX series are built with the levels (views-design Section 2).
   const fg = fabricGroups(dims)
   const ceiling = Float64Array.from(dims.resources, (r) => (r.ceiling as number | null) ?? NaN)
-  const binArgs = [copy(bins.resource as Int32Array), copy(bins.bin as Int32Array),
-    copy(bins.amount as Float32Array), dims.resources.length, manifest.bins.count,
+  const classBins = withClassBins(bins, classBase, dims)
+  const binArgs = [classBins.resource, classBins.bin, classBins.amount, dims.resources.length, manifest.bins.count,
     manifest.bins.width, { start: fg.start, members: fg.members, ceiling }] as const
   const chunks = facts.chunks.cols
   const laneArgs = [copy(tasks.lane as Int32Array), copy(tasks.issue as Float64Array),
@@ -122,7 +133,58 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   levels.origin = manifest.bins.origin ?? 0
   if (levels.fabric) levels.fabric.origin = levels.origin
   const fabricRow = new Map(fg.paths.map((p, g) => [p, g]))
-  return { name: tf.name, reader, manifest, dims, facts, levels, lanes, fabricRow, load }
+  return { name: tf.name, reader, manifest, dims, facts, levels, lanes, fabricRow, load, classBase, realResources }
+}
+
+/** A resource's capacity in slots per core cycle (format 1.6), or its lanes (1.1 to 1.5),
+ * or one for a rated resource of a format 1.0 trace; null if unlimited. */
+function capacityOf(r: Row): number | null {
+  const c = r.capacity ?? r.lanes
+  if (c !== undefined && c !== null) return Number(c)
+  return r.rate === null || r.rate === undefined ? null : 1
+}
+
+/** Appends one virtual resource per rate class (views-design 7.2); returns classBase. */
+function addClassResources(dims: Record<DimName, Row[]>, classes: Row[]): Int32Array {
+  const base = new Int32Array(dims.resources.length).fill(-1)
+  const sorted = [...classes].sort((a, b) => (a.resource as number) - (b.resource as number) || (a.class as number) - (b.class as number))
+  for (const c of sorted) {
+    const real = dims.resources[c.resource as number]
+    if (!real) continue
+    const id = dims.resources.length
+    if (base[real.id as number] < 0) base[real.id as number] = id
+    dims.resources.push({ ...real, id, name: `${String(real.name)}.${String(c.name)}`, rate: c.rate, ceiling: c.rate,
+      class_of: real.id, rate_class: c.class, busy_cycles: 0, amount: 0 })
+  }
+  return base
+}
+
+/** The bins with one extra row per row of a rate class, on that class's virtual resource;
+ * the virtual resources' amount and busy totals (the rows show only charged classes). */
+function withClassBins(bins: Table['cols'], classBase: Int32Array, dims: Record<DimName, Row[]>):
+  { resource: Int32Array; bin: Int32Array; amount: Float32Array } {
+  const resource = bins.resource as Int32Array
+  const bin = bins.bin as Int32Array
+  const amount = bins.amount as Float32Array
+  const busy = bins.busy as Float32Array | Int32Array
+  const cls = bins.class as Int32Array | undefined
+  const extra: number[] = []
+  if (cls) for (let i = 0; i < resource.length; i++) if (cls[i] >= 0 && classBase[resource[i]] >= 0) extra.push(i)
+  const n = resource.length
+  const out = { resource: new Int32Array(n + extra.length), bin: new Int32Array(n + extra.length), amount: new Float32Array(n + extra.length) }
+  out.resource.set(resource)
+  out.bin.set(bin)
+  out.amount.set(amount)
+  extra.forEach((i, k) => {
+    const v = classBase[resource[i]] + (cls as Int32Array)[i]
+    out.resource[n + k] = v
+    out.bin[n + k] = bin[i]
+    out.amount[n + k] = amount[i]
+    const row = dims.resources[v]
+    row.amount = (row.amount as number) + amount[i]
+    row.busy_cycles = (row.busy_cycles as number) + busy[i]
+  })
+  return out
 }
 
 /** A trace before format 1.2: its bridge rows as link rows (trace-format 4.1: from = side a,
