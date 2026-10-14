@@ -279,7 +279,7 @@ export function TrafficView({ trace, charges, store }: Props) {
         </div>
       </div>
       <Sidebar name="traffic">
-        <Section title="Classes">
+        <Section title="Classes" view="traffic">
           {CLASS_ORDER.map((cls) => (
             <div key={cls} className="traffic-class">
               <label className="tool">
@@ -295,13 +295,13 @@ export function TrafficView({ trace, charges, store }: Props) {
             </div>
           ))}
         </Section>
-        <Section title="Strip width">
+        <Section title="Strip width" view="traffic">
           <label className="tool">
             <input type="checkbox" checked={prefs.scaleByBandwidth} onChange={(e) => setScale(e.target.checked)} />
             scale width by bandwidth
           </label>
         </Section>
-        <Section title="Read / write channels">
+        <Section title="Read / write channels" view="traffic">
           {(['combined', 'separate'] as const).map((c) => (
             <label key={c} className="tool">
               <input type="radio" name="traffic-channels" checked={prefs.channels === c} onChange={() => setChannels(c)} />
@@ -309,7 +309,7 @@ export function TrafficView({ trace, charges, store }: Props) {
             </label>
           ))}
         </Section>
-        <Section title="Motion">
+        <Section title="Motion" view="traffic">
           <label className="tool" title={reducedMotion ? 'off: reduced motion in the system settings' : undefined}>
             <input type="checkbox" checked={prefs.animate && !reducedMotion} disabled={reducedMotion}
               onChange={(e) => setPrefs((p) => ({ ...p, animate: e.target.checked }))} />

@@ -6,7 +6,7 @@ import { sameRange, selectTask, toggleTask, type ViewStore } from '../state/view
 import { clearPrefs, loadPrefs, prefsKey, savePrefs } from '../state/viewprefs'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { BlocksPanel } from '../ui/BlocksPanel'
-import { Section, Sidebar } from '../ui/Sidebar'
+import { Section, Sidebar, Subhead } from '../ui/Sidebar'
 import { OTHER } from './colors'
 import { Minimap } from './Minimap'
 import { Tooltip, type TipContent } from '../ui/Tooltip'
@@ -504,7 +504,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
           <Minimap renderer={renderer} version={mapVersion} onChange={request} />
         </div>
         <Sidebar>
-          <Section title="Options">
+          <Section title="View" view="timeline">
             <label className="tool">
               smoothing
               <input type="range" min={1} max={MAX_SMOOTH} value={smoothing}
@@ -512,14 +512,31 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
               <span className="tool-value">{smoothing === 1 ? 'off' : `${smoothing} px`}</span>
             </label>
             <label className="tool">
+              <input type="checkbox" checked={docked} onChange={(e) => onDock(e.target.checked)} />
+              dock the instant view below
+            </label>
+            {pinned !== null && (
+              <span className="chip">pinned at {Math.round(pinned).toLocaleString('en-US')}
+                <button className="chip-x" aria-label="unpin" onClick={() => store.unpin()}>×</button></span>
+            )}
+            <div className="tool-row">
+              <button className={blocksOpen ? 'button small active' : 'button small'} onClick={() => setBlocksOpen(!blocksOpen)}>Blocks</button>
+              <button className="button small" onClick={() => {
+                clearPrefs(prefsKeyRef.current)
+                renderer.resetView()
+                store.smoothing.set(renderer.smoothing)
+                refresh()
+              }}>Reset view</button>
+            </div>
+          </Section>
+          <Section title="Dependencies" view="timeline">
+            <label className="tool">
               <input type="checkbox" checked={showAll}
                 onChange={(e) => { renderer.showAllDeps = e.target.checked; setShowAll(e.target.checked); request() }} />
               show all dependencies
             </label>
-            <label className="tool">
-              <input type="checkbox" checked={docked} onChange={(e) => onDock(e.target.checked)} />
-              dock the instant view below
-            </label>
+          </Section>
+          <Section title="Attribution" view="timeline">
             <label className="tool">
               flightlines
               <input type="range" min={1} max={128} value={flightlines}
@@ -531,6 +548,19 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
                   request()
                 }} />
               <span className="tool-value">{flightlines}</span>
+            </label>
+            <label className="tool">
+              attribute to
+              <select value={attributeTo}
+                onChange={(e) => {
+                  const v = e.target.value as AttributeTo
+                  renderer.attributeTo = v
+                  setAttributeTo(v)
+                  try { localStorage.setItem(ATTRIBUTE_TO_KEY, v) } catch { /* not kept */ }
+                  request()
+                }}>
+                {ATTRIBUTE_TO.map((v) => <option key={v} value={v}>{v === 'auto' ? 'auto' : MODE_NAME[v]}</option>)}
+              </select>
             </label>
             <label className="tool">
               <input type="checkbox" checked={usage}
@@ -554,42 +584,16 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
                 }} />
               control &amp; Neutrino work
             </label>
-            <label className="tool">
-              attribute to
-              <select value={attributeTo}
-                onChange={(e) => {
-                  const v = e.target.value as AttributeTo
-                  renderer.attributeTo = v
-                  setAttributeTo(v)
-                  try { localStorage.setItem(ATTRIBUTE_TO_KEY, v) } catch { /* not kept */ }
-                  request()
-                }}>
-                {ATTRIBUTE_TO.map((v) => <option key={v} value={v}>{v === 'auto' ? 'auto' : MODE_NAME[v]}</option>)}
-              </select>
-            </label>
-            {pinned !== null && (
-              <span className="chip">pinned at {Math.round(pinned).toLocaleString('en-US')}
-                <button className="chip-x" aria-label="unpin" onClick={() => store.unpin()}>×</button></span>
-            )}
-            <div className="tool-row">
-              <button className={blocksOpen ? 'button small active' : 'button small'} onClick={() => setBlocksOpen(!blocksOpen)}>Blocks</button>
-              <button className="button small" onClick={() => {
-                clearPrefs(prefsKeyRef.current)
-                renderer.resetView()
-                store.smoothing.set(renderer.smoothing)
-                refresh()
-              }}>Reset view</button>
-            </div>
           </Section>
           {blocksOpen && (
-            <Section title="Blocks">
+            <Section title="Blocks" view="timeline">
               <BlocksPanel nodes={trace.dims.nodes} blocks={blocks} onClose={() => setBlocksOpen(false)} />
             </Section>
           )}
-          <Section title="Tasks by kind">
+          <Section title="Legend" view="timeline">
+            <Subhead>tasks by kind</Subhead>
             <Legend renderer={renderer} />
-          </Section>
-          <Section title="Lines">
+            <Subhead>lines</Subhead>
             <LineLegend />
           </Section>
         </Sidebar>

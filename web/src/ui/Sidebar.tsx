@@ -59,11 +59,26 @@ export function Sidebar({ children, name = '', width = 260 }: { children: ReactN
   )
 }
 
-export function Section({ title, children }: { title: string; children: ReactNode }) {
+/** A titled sidebar section; a click on the title collapses it (kept per `view` and title). */
+export function Section({ title, view = '', children }: { title: string; view?: string; children: ReactNode }) {
+  const key = `${KEY}.section.${view}.${title}`
+  const [open, setOpen] = useState(() => {
+    try { return localStorage.getItem(key) !== 'closed' } catch { return true }
+  })
+  const toggle = () => {
+    setOpen(!open)
+    try { localStorage.setItem(key, open ? 'closed' : 'open') } catch { /* not kept */ }
+  }
   return (
-    <section className="sidebar-section">
-      <h3>{title}</h3>
-      {children}
+    <section className={open ? 'sidebar-section' : 'sidebar-section closed'}>
+      <h3><button className="section-title" aria-expanded={open} onClick={toggle}>
+        <span className="section-fold">{open ? '▾' : '▸'}</span>{title}</button></h3>
+      {open && children}
     </section>
   )
+}
+
+/** A small heading inside a section. */
+export function Subhead({ children }: { children: ReactNode }) {
+  return <div className="sidebar-subhead">{children}</div>
 }
