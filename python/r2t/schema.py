@@ -115,7 +115,7 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "kind": "TensorOps, VectorOps, ScalarOps, Bandwidth or Slots",
         "unit": "unit of amount: MAC, lane-op, instr, B or slot",
         "rate": "units per cycle; NULL if unlimited",
-        "capacity": "slots per core cycle (format 1.6): rate / beat_bytes x clock for a "
+        "capacity": "slots per core cycle (format 1.6): rate / beat_bytes for a "
                     "bandwidth resource, the clock for a compute PE; charges hold fractions "
                     "of it. Raw 1.6 and older dumps: the lanes. NULL if unlimited. Not related "
                     "to the lanes table (task timeline lanes)",

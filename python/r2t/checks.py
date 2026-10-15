@@ -58,8 +58,8 @@ def read_channel(m: dict, r: dict) -> int | None:
 
 def check_write_channels(m: dict, slots: bool) -> list[str]:
     """A write channel or write port (raw 1.4, 1.5) has a read channel, the same
-    beat_bytes, and capacity = rate / beat_bytes x clock (raw 1.7; up to 1.6 lanes =
-    ceil(rate / beat_bytes))."""
+    beat_bytes, and capacity = rate / beat_bytes (raw 1.7: rate is per core cycle, so the
+    clock ratio is already in it; up to 1.6 lanes = ceil(rate / beat_bytes))."""
     errors = []
     res = m["resources"]
     for r in res:
@@ -74,10 +74,10 @@ def check_write_channels(m: dict, slots: bool) -> list[str]:
                           f"{res[rd].get('beat_bytes')}")
         if r["rate"] is not None and r.get("beat_bytes"):
             if slots:
-                want = r["rate"][0] / (r["rate"][1] * r["beat_bytes"]) * r["clock"]
+                want = r["rate"][0] / (r["rate"][1] * r["beat_bytes"])
                 if r["capacity"] is None or abs(r["capacity"] - want) > 1e-9 * max(1.0, want):
                     errors.append(f"{r['name']}: capacity {r['capacity']}, "
-                                  f"rate / beat_bytes x clock gives {want}")
+                                  f"rate / beat_bytes gives {want}")
             else:
                 lanes = -(-r["rate"][0] // (r["rate"][1] * r["beat_bytes"]))
                 if r["capacity"] != lanes:
