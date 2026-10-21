@@ -14,7 +14,7 @@ export const FACT_TABLES = ['tasks', 'chunks', 'deps', 'programs', 'marks', 'pha
 
 // Columns not read at open (readColumns loads them on demand): the raw label (its fields
 // are columns) and the destination range.
-const SKIP: Record<string, string[]> = { tasks: ['label', 'dst_base', 'dst_len'] }
+const SKIP: Record<string, string[]> = { tasks: ['label', 'dst_base', 'dst_len', 'dst_mask'] }
 
 export type Row = Record<string, number | string | null>
 export type DimName = (typeof DIM_TABLES)[number]

@@ -52,12 +52,15 @@ column.
 
 ## Open a trace in the interface
 
+The interface of the latest `master` is at https://ucb-bar.github.io/r2-vis/.
+To run it locally:
+
 ```bash
 pixi run dev
 ```
 
-Open http://127.0.0.1:5173 and select the `RUN.r2t` directory, or drop it
-on the page. The trace stays on your computer: the interface reads the
+Open http://127.0.0.1:5173. In either case, select the `RUN.r2t`
+directory, or drop it on the page. The trace stays on your computer: the interface reads the
 files in the browser and needs no server.
 
 `pixi run build` writes a static build to `web/dist` (or to the directory
