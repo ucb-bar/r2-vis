@@ -73,14 +73,30 @@ def tasks_table(rec: np.ndarray, label_schema: dict, lane_of_node: np.ndarray,
     }
     cols.update(label_columns(label, label_null, label_schema))
     cols["version"] = masked(version, version_null, pa.int32())
+    cols["untracked"] = pa.array(untracked(rec))
     cols["dst_base"] = pa.array(rec["dst_base"], type=pa.uint64())
     cols["dst_len"] = pa.array(rec["dst_len"], type=pa.uint64())
+    cols["dst_mask"] = pa.array(dst_mask(rec), type=pa.uint32())
     for name in TASK_TIMES:
         values, null = nullable(rec, name)
         cols[name] = masked(values, null, pa.int64())
     cols["n_chunks"] = pa.array(per_task_counts(gids, chunk_gids))
     cols["n_deps"] = pa.array(per_task_counts(gids, dep_consumers))
     return pa.table(cols), gids
+
+
+def untracked(rec: np.ndarray) -> np.ndarray:
+    """Bit 0 of the task flags (raw 1.8); false for a task layout without `flags`."""
+    if "flags" not in rec.dtype.names:
+        return np.zeros(len(rec), bool)
+    return (rec["flags"] & 1).astype(bool)
+
+
+def dst_mask(rec: np.ndarray) -> np.ndarray:
+    """The destination mask in granules (raw 1.9); all ones for a layout without it."""
+    if "dst_mask" not in rec.dtype.names:
+        return np.full(len(rec), 0xFFFFFFFF, np.uint32)
+    return rec["dst_mask"].astype(np.uint32)
 
 
 def chunks_table(rec: np.ndarray) -> pa.Table:

@@ -1,11 +1,11 @@
-"""The checks of trace-raw.md Section 8 (v1.7), plus a few format checks. Vectorized."""
+"""The checks of trace-raw.md Section 8 (v1.9), plus a few format checks. Vectorized."""
 
 from __future__ import annotations
 
 import numpy as np
 
 from r2t import raw
-from r2t.facts import present
+from r2t.facts import present, untracked
 from r2t.rawdump import RawDump, nullable
 from r2t.timeline import Charges
 
@@ -27,10 +27,50 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
     if stats is not None and not dump.partial and dump.complete:
         errors += check_stats(ch, m["resources"], stats, slots)
     errors += check_entries(dump, gids)
+    errors += check_untracked(dump)
+    if tuple(m.get("version", (1, 0))) >= (1, 9):
+        errors += check_dst_granules(dump)
     errors += check_write_channels(m, slots)
     if not dump.partial:
         errors += check_program_owners(ch)
     return errors
+
+
+def check_untracked(dump: RawDump) -> list[str]:
+    """Raw 1.8: an untracked task has version, queued and sent null, and no dependency
+    names it as producer."""
+    tasks = dump.records["tasks"]
+    mask = untracked(tasks)
+    if not mask.any():
+        return []
+    errors = []
+    for name in ("version", "queued", "sent"):
+        bad = mask & ~nullable(tasks, name)[1]
+        if bad.any():
+            errors.append(f"tasks: {int(bad.sum())} untracked tasks with a {name}, first gid "
+                          f"{int(tasks['gid'][np.flatnonzero(bad)[0]])}")
+    producer, producer_null = nullable(dump.records["deps"], "producer")
+    named = np.isin(producer[~producer_null], tasks["gid"][mask])
+    if named.any():
+        errors.append(f"deps: {int(named.sum())} records name an untracked task as producer, "
+                      f"first gid {int(producer[~producer_null][np.flatnonzero(named)[0]])}")
+    return errors
+
+
+def check_dst_granules(dump: RawDump) -> list[str]:
+    """Raw 1.9: dst_base and dst_len are multiples of the granule, dst_len at least one."""
+    granule = dump.manifest.get("run", {}).get("granule")
+    if not granule:
+        return ["manifest.run: no granule (raw 1.9 needs it for the destination ranges)"]
+    tasks = dump.records["tasks"]
+    bad = ((tasks["dst_base"] % granule != 0) | (tasks["dst_len"] % granule != 0)
+           | (tasks["dst_len"] < granule))
+    if not bad.any():
+        return []
+    i = int(np.flatnonzero(bad)[0])
+    return [f"tasks: {int(bad.sum())} destination ranges not in whole granules of {granule} B "
+            f"or empty, first gid {int(tasks['gid'][i])}: base {int(tasks['dst_base'][i]):#x}, "
+            f"len {int(tasks['dst_len'][i])}"]
 
 
 def check_program_owners(ch: Charges) -> list[str]:
@@ -268,9 +308,10 @@ def check_stats(ch: Charges, resources: list[dict], stats: dict, slots: bool) ->
 def check_entries(dump: RawDump, gids: np.ndarray) -> list[str]:
     """entries (trace-raw 4.7 and 8): end >= start; per Neutrino and table the occupancy
     never exceeds the capacity of the manifest; every gid has a task record (whole dumps);
-    a pending record with an end has a gid; inbound_invokes ends at the task's invoke; an
-    outbound_invokes Invoke starts at the task's queued (the checks against task records:
-    whole, complete dumps only)."""
+    a pending record with an end has a gid; a VersionReset record of the invoke tables has
+    no gid (raw 1.8: inbound_invokes holds them too); an inbound Invoke ends at the task's
+    invoke; an outbound_invokes Invoke starts at the task's queued (the checks against task
+    records: whole, complete dumps only)."""
     e = dump.records["entries"]
     if len(e) == 0:
         return []
@@ -323,6 +364,10 @@ def check_entries(dump: RawDump, gids: np.ndarray) -> list[str]:
     if pending_open_gid.any():
         errors.append(f"entries: {int(pending_open_gid.sum())} pending records with an end "
                       "and no gid")
+    vreset_gid = ((table == 3) | (table == 5)) & ((e["flags"] & 1) == 1) & ~gid_null
+    if vreset_gid.any():
+        errors.append(f"entries: {int(vreset_gid.sum())} VersionReset records of the invoke "
+                      "tables with a gid")
     # The checks against task records need a whole dump (as the gid checks above).
     if dump.partial or not dump.complete:
         return errors

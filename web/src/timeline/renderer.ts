@@ -1760,6 +1760,7 @@ export class TimelineRenderer {
     const name = taskName(this.trace, task)
     const sub = [`gid ${num_('gid')}`]
     if (version !== null && !name.endsWith(` v${version}`)) sub.push(`v${version}`)
+    if ((c.untracked as Uint8Array | undefined)?.[task] === 1) sub.push('untracked')
     return { title: name, sub: sub.join(' · '), sections: [{ kind: 'rows', rows }, { kind: 'rows', rows: links }] }
   }
 

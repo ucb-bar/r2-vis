@@ -176,7 +176,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
                 "none",
         "flags": "per table: pending bits 0-1 creator (0 dependency, 1 local wait, 2 remote "
                  "Await); versions bit 0 nu.version; outbound_deps bit 0 registered, bit 1 "
-                 "rejected; outbound_invokes bit 0 VersionReset, bit 1 replayed",
+                 "rejected; inbound_invokes bit 0 VersionReset; outbound_invokes bit 0 "
+                 "VersionReset, bit 1 replayed",
     }),
     "tasks": ("One row per task, sorted by gid.", {
         "gid": "task id, in invoke order",
@@ -188,8 +189,13 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "opcode": "opcode id",
         "label": "descriptor label (raw 64-bit value); NULL if none",
         "version": "version of a versioned dst; NULL if unversioned",
+        "untracked": "no task can depend on it; the fence (wait 0) and the return of its "
+                     "program wait for it (raw 1.8)",
         "dst_base": "destination range base (global address)",
-        "dst_len": "destination range length in bytes",
+        "dst_len": "destination span in bytes",
+        "dst_mask": "destination mask in granules (manifest run.granule): granule "
+                    "dst_base / granule + i of the span belongs to the range when "
+                    "i & ~dst_mask = 0; 4294967295 (all ones) for a plain range (raw 1.9)",
         "call": "cycle the program issued the invoke call (before c_invoke and any stall)",
         "invoke": "entry into the scoreboard of nu; arrival at nu for a forwarded invoke",
         "ready": "the last dependency resolved; NULL if never",

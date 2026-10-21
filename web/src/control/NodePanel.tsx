@@ -199,6 +199,7 @@ function flagText(table: number, f: number): string {
   switch (table) {
     case 2: return ['dependency', 'local wait', 'remote Await', '?'][f & 3]
     case 3: return f & 1 ? 'nu.version' : ''
+    case 5: return f & 1 ? 'VersionReset' : ''
     case 6: return [f & 1 ? 'registered' : '', f & 2 ? 'rejected' : ''].filter(Boolean).join(', ')
     case 7: return [f & 1 ? 'VersionReset' : '', f & 2 ? 'replayed' : ''].filter(Boolean).join(', ')
     default: return ''
