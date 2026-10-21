@@ -1,6 +1,6 @@
 """The topology of r2-sim configs/2p.yaml as manifest tables (trace-raw.md Section 3.1).
 
-The tables follow r2-sim's raw 1.2 dump (scratch/lanesB/l1) entry for entry:
+The tables follow r2-sim's raw 1.2 dump of configs/2p.yaml entry for entry:
 
 * nodes, buses and PEs depth-first over the node tree;
 * attachments per node in creation order (Neutrino, data link, control link,
@@ -14,11 +14,11 @@ The tables follow r2-sim's raw 1.2 dump (scratch/lanesB/l1) entry for entry:
 
 Variants of later configs (2026-10-09):
 
-* `rw` (configs/2p.yaml, raw 1.5, scratch/rw/r1w1-l3): separate write channels at the read
+* `rw` (configs/2p.yaml, raw 1.5): separate write channels at the read
   rate on the rated data buses (sbus, clsbus) and data links (`<port>.in.wr` after the
   port's in/out, `<link>.ab.wr`, `.ba.wr` after the link's ab/ba), and an SMEM write port
   (`smem.wport` after `smem.port`); HBM of 4 GiB.
-* `banks` (configs/2p-hbm-sliced.yaml, raw 1.4, scratch/hash/sliced-l3-v14): offset_bits 34;
+* `banks` (configs/2p-hbm-sliced.yaml, raw 1.4): offset_bits 34;
   per gpc an unlimited `hbmbus`, the link `clsbus_to_hbmbus` with an address hash from
   the linear HBM [0, 4 GiB) onto N banks `hbm.b<i>` at [8 GiB, 12 GiB), each with a port
   and a write port of 512 / N B/cycle on the hbmbus. The unlimited link's resources are

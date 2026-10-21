@@ -1,9 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { fileURLToPath } from 'node:url'
 
-// Build output lives outside the repository: r2/build/r2-vis/dist.
-const outDir = fileURLToPath(new URL('../../build/r2-vis/dist', import.meta.url))
+// Build output: web/dist, or the directory in R2VIS_DIST.
+const outDir = process.env.R2VIS_DIST ?? 'dist'
 
 export default defineConfig({
   plugins: [react()],

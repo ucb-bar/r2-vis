@@ -3,3 +3,6 @@ node_modules/
 __pycache__/
 *.pyc
 *.egg-info/
+docs/*.md
+.ruff_cache/
+web/dist/

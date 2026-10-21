@@ -13,11 +13,6 @@ duckdb-cli = ">=1.1"
 zstandard = ">=0.23"
 nodejs = "22.*"
 
-[activation.env]
-# Keep npm's cache and the Playwright browsers out of $HOME.
-npm_config_cache = "$PIXI_PROJECT_ROOT/../build/npm-cache"
-PLAYWRIGHT_BROWSERS_PATH = "$PIXI_PROJECT_ROOT/../build/playwright"
-
 [pypi-dependencies]
 r2t = { path = ".", editable = true }
 

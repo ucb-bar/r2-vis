@@ -1,6 +1,6 @@
 // The merge tree of the traffic view (views-design 6.6): the children of a node (its child
 // nodes, then its own blocks) in runs of adjacent siblings of the same kind (the same name
-// stem: sm0..sm3, hbm.b0..b63; views-design 6.6, Richard 2026-10-10); each run
+// stem: sm0..sm3, hbm.b0..b63); each run
 // merged pairwise (sm0-1, sm2-3), then the pairs (sm0-3), an odd member joining the last
 // group. The drawn layout is a cut of this tree (see cutFor in the renderer).
 import { attachmentExtras, mergedName, type Dirs, type LinkClass, type TBlock, type TrafficModel } from './model'
