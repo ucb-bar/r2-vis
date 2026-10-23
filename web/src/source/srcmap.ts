@@ -23,7 +23,8 @@ export interface Descriptor {
   args: Record<string, Field>
 }
 
-export type ItemKind = 'function' | 'loop' | 'closure' | 'scalar' | 'invoke' | 'wait'
+/** region: a `// region: <text>` … `// endregion` block of the source (summary = text). */
+export type ItemKind = 'function' | 'loop' | 'closure' | 'scalar' | 'invoke' | 'wait' | 'region'
 
 export interface Item {
   kind: ItemKind

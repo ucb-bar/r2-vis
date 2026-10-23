@@ -32,6 +32,9 @@ export class ViewStore {
   readonly sourceMaps = new Store<LoadedMap[]>([])
   /** A request to show a task's item (by its pc) in a Source area (state/workbench.ts). */
   readonly showSource = new Store<number | null>(null)
+  /** The item selected in a Source area: the other Source areas showing that program
+   * highlight it (`from` names the area that selected it). */
+  readonly sourceSelection = new Store<{ map: string; program: string; id: string; from: object } | null>(null)
   /** The node set of the target timeline (the block diagram shows and edits it). */
   readonly targetBlocks: Store<BlockSelection>
   readonly endTime: number

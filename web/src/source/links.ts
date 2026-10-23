@@ -43,6 +43,15 @@ export function itemPcs(n: Node): number[] {
   return out
 }
 
+/** A producer of a dependency: where it is in the source and its tasks. */
+export interface Producer {
+  mp: MapProgram | null
+  node: Node | null
+  program: string
+  pc: number | null
+  tasks: number[]
+}
+
 const indexes = new WeakMap<Program, ReturnType<typeof indexProgram>>()
 
 /** The item tree of a program, built once per program. */
@@ -113,6 +122,51 @@ export class SourceLink {
   /** The status of a map program for this trace; null if no program of its name ran an image. */
   statusOf(mp: MapProgram): MapStatus | null {
     return this.status.get(this.key(mp)) ?? null
+  }
+
+  /** per task row: its dependency rows (built when first asked for) */
+  private depsByConsumer: Map<number, number[]> | null = null
+  private rowOfGid: Map<number, number> | null = null
+
+  /** The producers of dependency `k` of an invoke, from the trace's deps table: the
+   * distinct (program, pc) of the producing tasks, each with its map program and item (null
+   * if no loaded map holds it) and the producing task rows. */
+  producersOf(mp: MapProgram, n: Node, k: number): Producer[] {
+    const d = this.trace.facts.deps.cols
+    const consumer = d.consumer as Int32Array
+    const idx = d.idx as Int32Array | Int8Array | undefined
+    const producer = d.producer as Int32Array
+    const gid = this.trace.facts.tasks.cols.gid as Int32Array
+    if (!this.depsByConsumer) {
+      this.rowOfGid = new Map(Array.from(gid, (g, row) => [g, row]))
+      this.depsByConsumer = new Map()
+      for (let r = 0; r < consumer.length; r++) {
+        const row = this.rowOfGid.get(consumer[r])
+        if (row === undefined) continue
+        const list = this.depsByConsumer.get(row)
+        if (list) list.push(r)
+        else this.depsByConsumer.set(row, [r])
+      }
+    }
+    const out = new Map<string, Producer>()
+    for (const t of this.tasksOf(mp, n)) {
+      for (const r of this.depsByConsumer.get(t) ?? []) {
+        if ((idx ? idx[r] : 0) !== k || producer[r] < 0) continue
+        const p = this.rowOfGid?.get(producer[r])
+        if (p === undefined) continue
+        const src = taskSource(this.trace, p)
+        const at = this.locate(p)
+        const key = at && 'mp' in at ? `${at.mp.mi}:${at.mp.pi}:${at.node?.id ?? ''}` : `${src?.name}:${src?.pc}`
+        let e = out.get(key)
+        if (!e) {
+          e = { mp: at && 'mp' in at ? at.mp : null, node: at && 'mp' in at ? at.node : null,
+            program: src?.name ?? '', pc: src?.pc ?? null, tasks: [] }
+          out.set(key, e)
+        }
+        if (!e.tasks.includes(p)) e.tasks.push(p)
+      }
+    }
+    return [...out.values()]
   }
 
   /** The task rows of a map program's instances whose pc is one of an item's pcs. */
