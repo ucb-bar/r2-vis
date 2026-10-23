@@ -77,6 +77,8 @@ def tasks_table(rec: np.ndarray, label_schema: dict, lane_of_node: np.ndarray,
     cols["dst_base"] = pa.array(rec["dst_base"], type=pa.uint64())
     cols["dst_len"] = pa.array(rec["dst_len"], type=pa.uint64())
     cols["dst_mask"] = pa.array(dst_mask(rec), type=pa.uint32())
+    pc, pc_null = optional_field(rec, "pc")
+    cols["pc"] = masked(pc, pc_null, pa.int32())
     for name in TASK_TIMES:
         values, null = nullable(rec, name)
         cols[name] = masked(values, null, pa.int64())
@@ -97,6 +99,35 @@ def dst_mask(rec: np.ndarray) -> np.ndarray:
     if "dst_mask" not in rec.dtype.names:
         return np.full(len(rec), 0xFFFFFFFF, np.uint32)
     return rec["dst_mask"].astype(np.uint32)
+
+
+def optional_field(rec: np.ndarray, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """(values, null mask) of a field that older layouts lack (all null there)."""
+    if name not in rec.dtype.names:
+        return np.zeros(len(rec), np.int64), np.ones(len(rec), bool)
+    return nullable(rec, name)
+
+
+def task_programs(tasks: np.ndarray, programs: np.ndarray) -> pa.Array:
+    """The program that made each task (raw 1.10), in gid order: the program with
+    nu = src_nu and start <= call < end (end null: the end of the run); NULL if none. A
+    Neutrino runs one program at a time. Program ids are the rows of programs_table."""
+    tasks = tasks[np.argsort(tasks["gid"], kind="stable")]
+    programs = programs[np.lexsort((programs["start"], programs["nu"]))]
+    end, end_null = nullable(programs, "end")
+    end = np.where(end_null, np.iinfo(np.int64).max, end.astype(np.int64))
+    nu = programs["nu"].astype(np.int64)
+    src = tasks["src_nu"].astype(np.int64)
+    call = tasks["call"].astype(np.int64)
+    # The last program of the task's node that started at or before the call (one sorted
+    # key: nu above bit 40, cycles below).
+    pos = np.searchsorted(nu * (1 << 40) + programs["start"].astype(np.int64),
+                          src * (1 << 40) + call, side="right") - 1
+    found = pos >= 0
+    pos = np.where(found, pos, 0)
+    if len(programs):
+        found &= (nu[pos] == src) & (call < end[pos])
+    return masked(pos, ~found, pa.int32())
 
 
 def chunks_table(rec: np.ndarray) -> pa.Table:
@@ -160,6 +191,7 @@ def programs_table(rec: np.ndarray, strings: list[str]) -> pa.Table:
     rec = rec[np.lexsort((rec["start"], rec["nu"]))]
     spawn, spawn_null = nullable(rec, "spawn")
     end, end_null = nullable(rec, "end")
+    image, image_null = optional_field(rec, "image")
     return pa.table({
         "id": pa.array(np.arange(len(rec), dtype=np.int32)),
         "nu": pa.array(rec["nu"].astype(np.int32)),
@@ -167,6 +199,7 @@ def programs_table(rec: np.ndarray, strings: list[str]) -> pa.Table:
         "spawn": masked(spawn, spawn_null, pa.int32()),
         "start": pa.array(rec["start"].astype(np.int64)),
         "end": masked(end, end_null, pa.int64()),
+        "image": masked(image, image_null, pa.int32()),
     })
 
 

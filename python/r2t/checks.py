@@ -1,11 +1,11 @@
-"""The checks of trace-raw.md Section 8 (v1.9), plus a few format checks. Vectorized."""
+"""The checks of trace-raw.md Section 8 (v1.10), plus a few format checks. Vectorized."""
 
 from __future__ import annotations
 
 import numpy as np
 
 from r2t import raw
-from r2t.facts import present, untracked
+from r2t.facts import optional_field, present, task_programs, untracked
 from r2t.rawdump import RawDump, nullable
 from r2t.timeline import Charges
 
@@ -30,6 +30,8 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
     errors += check_untracked(dump)
     if tuple(m.get("version", (1, 0))) >= (1, 9):
         errors += check_dst_granules(dump)
+    if tuple(m.get("version", (1, 0))) >= (1, 10):
+        errors += check_images(dump)
     errors += check_write_channels(m, slots)
     if not dump.partial:
         errors += check_program_owners(ch)
@@ -71,6 +73,50 @@ def check_dst_granules(dump: RawDump) -> list[str]:
     return [f"tasks: {int(bad.sum())} destination ranges not in whole granules of {granule} B "
             f"or empty, first gid {int(tasks['gid'][i])}: base {int(tasks['dst_base'][i]):#x}, "
             f"len {int(tasks['dst_len'][i])}"]
+
+
+def check_images(dump: RawDump) -> list[str]:
+    """Raw 1.10: a program's image exists and holds a record of the program's name; a task
+    has a pc exactly when its program has an image, and the pc is inside that image."""
+    images = dump.manifest.get("images") or []
+    progs = dump.records["programs"]
+    progs = progs[np.lexsort((progs["start"], progs["nu"]))]
+    image, image_null = optional_field(progs, "image")
+    errors = []
+    names = [dump.strings[int(n)] if int(n) < len(dump.strings) else "?" for n in progs["name"]]
+    for i in np.flatnonzero(~image_null):
+        k = int(image[i])
+        if k >= len(images):
+            errors.append(f"programs: {names[i]} on node {int(progs['nu'][i])} names image {k} "
+                          f"of {len(images)}")
+        elif names[i] not in images[k].get("programs", []):
+            errors.append(f"programs: {names[i]} on node {int(progs['nu'][i])} runs image {k}, "
+                          f"which has no record named {names[i]}")
+    tasks = dump.records["tasks"]
+    tasks = tasks[np.argsort(tasks["gid"], kind="stable")]
+    pc, pc_null = optional_field(tasks, "pc")
+    owner = task_programs(tasks, dump.records["programs"])
+    found = ~np.asarray(owner.is_null())
+    row = np.asarray(owner.fill_null(0)).astype(np.int64)
+    has_image = found & ~image_null[row] if len(progs) else np.zeros(len(tasks), bool)
+    bad = ~pc_null & ~has_image
+    if bad.any():
+        errors.append(f"tasks: {int(bad.sum())} tasks with a pc whose program has no image, "
+                      f"first gid {int(tasks['gid'][np.flatnonzero(bad)[0]])}")
+    bad = pc_null & has_image
+    if bad.any():
+        errors.append(f"tasks: {int(bad.sum())} tasks of an RV program without a pc, first gid "
+                      f"{int(tasks['gid'][np.flatnonzero(bad)[0]])}")
+    size = np.array([x["bytes"] for x in images] + [0], dtype=np.int64)
+    k = np.where(has_image, np.minimum(image[row], len(images)), len(images)) if len(progs) \
+        else np.full(len(tasks), len(images))
+    bad = ~pc_null & has_image & (pc.astype(np.int64) >= size[k])
+    if bad.any():
+        i = int(np.flatnonzero(bad)[0])
+        errors.append(f"tasks: {int(bad.sum())} pcs outside their image, first gid "
+                      f"{int(tasks['gid'][i])}: pc {int(pc[i]):#x}, image {int(k[i])} of "
+                      f"{int(size[k[i]])} B")
+    return errors
 
 
 def check_program_owners(ch: Charges) -> list[str]:

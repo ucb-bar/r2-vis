@@ -210,6 +210,20 @@ def resources_table(m: dict, bus_class: list[str], ceiling: np.ndarray,
     })
 
 
+def images_table(m: dict) -> pa.Table:
+    """The RV images that programs ran (raw 1.10 `images`; empty before): programs.image
+    refers to the row index."""
+    images = m.get("images") or []
+    return pa.table({
+        "id": pa.array(range(len(images)), pa.int32()),
+        "file": pa.array([x.get("file") for x in images], pa.string()),
+        "imem": pa.array([x.get("imem") for x in images], pa.string()),
+        "bytes": pa.array([x["bytes"] for x in images], pa.int64()),
+        "sha256": pa.array([x["sha256"] for x in images], pa.string()),
+        "programs": pa.array([",".join(x.get("programs", [])) for x in images], pa.string()),
+    })
+
+
 def rate_classes_table(m: dict) -> pa.Table:
     """The rate classes of compute resources with per-type rates (raw 1.7 `rates`): per
     resource and class index, the name and the rate in units per core cycle."""

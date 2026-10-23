@@ -131,10 +131,13 @@ def bridges_to_links(manifest: dict) -> None:
 
 def check_layout(name: str, layout: list[list[str]]) -> None:
     """The manifest layout must start with the Section 4 fields (the charges: of 1.6 or of
-    1.7); later fields are allowed."""
+    1.7); later fields are allowed, and a later version may give a pad field a name and a
+    meaning (raw 1.10: programs `pad2` is `image`)."""
     expected = raw.LAYOUTS[name]
     head = [list(f) for f in layout[: len(expected)]]
-    if head != expected and not (name == "charges" and head == raw.CHARGES_17):
+    same = len(head) == len(expected) and all(
+        h == e or (e[0].startswith("pad") and h[1] == e[1]) for h, e in zip(head, expected))
+    if not same and not (name == "charges" and head == raw.CHARGES_17):
         raise FormatError(f"layout of {name} does not match trace-raw v1.3: {layout}")
 
 

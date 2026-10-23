@@ -95,7 +95,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "id": "memory id",
         "path": "dotted path of the memory",
         "node": "node id that owns the memory",
-        "type": "scratch, dram, cache or sync",
+        "type": "scratch (SMEM), nu_scratch (a Neutrino's data scratch, raw 1.10), dram, "
+                "cache or sync",
         "port": "resource id of the memory port; NULL if none",
         "bw_bytes": "port bytes per cycle; NULL if none",
         "latency": "access latency in cycles; NULL if none",
@@ -196,6 +197,11 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "dst_mask": "destination mask in granules (manifest run.granule): granule "
                     "dst_base / granule + i of the span belongs to the range when "
                     "i & ~dst_mask = 0; 4294967295 (all ones) for a plain range (raw 1.9)",
+        "pc": "IMEM offset of the nu.* instruction that made the task, in the coordinates of "
+              "the program's source map (raw 1.10); NULL for a task of a program that is not "
+              "an RV image",
+        "program": "the program that made the task (programs.id): the program on src_nu "
+                   "with start <= call < end; with pc, it names the source map item",
         "call": "cycle the program issued the invoke call (before c_invoke and any stall)",
         "invoke": "entry into the scoreboard of nu; arrival at nu for a forwarded invoke",
         "ready": "the last dependency resolved; NULL if never",
@@ -234,6 +240,19 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "spawn": "gid of the spawn task in the parent; NULL for the root program",
         "start": "cycle the program started",
         "end": "cycle the program returned; NULL if never",
+        "image": "the RV image that the program ran (images.id, raw 1.10); NULL for a "
+                 "program that is not an RV image",
+    }),
+    "images": ("RV images that programs ran (raw 1.10), deduplicated by sha256, in order of "
+               "first use. A source map belongs to an image when its image.bytes and "
+               "image.sha256 are equal.", {
+        "id": "image id (programs.image)",
+        "file": "the file of an --image entry, as given; NULL for an image that an IMEM "
+                "copy placed",
+        "imem": "the node path of the --image entry; NULL for a copied image",
+        "bytes": "IMEM bytes of the image",
+        "sha256": "hex SHA-256 of those bytes",
+        "programs": "comma-separated names of the program records in the image",
     }),
     "usage": ("Attribution (format 1.5): the charges summed per resource, charge block and "
               "owner, sorted by (resource, block, gid, program), so that a resource's rows "
