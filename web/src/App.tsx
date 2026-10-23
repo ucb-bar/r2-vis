@@ -10,6 +10,13 @@ import { OpenPanel } from './ui/OpenPanel'
 import { LoadReport } from './ui/LoadReport'
 import { Workspace } from './ui/Workspace'
 import { ThemeToggle } from './ui/ThemeToggle'
+import { parseSourceMap, type SourceMap } from './source/srcmap'
+import { fetchIndex, parseServerUrl, resetWhole, servedFiles, traceUrl, type ServedTrace } from './data/tracefile'
+import { bytes } from './ui/format'
+import { SourceView } from './source/SourceView'
+
+/** A source map in memory (the Source view; no link to a trace yet). */
+export interface OpenSourceMap { map: SourceMap | null; name: string; error: string | null }
 
 type State =
   | { kind: 'idle' }
@@ -18,20 +25,38 @@ type State =
   | { kind: 'error'; message: string }
 
 declare global {
-  interface Window { __r2vis?: { trace?: Trace; charges?: ChargeCache; store?: ViewStore; open?: (tf: TraceFiles) => Promise<void> } }
+  interface Window { __r2vis?: { trace?: Trace; charges?: ChargeCache; store?: ViewStore; open?: (tf: TraceFiles) => Promise<void>; openSourceMap?: (f: File) => Promise<void>; openUrl?: (u: string) => Promise<void> } }
 }
 
 export function App() {
   const [state, setState] = useState<State>({ kind: 'idle' })
   const poolRef = useRef<WorkerPool | null>(null)
   const [showLoad, setShowLoad] = useState(false)
+  const [src, setSrc] = useState<OpenSourceMap>({ map: null, name: '', error: null })
+  // The traces of an r2t-serve base URL, listed on the start page.
+  const [served, setServed] = useState<{ base: string; traces: ServedTrace[] } | null>(null)
+  const openSourceMap = async (file: File) => {
+    try {
+      setSrc({ map: parseSourceMap(await file.text(), file.name), name: file.name, error: null })
+    } catch (err) {
+      setSrc((s) => ({ ...s, error: String((err as Error).message ?? err) }))
+    }
+  }
 
   const pool = () => (poolRef.current ??= new WorkerPool(defaultPoolSize()))
 
+  /** Keeps #trace= on the open served trace (a reload reopens it); a local trace clears it. */
+  const setFragment = (url: string | null) => {
+    const hash = url ? `#trace=${encodeURIComponent(url)}` : ''
+    if (location.hash !== hash) history.replaceState(null, '', `${location.pathname}${location.search}${hash}`)
+  }
+
   const open = async (tf: TraceFiles) => {
     setState({ kind: 'loading', name: tf.name, done: 0, total: 1 })
+    setFragment(tf.url ?? null)
     try {
       pool().reset()
+      resetWhole()
       const trace = await loadTrace(tf, pool(), (done, total) =>
         setState({ kind: 'loading', name: tf.name, done, total }))
       void indexLabels(trace, pool())   // which task labels are shared (task names), in a worker
@@ -44,8 +69,30 @@ export function App() {
     }
   }
 
+  /** A server base URL lists its traces; a trace URL opens that trace. */
+  const openUrl = async (input: string) => {
+    try {
+      const { base, trace } = parseServerUrl(input)
+      const traces = await fetchIndex(base)
+      if (trace === null) {
+        setServed({ base, traces })
+        setFragment(base)
+        setState({ kind: 'idle' })
+        return
+      }
+      const t = traces.find((x) => x.name === trace)
+      if (!t) throw new Error(`${base}: no trace named ${trace} (the server lists ${traces.map((x) => x.name).join(', ') || 'none'})`)
+      setServed({ base, traces })
+      await open({ name: t.name, files: servedFiles(base, t), url: traceUrl(base, t.name) })
+    } catch (err) {
+      setState({ kind: 'error', message: String((err as Error).message ?? err) })
+    }
+  }
+
   useEffect(() => {
-    window.__r2vis = { ...window.__r2vis, open }
+    window.__r2vis = { ...window.__r2vis, open, openSourceMap, openUrl }
+    const fromHash = new URLSearchParams(location.hash.slice(1)).get('trace')
+    if (fromHash) void openUrl(fromHash)
     return () => poolRef.current?.terminate()
   }, [])
 
@@ -72,12 +119,32 @@ export function App() {
             Loaded in {Math.round(state.trace.load.totalMs)} ms
           </button>
         )}
-        {state.kind === 'loaded' && <OpenPanel compact onFiles={onFiles} onDrop={onDrop} />}
+        {(state.kind === 'loaded' || src.map) && <OpenPanel compact onFiles={onFiles} onDrop={onDrop} />}
         <ThemeToggle />
       </header>
       <main className="main">
-        {state.kind !== 'loaded' && (
-          <OpenPanel onFiles={onFiles} onDrop={onDrop}>
+        {state.kind !== 'loaded' && src.map && (
+          <div className="workspace">
+            <nav className="tabs"><button className="tab active">Source</button></nav>
+            <div className="workspace-body">
+              <div className="pane" style={{ display: 'flex', flex: '1 1 auto' }}>
+                <SourceView map={src.map} name={src.name} error={src.error} onOpen={(f) => void openSourceMap(f)} />
+              </div>
+            </div>
+          </div>
+        )}
+        {state.kind !== 'loaded' && !src.map && (
+          <OpenPanel onFiles={onFiles} onDrop={onDrop} onSourceMap={(f) => void openSourceMap(f)} onUrl={(u) => void openUrl(u)}>
+            {served && state.kind !== 'loading' && (
+              <table className="served">
+                <tbody>{served.traces.map((t) => (
+                  <tr key={t.name}>
+                    <td><button className="link" onClick={() => void openUrl(traceUrl(served.base, t.name))}>{t.name}</button></td>
+                    <td className="num">{bytes(Object.values(t.files).reduce((a, b) => a + b, 0))}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
             {state.kind === 'loading' && (
               <>
                 <div>Loading {state.name}…</div>
@@ -85,11 +152,12 @@ export function App() {
               </>
             )}
             {state.kind === 'error' && <div className="error">{state.message}</div>}
+            {src.error && <div className="error">{src.error}</div>}
           </OpenPanel>
         )}
         {state.kind === 'loaded' && (
           <Workspace key={state.trace.name + state.trace.load.totalMs} trace={state.trace}
-            charges={state.charges} pool={pool()} store={state.store} />
+            charges={state.charges} pool={pool()} store={state.store} source={src} onOpenSource={(f) => void openSourceMap(f)} />
         )}
         {state.kind === 'loaded' && showLoad && (
           <div className="overlay" onClick={() => setShowLoad(false)}>

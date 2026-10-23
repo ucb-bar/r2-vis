@@ -1,8 +1,12 @@
-// The files of a .r2t directory, from the folder picker or from drag-and-drop.
+// The files of a .r2t directory: from the folder picker or a drop (local), or served by
+// r2t-serve (by URL, tracefile.ts).
+import { localFile, type TraceFile } from './tracefile'
 
 export interface TraceFiles {
   name: string
-  files: Map<string, File>
+  files: Map<string, TraceFile>
+  /** a served trace: its URL (kept in the page's #trace= fragment) */
+  url?: string
 }
 
 /** From <input type="file" webkitdirectory>: the files next to manifest.json. */
@@ -11,8 +15,8 @@ export function fromFileList(list: FileList): TraceFiles {
   const manifest = all.find((f) => baseName(pathOf(f)) === 'manifest.json')
   if (!manifest) throw new Error('the folder has no manifest.json (pick the .r2t folder)')
   const dir = dirName(pathOf(manifest))
-  const files = new Map<string, File>()
-  for (const f of all) if (dirName(pathOf(f)) === dir) files.set(baseName(pathOf(f)), f)
+  const files = new Map<string, TraceFile>()
+  for (const f of all) if (dirName(pathOf(f)) === dir) files.set(baseName(pathOf(f)), localFile(f))
   return { name: baseName(dir) || 'trace', files }
 }
 
@@ -23,15 +27,15 @@ export async function fromDrop(dt: DataTransfer): Promise<TraceFiles> {
     .filter((e): e is FileSystemEntry => e !== null)
   const dirs = entries.filter((e) => e.isDirectory) as FileSystemDirectoryEntry[]
   if (dirs.length === 1 && entries.length === 1) {
-    const files = new Map<string, File>()
+    const files = new Map<string, TraceFile>()
     for (const entry of await readAll(dirs[0])) {
-      if (entry.isFile) files.set(entry.name, await fileOf(entry as FileSystemFileEntry))
+      if (entry.isFile) files.set(entry.name, localFile(await fileOf(entry as FileSystemFileEntry)))
     }
     if (!files.has('manifest.json')) throw new Error(`${dirs[0].name} has no manifest.json`)
     return { name: dirs[0].name, files }
   }
-  const files = new Map<string, File>()
-  for (const f of Array.from(dt.files)) files.set(f.name, f)
+  const files = new Map<string, TraceFile>()
+  for (const f of Array.from(dt.files)) files.set(f.name, localFile(f))
   if (!files.has('manifest.json')) throw new Error('drop the .r2t folder (or all of its files)')
   return { name: 'trace', files }
 }

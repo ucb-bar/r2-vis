@@ -11,6 +11,9 @@ const KIND_SLOT: Record<string, number> = {
   dma_w: 0, vec: 1, dma_act: 2, qkv: 3, attn: 4, wo: 5, ffn_gate: 6, ffn_up: 6, ffn_down: 6,
 }
 const OPCODE_SLOT: Record<string, number> = { dma: 0, 'muon.vector': 1, 'atlas.matmul': 3 }
+/** The Source view's op colors: the opcode slots, and join, spawn and imem_copy (tasks of
+ * those opcodes stay "other" in the timeline). */
+export const SOURCE_OP_SLOT: Record<string, number> = { ...OPCODE_SLOT, imem_copy: 5, join: 6, spawn: 7 }
 
 export interface LegendEntry {
   slot: number

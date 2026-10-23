@@ -8,6 +8,7 @@ requires-python = ">=3.12"
 r2t-convert = "r2t.convert:main"
 r2t-synth = "r2t.synth:main"
 r2t-sql = "r2t.sql:main"
+r2t-serve = "r2t.serve:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -63,6 +63,28 @@ Open http://127.0.0.1:5173. In either case, select the `RUN.r2t`
 directory, or drop it on the page. The trace stays on your computer: the interface reads the
 files in the browser and needs no server.
 
+## Open a trace on another machine
+
+`r2t-serve` serves traces from the machine where they are, on the
+loopback interface only (127.0.0.1):
+
+```bash
+pixi run r2t-serve RUN.r2t        # or a directory of .r2t directories
+```
+
+It prints an `ssh -L` command and one link per trace. Forward the port
+from your computer with that command, then open the link. The link opens
+the interface with the trace URL after `#trace=`; the interface reads the
+files by byte range, so a large trace needs no copy. Each start makes a
+new random token in the URLs. The browser asks once for access to the
+local network; allow it.
+
+## Sources
+
+The Source tab shows a Neutrino program from the source map that
+`r2-build` writes (`srcmap.json`): the invokes with their descriptors,
+loops, closures and the source code. Open it with "Open source map".
+
 `pixi run build` writes a static build to `web/dist` (or to the directory
 in `R2VIS_DIST`). Serve that directory with any static file server.
 

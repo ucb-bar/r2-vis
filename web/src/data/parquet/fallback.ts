@@ -1,16 +1,17 @@
 // Slow path: hyparquet for a row group that uses an encoding decode.ts does not handle.
 // The values are converted to the column types of decode.ts.
 import { parquetRead, type FileMetaData } from 'hyparquet'
+import { readRange, type TraceFile } from '../tracefile'
 import type { Column, Zstd } from './decode'
 
-export async function decodeWithHyparquet(file: File, meta: FileMetaData, group: number,
+export async function decodeWithHyparquet(file: TraceFile, meta: FileMetaData, group: number,
   columns: Set<string> | null, zstd: Zstd): Promise<Record<string, Column>> {
   let rowStart = 0
   for (let g = 0; g < group; g++) rowStart += Number(meta.row_groups[g].num_rows)
   const rowEnd = rowStart + Number(meta.row_groups[group].num_rows)
   const types = new Map(meta.schema.slice(1).map((s) => [s.name, s.type]))
   const raw: Record<string, unknown[]> = {}
-  const asyncFile = { byteLength: file.size, slice: (a: number, b?: number) => file.slice(a, b).arrayBuffer() }
+  const asyncFile = { byteLength: file.size, slice: (a: number, b?: number) => readRange(file, a, b ?? file.size) }
   await parquetRead({
     file: asyncFile, metadata: meta, rowStart, rowEnd,
     columns: columns ? [...columns] : undefined,

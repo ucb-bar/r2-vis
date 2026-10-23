@@ -2,10 +2,11 @@
 // sent first. A pinned request waits for its own worker (a worker that keeps a cache).
 import type { Column } from './parquet/decode'
 import type { ComputeRequest, DecodeRequest, WorkerReply } from './worker'
+import type { TraceFile } from './tracefile'
 
 export interface DecodeJob {
   name: string
-  file: File
+  file: TraceFile
   group: number
   columns: string[] | null
   bytes: number

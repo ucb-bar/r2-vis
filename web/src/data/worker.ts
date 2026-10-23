@@ -3,6 +3,7 @@
 import type { FileMetaData } from 'hyparquet'
 import { decodeRowGroup, isDict, Unsupported, type Column, type NumColumn } from './parquet/decode'
 import { readFooter, rowGroupRange } from './parquet/footer'
+import { readRange, resetWhole, type TraceFile } from './tracefile'
 import { zstdDecoder } from './parquet/zstd'
 import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
@@ -13,7 +14,7 @@ import { attribute, resetAttribution, taskUsage, type AttributionRequest, type U
 export interface DecodeRequest {
   op: 'decode'
   id: number
-  file: File
+  file: TraceFile
   name: string
   group: number
   columns: string[] | null
@@ -43,7 +44,7 @@ export interface WorkerReply {
 
 const footers = new Map<string, Promise<FileMetaData>>()
 
-function footer(name: string, file: File): Promise<FileMetaData> {
+function footer(name: string, file: TraceFile): Promise<FileMetaData> {
   let f = footers.get(name)
   if (!f) {
     f = readFooter(file)
@@ -55,7 +56,7 @@ function footer(name: string, file: File): Promise<FileMetaData> {
 async function decode(req: DecodeRequest): Promise<{ cols: Record<string, Column>; fallback: boolean }> {
   const [meta, zstd] = await Promise.all([footer(req.name, req.file), zstdDecoder()])
   const [lo, hi] = rowGroupRange(meta, req.group)
-  const bytes = await req.file.slice(lo, hi).arrayBuffer()
+  const bytes = await readRange(req.file, lo, hi)
   const columns = req.columns ? new Set(req.columns) : null
   try {
     return { cols: decodeRowGroup(bytes, lo, meta, req.group, columns, zstd), fallback: false }
@@ -79,6 +80,7 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
   const req = e.data
   if (req.op === 'reset') {
     footers.clear()
+    resetWhole()
     resetAttribution()
     return
   }

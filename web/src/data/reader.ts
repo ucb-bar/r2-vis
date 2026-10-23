@@ -4,6 +4,7 @@ import { concatParts, type Column, type Table } from './columns'
 import { readFooter } from './parquet/footer'
 import type { FileMetaData } from 'hyparquet'
 import type { WorkerPool } from './pool'
+import type { TraceFile } from './tracefile'
 
 export interface RowGroupInfo {
   rows: number
@@ -12,10 +13,10 @@ export interface RowGroupInfo {
 
 export class TraceReader {
   private readonly footers = new Map<string, Promise<FileMetaData>>()
-  readonly files: Map<string, File>
+  readonly files: Map<string, TraceFile>
   readonly pool: WorkerPool
 
-  constructor(files: Map<string, File>, pool: WorkerPool) {
+  constructor(files: Map<string, TraceFile>, pool: WorkerPool) {
     this.files = files
     this.pool = pool
   }
@@ -24,7 +25,7 @@ export class TraceReader {
     return this.files.has(`${table}.parquet`)
   }
 
-  private file(table: string): File {
+  private file(table: string): TraceFile {
     const f = this.files.get(`${table}.parquet`)
     if (!f) throw new Error(`the trace has no ${table}.parquet`)
     return f

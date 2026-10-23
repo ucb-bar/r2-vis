@@ -7,14 +7,18 @@ import type { ViewStore } from '../state/viewstore'
 import type { TimelineRenderer } from '../timeline/renderer'
 import { Timeline } from '../timeline/Timeline'
 import { InstantView } from './InstantView'
+import { SourceView } from '../source/SourceView'
+import type { OpenSourceMap } from '../App'
 
-type Tab = 'timeline' | 'blocks' | 'instant'
+type Tab = 'timeline' | 'blocks' | 'instant' | 'source'
 
 interface Props {
   trace: Trace
   charges: ChargeCache
   pool: WorkerPool
   store: ViewStore
+  source: OpenSourceMap
+  onOpenSource: (file: File) => void
 }
 
 // The design starts at the top-level device: the block diagram is the way into the
@@ -23,11 +27,12 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'blocks', label: 'Block diagram' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'instant', label: 'Instant' },
+  { id: 'source', label: 'Source' },
 ]
 
 /** Tabs Block diagram / Timeline / Instant (the block diagram first). Every view stays mounted (hidden when not
  * shown), so it keeps its state. The instant view can be docked under the timeline. */
-export function Workspace({ trace, charges, pool, store }: Props) {
+export function Workspace({ trace, charges, pool, store, source, onOpenSource }: Props) {
   const [tab, setTab] = useState<Tab>('blocks')
   const [docked, setDocked] = useState(false)
   const [timeline, setTimeline] = useState<TimelineRenderer | null>(null)
@@ -67,6 +72,9 @@ export function Workspace({ trace, charges, pool, store }: Props) {
         {showDock && <div className="splitter" onPointerDown={(e) => { e.preventDefault(); dragging.current = true }} />}
         <div className="pane" style={{ display: tab === 'blocks' ? 'flex' : 'none', flex: '1 1 auto' }}>
           <BlockView trace={trace} store={store} />
+        </div>
+        <div className="pane" style={{ display: tab === 'source' ? 'flex' : 'none', flex: '1 1 auto' }}>
+          <SourceView map={source.map} name={source.name} error={source.error} onOpen={onOpenSource} />
         </div>
         <div className="pane" style={{ display: instantHere ? 'flex' : 'none', flex: '1 1 auto' }}>
           <InstantView trace={trace} charges={charges} store={store}

@@ -79,3 +79,8 @@ export function amount(v: number, unit: string): string {
   }
   return `${count(v)} ${unit}`
 }
+
+/** A size in bytes: 512 B, 64 KB, 1.5 MB (1024). */
+export function bytes(v: number): string {
+  return amount(v, 'B')
+}

@@ -2,6 +2,7 @@
 // structures derived from it in the workers (bin levels, lane index).
 import { toRows, type Table } from './columns'
 import type { TraceFiles } from './files'
+import { readText } from './tracefile'
 import { fabricGroups } from './fabrics'
 import { parseManifest, type Manifest } from './manifest'
 import type { WorkerPool } from './pool'
@@ -64,7 +65,7 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   const t0 = performance.now()
   const manifestFile = tf.files.get('manifest.json')
   if (!manifestFile) throw new Error('no manifest.json')
-  const manifest = parseManifest(await manifestFile.text())
+  const manifest = parseManifest(await readText(manifestFile))
   const reader = new TraceReader(tf.files, pool)
   // A trace before format 1.2 has `bridges` in place of `links` (read as links below).
   const legacy = !reader.has('links') && reader.has('bridges')

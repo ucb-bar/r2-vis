@@ -1,12 +1,18 @@
-// Parquet footers and row-group byte ranges, read from a File by slices.
+// Parquet footers and row-group byte ranges, read from a trace file by byte ranges.
 import { parquetMetadata, type FileMetaData } from 'hyparquet'
+import { readRange, type TraceFile } from '../tracefile'
 
-export async function readFooter(file: Blob): Promise<FileMetaData> {
+/** Bytes read from the end of a file at first: most footers fit, so one read (one request
+ * for a served file) gets the length and the footer. */
+const TAIL_BYTES = 64 * 1024
+
+export async function readFooter(file: TraceFile): Promise<FileMetaData> {
   const size = file.size
-  const tail = new DataView(await file.slice(size - 8).arrayBuffer())
-  const len = tail.getUint32(0, true)
+  const first = Math.max(0, size - TAIL_BYTES)
+  const tailBuf = await readRange(file, first, size)
+  const len = new DataView(tailBuf).getUint32(tailBuf.byteLength - 8, true)
   const start = size - 8 - len
-  const footer = await file.slice(start).arrayBuffer()
+  const footer = start >= first ? tailBuf.slice(start - first) : await readRange(file, start, size)
   // parquetMetadata expects the end of the file; give it footer + its length + magic.
   return parquetMetadata(footer)
 }

@@ -4,10 +4,11 @@
 // are also grouped by (lane, task kind) and by task kind (a program stays its own group,
 // no owner is one group), for the queries with more owners than flightlines.
 import { isDict, type Column } from './parquet/decode'
+import { fileKey, type TraceFile } from './tracefile'
 
 export interface AttributionRequest {
-  usage: File | null
-  charges: File
+  usage: TraceFile | null
+  charges: TraceFile
   resources: number[]
   /** an instant (t), else the range [a, b) */
   t: number | null
@@ -18,7 +19,7 @@ export interface AttributionRequest {
   blocks: { t0: number; t1: number; maxEnd: number }[]
   /** tasks.parquet (the lane and kind of each owner) and the opcode names (the kind of a
    * task without a label kind) */
-  tasks: File
+  tasks: TraceFile
   opcodes: string[]
   /** per real resource: the virtual id of its rate class 0, else -1 (views-design 7.2) */
   classBase?: Int32Array
@@ -64,9 +65,9 @@ export interface Attribution {
 }
 
 /** Reads columns of one row group of a file (the worker's decoder). */
-export type ReadGroup = (name: string, file: File, group: number, columns: string[]) => Promise<Record<string, Column>>
+export type ReadGroup = (name: string, file: TraceFile, group: number, columns: string[]) => Promise<Record<string, Column>>
 /** The resource range of each row group of a file (from its footer statistics). */
-export type GroupRanges = (name: string, file: File, column: string) => Promise<[number, number][]>
+export type GroupRanges = (name: string, file: TraceFile, column: string) => Promise<[number, number][]>
 
 const ownerOf = (gid: number, program: number) => (gid >= 0 ? gid : program >= 0 ? -2 - program : -1)
 
@@ -83,7 +84,7 @@ export function resetAttribution(): void {
 /** The task kinds of tasks.parquet, read once per trace: the label field kind, else the
  * opcode name. */
 function readTaskKinds(req: AttributionRequest, read: ReadGroup, groups: number): Promise<TaskKinds> {
-  const key = `${req.tasks.name}|${req.tasks.size}|${req.tasks.lastModified}`
+  const key = fileKey(req.tasks)
   if (taskKinds?.key === key) return taskKinds.value
   const value = (async () => {
     const parts: Record<string, Column>[] = []
@@ -269,7 +270,7 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
 // ---- reverse attribution (views-design 7.1): the usage of selected tasks ----------------
 
 export interface UsageRequest {
-  charges: File
+  charges: TraceFile
   blocks: { t0: number; t1: number; maxEnd: number }[]
   /** the selected tasks: gid and lifetime [a, b) (their charges lie in it) */
   tasks: { gid: number; a: number; b: number }[]
