@@ -10,13 +10,15 @@ import { OpenPanel } from './ui/OpenPanel'
 import { LoadReport } from './ui/LoadReport'
 import { Workspace } from './ui/Workspace'
 import { ThemeToggle } from './ui/ThemeToggle'
-import { parseSourceMap, type SourceMap } from './source/srcmap'
+import { parseSourceMap } from './source/srcmap'
+import type { LoadedMap } from './source/links'
 import { fetchIndex, parseServerUrl, resetWhole, servedFiles, traceUrl, type ServedTrace } from './data/tracefile'
 import { bytes } from './ui/format'
 import { SourceView } from './source/SourceView'
 
-/** A source map in memory (the Source view; no link to a trace yet). */
-export interface OpenSourceMap { map: SourceMap | null; name: string; error: string | null }
+/** The source maps in memory (the Source view), in the order opened; the error of the last
+ * open. A run can use the images of several crates, one map each. */
+export interface OpenSourceMap { maps: LoadedMap[]; error: string | null }
 
 type State =
   | { kind: 'idle' }
@@ -32,12 +34,18 @@ export function App() {
   const [state, setState] = useState<State>({ kind: 'idle' })
   const poolRef = useRef<WorkerPool | null>(null)
   const [showLoad, setShowLoad] = useState(false)
-  const [src, setSrc] = useState<OpenSourceMap>({ map: null, name: '', error: null })
+  const [src, setSrc] = useState<OpenSourceMap>({ maps: [], error: null })
   // The traces of an r2t-serve base URL, listed on the start page.
   const [served, setServed] = useState<{ base: string; traces: ServedTrace[] } | null>(null)
+  /** Adds a source map; a map with the same file name replaces the old one. */
   const openSourceMap = async (file: File) => {
     try {
-      setSrc({ map: parseSourceMap(await file.text(), file.name), name: file.name, error: null })
+      const map = parseSourceMap(await file.text(), file.name)
+      setSrc((s) => {
+        const at = s.maps.findIndex((m) => m.name === file.name)
+        const maps = at < 0 ? [...s.maps, { name: file.name, map }] : s.maps.map((m, k) => (k === at ? { name: file.name, map } : m))
+        return { maps, error: null }
+      })
     } catch (err) {
       setSrc((s) => ({ ...s, error: String((err as Error).message ?? err) }))
     }
@@ -89,6 +97,9 @@ export function App() {
     }
   }
 
+  // The views of an open trace read the maps from its store (task tooltips, Show source).
+  useEffect(() => { if (state.kind === 'loaded') state.store.sourceMaps.set(src.maps) }, [state, src.maps])
+
   useEffect(() => {
     window.__r2vis = { ...window.__r2vis, open, openSourceMap, openUrl }
     const fromHash = new URLSearchParams(location.hash.slice(1)).get('trace')
@@ -119,21 +130,21 @@ export function App() {
             Loaded in {Math.round(state.trace.load.totalMs)} ms
           </button>
         )}
-        {(state.kind === 'loaded' || src.map) && <OpenPanel compact onFiles={onFiles} onDrop={onDrop} />}
+        {(state.kind === 'loaded' || src.maps.length > 0) && <OpenPanel compact onFiles={onFiles} onDrop={onDrop} />}
         <ThemeToggle />
       </header>
       <main className="main">
-        {state.kind !== 'loaded' && src.map && (
+        {state.kind !== 'loaded' && src.maps.length > 0 && (
           <div className="workspace">
             <nav className="tabs"><button className="tab active">Source</button></nav>
             <div className="workspace-body">
               <div className="pane" style={{ display: 'flex', flex: '1 1 auto' }}>
-                <SourceView map={src.map} name={src.name} error={src.error} onOpen={(f) => void openSourceMap(f)} />
+                <SourceView maps={src.maps} error={src.error} onOpen={(f) => void openSourceMap(f)} />
               </div>
             </div>
           </div>
         )}
-        {state.kind !== 'loaded' && !src.map && (
+        {state.kind !== 'loaded' && !src.maps.length && (
           <OpenPanel onFiles={onFiles} onDrop={onDrop} onSourceMap={(f) => void openSourceMap(f)} onUrl={(u) => void openUrl(u)}>
             {served && state.kind !== 'loading' && (
               <table className="served">

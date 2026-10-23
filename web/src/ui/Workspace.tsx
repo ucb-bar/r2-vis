@@ -33,6 +33,8 @@ export function Workspace({ trace, charges, pool, store, source, onOpenSource }:
     window.__r2workbench = bench
     // A task shown from another view goes to a Timeline area (state/workbench.ts).
     const offReveal = store.reveal.subscribe((task) => { if (task !== null) bench.reveal(task) })
+    // A task's item shown in a Source area ("Show source" in the timeline).
+    const offSource = store.showSource.subscribe((task) => { if (task !== null) bench.showSource(task) })
     // ctrl+space maximizes the area under the pointer (else the last used one), or restores it.
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.code !== 'Space') return
@@ -47,7 +49,7 @@ export function Workspace({ trace, charges, pool, store, source, onOpenSource }:
     // The control data of the Instant views, built when the page is idle (the first
     // Instant area then mounts faster).
     const idle = requestIdleCallback(() => prepareControl(trace, pool), { timeout: 3000 })
-    return () => { offReveal(); window.removeEventListener('keydown', onKey); cancelIdleCallback(idle) }
+    return () => { offReveal(); offSource(); window.removeEventListener('keydown', onKey); cancelIdleCallback(idle) }
   }, [bench, store, trace, pool])
 
   return (

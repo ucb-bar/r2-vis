@@ -288,6 +288,12 @@ html, body { overscroll-behavior: none; }
 .src-trips { all: unset; cursor: pointer; margin-left: var(--space-2); color: var(--color-accent); font-variant-numeric: tabular-nums; }
 .src-trips:hover { text-decoration: underline; }
 .src-dep, .src-program { font-size: var(--font-size-xs); }
+.src-tasks { font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
+.source-missing {
+  padding: var(--space-2) var(--space-4); border-bottom: var(--border-width) solid var(--color-border);
+  border-left: 3px solid var(--color-warning); color: var(--color-ink);
+}
+.source-empty .source-missing { border-bottom: 0; }
 .badge.warn { color: var(--color-ink); border-color: var(--color-warning); }
 .badge.muted { color: var(--color-ink-muted); }
 .src-desc { padding-bottom: var(--space-2); }

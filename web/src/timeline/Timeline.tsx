@@ -12,6 +12,8 @@ import { Section, Sidebar, Subhead } from '../ui/Sidebar'
 import { OTHER } from './colors'
 import { Minimap } from './Minimap'
 import { Tooltip, type TipContent } from '../ui/Tooltip'
+import { taskName } from '../data/labels'
+import { linkFor } from '../source/links'
 import { AXIS, GUTTER, MAX_SMOOTH, MODE_NAME, TimelineRenderer, type AttributeTo } from './renderer'
 import { DRAG_PX, TimeInput } from './timeinput'
 
@@ -81,12 +83,10 @@ type Drag =
   | { kind: 'label'; row: number; x0: number; y0: number; moved: boolean; additive: boolean }
   | { kind: 'group'; row: number; button: number; x0: number; y0: number }
 
-interface Menu {
-  x: number
-  y: number
-  node: number
-  items: { key: string; label: string }[]
-}
+/** A context menu: a group header's hidden rows, or a task of an RV program (its source). */
+type Menu =
+  | { x: number; y: number; kind: 'group'; node: number; items: { key: string; label: string }[] }
+  | { x: number; y: number; kind: 'task'; task: number; missing: string | null }
 
 /** The timeline view. Input:
  * - wheel scrolls the rows; ctrl+wheel (trackpad pinch, ctrl+mouse wheel) zooms around the
@@ -97,7 +97,8 @@ interface Menu {
  * - a click on a row label selects the row (ctrl or shift adds); Delete or Backspace hides
  *   the selected rows; dragging a label moves the row inside its node group; dragging a
  *   row's lower edge in the labels resizes it (double-click resets);
- * - a click on a group header collapses it; a right-click lists its hidden rows. */
+ * - a click on a group header collapses it; a right-click lists its hidden rows;
+ * - a right-click on a task of an RV program offers its source (Show source). */
 export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTarget, onRenderer }: Props) {
   const scroller = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -287,6 +288,13 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
         return false
       },
       plotRightClick: (x, y) => {
+        setHover(x, y)
+        const task = renderer.hoveredTask()
+        const at = task >= 0 ? linkFor(trace, store.sourceMaps.get()).locate(task) : null
+        if (at) {
+          setMenu({ x, y: y + el.scrollTop, kind: 'task', task, missing: 'missing' in at ? at.missing : null })
+          return
+        }
         const i = renderer.rowAtY(y)
         if (i >= 0 && renderer.model.rows[i].kind === 'group') openMenu(renderer.model.rows[i].id, x, y)
       },
@@ -400,7 +408,7 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
     }
 
     const openMenu = (node: number, x: number, y: number) => {
-      setMenu({ x, y: y + el.scrollTop, node, items: renderer.hiddenOf(node) })
+      setMenu({ x, y: y + el.scrollTop, kind: 'group', node, items: renderer.hiddenOf(node) })
     }
 
     const onDouble = (e: MouseEvent) => {
@@ -494,7 +502,15 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
                 right: tip.x > renderer.width - 440 ? renderer.width - tip.x + 14 : undefined,
                 top: tip.y + 14 + (scroller.current?.scrollTop ?? 0) }} />
             )}
-            {menu && (
+            {menu?.kind === 'task' && (
+              <div className="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
+                <div className="menu-title">{taskName(trace, menu.task)}</div>
+                <button className="menu-item" onClick={() => { store.showSource.set(menu.task); setMenu(null) }}>
+                  {menu.missing === null ? 'Show source' : `Open the source map of ${menu.missing}`}
+                </button>
+              </div>
+            )}
+            {menu?.kind === 'group' && (
               <div className="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
                 <div className="menu-title">{String(trace.dims.nodes[menu.node].path)}</div>
                 {menu.items.length === 0 && <div className="menu-empty">no hidden rows</div>}

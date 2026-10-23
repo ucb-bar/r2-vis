@@ -48,7 +48,8 @@ export interface Item {
 export interface Program {
   program: string
   node: string
-  image: { elf: string; entry: string; bytes: number }
+  /** sha256: of the IMEM image, lowercase hex (a trace names its images by it) */
+  image: { elf: string; entry: string; bytes: number; sha256?: string }
   items: Item[]
   notes?: string[]
 }

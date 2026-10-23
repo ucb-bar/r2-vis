@@ -2,6 +2,7 @@
 // window, the cursor (an instant, set by a click) or the range selection (set by a drag),
 // which exclude each other, the task selection and smoothing. Each Timeline area has its
 // own node set (state/workbench.ts); `targetBlocks` is the one the block diagram edits.
+import type { LoadedMap } from '../source/links'
 import { BlockSelection } from './blocks'
 import { Store } from './store'
 
@@ -27,6 +28,10 @@ export class ViewStore {
   /** A request to show a task (task row) in the timeline and select it: the timeline
    * scrolls and pans to it, the workspace switches to the timeline. */
   readonly reveal = new Store<number | null>(null)
+  /** The loaded source maps (the app's; set when they change). */
+  readonly sourceMaps = new Store<LoadedMap[]>([])
+  /** A request to show a task's item (by its pc) in a Source area (state/workbench.ts). */
+  readonly showSource = new Store<number | null>(null)
   /** The node set of the target timeline (the block diagram shows and edits it). */
   readonly targetBlocks: Store<BlockSelection>
   readonly endTime: number

@@ -56,6 +56,9 @@ export interface Trace {
    * realResources: the number of real resources. */
   classBase: Int32Array
   realResources: number
+  /** The RV images that programs ran (format 1.9; empty before): id, file, imem, bytes,
+   * sha256, programs. programs.image and tasks.program, tasks.pc link tasks to them. */
+  images: Row[]
   load: LoadStats
 }
 
@@ -101,6 +104,7 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   const realResources = dims.resources.length
   const rateClasses = reader.has('rate_classes') ? toRows(await reader.readColumns('rate_classes', null)) : []
   const classBase = addClassResources(dims, rateClasses)
+  const images = reader.has('images') ? toRows(await reader.readColumns('images', null)) : []
 
   const t1 = performance.now()
   const bins = facts.bins.cols
@@ -134,7 +138,7 @@ export async function loadTrace(tf: TraceFiles, pool: WorkerPool, progress: Prog
   levels.origin = manifest.bins.origin ?? 0
   if (levels.fabric) levels.fabric.origin = levels.origin
   const fabricRow = new Map(fg.paths.map((p, g) => [p, g]))
-  return { name: tf.name, reader, manifest, dims, facts, levels, lanes, fabricRow, load, classBase, realResources }
+  return { name: tf.name, reader, manifest, dims, facts, levels, lanes, fabricRow, load, classBase, realResources, images }
 }
 
 /** A resource's capacity in slots per core cycle (format 1.6), or its lanes (1.1 to 1.5),

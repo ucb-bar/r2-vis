@@ -21,6 +21,7 @@ import { homeRange, MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, recorded, recordedAt, record
 import { chargesAmount, lanesHeld, rangeAmount, sampleBins, sampleCharges, sampleFabric, smooth } from './util'
 import { AXIS, GUTTER, TimeAxis, type Range } from './axis'
 import { tickStep, type Viewport } from './viewport'
+import { taskSource } from '../source/links'
 
 export { AXIS, GUTTER, type Range } from './axis'
 const LINE_PAD = 4
@@ -1757,6 +1758,8 @@ export class TimelineRenderer {
     const sub = [`gid ${num_('gid')}`]
     if (version !== null && !name.endsWith(` v${version}`)) sub.push(`v${version}`)
     if ((c.untracked as Uint8Array | undefined)?.[task] === 1) sub.push('untracked')
+    const src = taskSource(this.trace, task)
+    if (src) sub.push(src.name, `pc 0x${src.pc.toString(16)}`)
     return { title: name, sub: sub.join(' · '), sections: [{ kind: 'rows', rows }, { kind: 'rows', rows: links }] }
   }
 

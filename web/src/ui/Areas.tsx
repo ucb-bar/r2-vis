@@ -219,7 +219,8 @@ const AreaContent = memo(function AreaContent({ id, view, shared, strip }: Conte
   } else if (view === 'instant') {
     body = <InstantView trace={trace} charges={charges} store={store} strip={strip} pool={pool} />
   } else {
-    body = <SourceView map={source.map} name={source.name} error={source.error} onOpen={onOpenSource} />
+    body = <SourceView maps={source.maps} error={source.error} onOpen={onOpenSource} trace={trace} store={store}
+      request={bench.sourceRequests(id)} />
   }
   return <AreaContext.Provider value={api}>{body}</AreaContext.Provider>
 })

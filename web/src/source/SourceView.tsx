@@ -1,21 +1,30 @@
 // The Source view (r2-toolchain docs/source-map.md, version 1): a Neutrino program from its
-// source map, as an outline of its items (left) and its source (right). It fills the
-// container it gets.
+// source map, as an outline of its items (left) and its source (right). It holds the
+// programs of all loaded maps. With a trace open, an invoke shows its tasks (by pc), and a
+// task's "Show source" selects its item (source/links.ts). It fills the container it gets.
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { Trace } from '../data/trace'
+import type { Store } from '../state/store'
+import type { ViewStore } from '../state/viewstore'
 import { SOURCE_OP_SLOT } from '../timeline/colors'
 import { count } from '../ui/format'
 import { Tooltip, tipPlace, type TipContent } from '../ui/Tooltip'
 import { tokenizeRust, type Token } from './rust'
+import { itemPcs, linkFor, programIndex, type LoadedMap, type MapProgram } from './links'
 import {
-  DepIndex, firstValue, indexProgram, innermostAt, isPerTrip, seenCalls, splitAddress, tripCount, tripEntries,
+  DepIndex, firstValue, innermostAt, isPerTrip, seenCalls, splitAddress, tripCount, tripEntries,
   type DepLink, type Field, type Node, type SourceMap, type Trips,
 } from './srcmap'
 
 interface Props {
-  map: SourceMap | null
-  name: string
+  maps: LoadedMap[]
   error?: string | null
   onOpen: (file: File) => void
+  /** the open trace: task counts per item, the status of each program against the run */
+  trace?: Trace
+  store?: ViewStore
+  /** tasks whose item to show (its pc), routed to this area */
+  request?: Store<number | null>
 }
 
 const SPLIT_KEY = 'r2vis.source.split'
@@ -38,7 +47,7 @@ const opColor = (op: string | undefined) => (opSlot(op) === 8 ? 'var(--series-ot
 const openByDefault = (n: Node) => n.item.kind === 'function' || n.item.kind === 'loop' || n.item.kind === 'closure'
 const expandable = (n: Node) => n.children.length > 0 || n.item.kind === 'invoke' || n.item.kind === 'scalar' || n.item.kind === 'wait'
 
-export function SourceView({ map, name, error, onOpen }: Props) {
+export function SourceView({ maps, error, onOpen, trace, store, request }: Props) {
   const [pi, setPi] = useState(0)
   const [sel, setSel] = useState<Map<number, string>>(new Map())
   const [toggled, setToggled] = useState<Set<string>>(new Set())
@@ -50,8 +59,22 @@ export function SourceView({ map, name, error, onOpen }: Props) {
   const body = useRef<HTMLDivElement>(null)
   const drag = useRef(false)
   const input = useRef<HTMLInputElement>(null)
+  const outline = useRef<HTMLDivElement>(null)
+  // A "Show source" request waits here until a loaded map holds the task's program.
+  const [pending, setPending] = useState<number | null>(null)
+  const [missing, setMissing] = useState<string | null>(null)
 
-  useEffect(() => { setPi(0); setSel(new Map()); setToggled(new Set()); setTables(new Set()); setFileIdx(0) }, [map])
+  // The programs of all loaded maps, in map order.
+  const entries = useMemo(() => maps.flatMap((m, mi) => m.map.programs.map((p, k) => ({ mi, pi: k, m, p }))), [maps])
+  const link = useMemo(() => (trace ? linkFor(trace, maps) : null), [trace, maps])
+  const entryOf = (mp: MapProgram) => entries.findIndex((e) => e.mi === mp.mi && e.pi === mp.pi)
+
+  useEffect(() => {
+    if (!request) return
+    const take = (task: number | null) => { if (task !== null) { setPending(task); request.set(null) } }
+    take(request.get())
+    return request.subscribe(take)
+  }, [request])
   useEffect(() => {
     const move = (e: PointerEvent) => {
       if (!drag.current || !body.current) return
@@ -68,22 +91,59 @@ export function SourceView({ map, name, error, onOpen }: Props) {
     return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
   }, [split])
 
-  const program = map?.programs[pi] ?? null
-  const index = useMemo(() => (program ? indexProgram(program) : null), [program])
+  const entry = entries[Math.min(pi, entries.length - 1)] ?? null
+  const map = entry?.m.map ?? null
+  const name = entry?.m.name ?? ''
+  const program = entry?.p ?? null
+  const index = useMemo(() => (program ? programIndex(program) : null), [program])
   const deps = useMemo(() => (index ? new DepIndex(index.all, map?.granule) : null), [index, map])
-  const tokens = useMemo(() => map?.files.map((f) => tokenizeRust(f.text)) ?? [], [map])
+  const tokens = useMemo(() => (map ? tokensOf(map) : []), [map])
   const selected = index?.byId.get(sel.get(pi) ?? '') ?? null
+  const status = link && entry ? link.statusOf(entry) : null
+  const linked = status === 'match' || status === 'unverified'
+
+  // A task's item: its program and the item with its pc, the enclosing items unfolded.
+  useEffect(() => {
+    if (pending === null || !link) return
+    const at = link.locate(pending)
+    if (!at) { setPending(null); return }
+    if ('missing' in at) { setMissing(at.missing); return }
+    const k = entryOf(at.mp)
+    setPending(null)
+    setMissing(null)
+    if (k < 0) return
+    setPi(k)
+    const node = at.node
+    setSel((s) => new Map(s).set(k, node?.id ?? ''))
+    if (!node) return
+    setFileIdx(node.item.file)
+    setToggled((t) => {
+      const next = new Set(t)
+      for (let a = node.parent; a; a = a.parent) next.delete(`${k}:${a.id}`)
+      return next
+    })
+  }, [pending, link, entries])
+
+  // The selected row in view (after a request, a link or a line click).
+  useEffect(() => {
+    const el = selected ? outline.current?.querySelector<HTMLElement>(`[data-id="${selected.id}"]`) : null
+    const box = outline.current?.getBoundingClientRect()
+    const r = el?.getBoundingClientRect()
+    if (el && box && r && (r.top < box.top || r.bottom > box.bottom)) el.scrollIntoView({ block: 'center' })
+  }, [selected?.id, pi])
 
   const select = (n: Node | null) => {
     setSel((s) => new Map(s).set(pi, n?.id ?? ''))
     if (n) setFileIdx(n.item.file)
   }
+  /** A program by name: of the same map first, else of any map. */
   const goProgram = (programName: string) => {
-    const k = map?.programs.findIndex((p) => p.program === programName) ?? -1
+    let k = entries.findIndex((e) => e.mi === entry?.mi && e.p.program === programName)
+    if (k < 0) k = entries.findIndex((e) => e.p.program === programName)
     if (k < 0) return
     setPi(k)
     setSel((s) => new Map(s).set(k, '0'))
-    setFileIdx(map?.programs[k].items[0]?.file ?? 0)
+    setFileIdx(entries[k].p.items[0]?.file ?? 0)
   }
   // The fold and trip-table state, per program (item ids repeat across programs).
   const isOpen = (n: Node) => openByDefault(n) !== toggled.has(`${pi}:${n.id}`)
@@ -103,10 +163,11 @@ export function SourceView({ map, name, error, onOpen }: Props) {
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onOpen(f); e.target.value = '' }} />
     </>
   )
-  if (!map || !program || !index || !deps) {
+  const missingNote = missing && <div className="source-missing">Open the source map of <strong>{missing}</strong></div>
+  if (!map || !program || !index || !deps || !entry) {
     return (
       <div className="source-view empty" ref={host}>
-        <div className="source-empty">{picker}{error && <div className="error">{error}</div>}</div>
+        <div className="source-empty">{missingNote}{picker}{error && <div className="error">{error}</div>}</div>
       </div>
     )
   }
@@ -246,6 +307,19 @@ export function SourceView({ map, name, error, onOpen }: Props) {
     return out
   }
 
+  /** The trace tasks of an invoke or wait (by pc, over all instances of the program); a
+   * click selects them. A wait shows only a count above zero. */
+  const taskCount = (n: Node): ReactNode => {
+    if (!link || !linked || !itemPcs(n).length) return null
+    const tasks = link.tasksOf(entry, n)
+    if (!tasks.length) return n.item.kind === 'invoke' ? <span className="src-times src-tasks">0 tasks</span> : null
+    return (
+      <button className="link src-tasks" onClick={(e) => { e.stopPropagation(); store?.tasks.set(new Set(tasks)) }}>
+        {count(tasks.length)} {tasks.length === 1 ? 'task' : 'tasks'}
+      </button>
+    )
+  }
+
   const perTrip = (v: Trips<string> | undefined): ReactNode => {
     if (v === undefined || v === null) return null
     if (!isPerTrip(v)) return v as string
@@ -273,6 +347,7 @@ export function SourceView({ map, name, error, onOpen }: Props) {
         return <>
           <span className="src-kind">wait</span>
           {badges(n)}
+          {taskCount(n)}
           {k && (text === 'fence' ? <span className="src-fence">fence</span> : k.value === null || text === null ? <span className="src-unknown">?</span>
             : <>{address(k, text, tripEntries<string>(k.value).find((e) => e.value !== null)?.idx ?? [])}{isPerTrip(k.value) && <span className="src-times"> × {count(tripCount(k.value))}</span>}</>)}
           {k && depLink(k)}
@@ -285,6 +360,7 @@ export function SourceView({ map, name, error, onOpen }: Props) {
         return <>
           <span className="src-op" style={{ background: opColor(it.op) }}>{it.op}</span>
           {badges(n)}
+          {taskCount(n)}
           {it.pe !== null && it.pe !== undefined && <span className="src-pe">{perTrip(it.pe)}</span>}
           {it.program && <button className="link src-program" onClick={(e) => { e.stopPropagation(); goProgram(it.program as string) }}>→ {it.program}</button>}
           {it.child !== undefined && it.child !== null && <span className="src-pe">on {perTrip(it.child)}</span>}
@@ -342,11 +418,16 @@ export function SourceView({ map, name, error, onOpen }: Props) {
       <div className="source-head">
         <label className="tool">
           program
-          <select value={pi} onChange={(e) => { setPi(Number(e.target.value)); setFileIdx(map.programs[Number(e.target.value)].items[0]?.file ?? 0) }}>
-            {map.programs.map((p, k) => <option key={p.program} value={k}>{p.program}</option>)}
+          <select value={pi} onChange={(e) => { setPi(Number(e.target.value)); setFileIdx(entries[Number(e.target.value)].p.items[0]?.file ?? 0) }}>
+            {entries.map((e, k) => <option key={`${e.mi}:${e.pi}`} value={k}>{e.p.program}{maps.length > 1 ? ` · ${e.m.name}` : ''}</option>)}
           </select>
         </label>
         <span className="badge">{program.node}</span>
+        {status === 'stale' && <span className="badge warn src-status">does not match the run</span>}
+        {status === 'unverified' && (
+          <span className="badge muted src-status" onMouseEnter={(e) => hover(e, { title: 'unverified', sections: [{ kind: 'note', text: 'no sha256 in the map: matched by name and bytes' }] })}
+            onMouseLeave={() => setTip(null)}>unverified</span>
+        )}
         <span className="source-meta">{map.config}</span>
         <span className="source-meta">{program.image.elf}</span>
         {notes.length > 0 && (
@@ -357,8 +438,9 @@ export function SourceView({ map, name, error, onOpen }: Props) {
         <span className="source-meta">{name}</span>
         {picker}
       </div>
+      {missingNote}
       <div className="source-body" ref={body}>
-        <div className="source-outline" style={{ flex: `0 0 ${split * 100}%` }}>{rows}</div>
+        <div className="source-outline" ref={outline} style={{ flex: `0 0 ${split * 100}%` }}>{rows}</div>
         <div className="source-split" onPointerDown={(e) => { e.preventDefault(); drag.current = true }} />
         <SourcePane map={map} tokens={tokens} index={index.all} file={fileIdx} onFile={setFileIdx}
           selected={selected} onLine={(line) => select(innermostAt(index.all, fileIdx, line))} />
@@ -366,6 +448,15 @@ export function SourceView({ map, name, error, onOpen }: Props) {
       {tip && <Tooltip tip={tip.content} style={tipPlace(tip, host.current)} />}
     </div>
   )
+}
+
+const tokenCache = new WeakMap<SourceMap, Token[][][]>()
+
+/** The tokens of a map's files, made once per map. */
+function tokensOf(map: SourceMap): Token[][][] {
+  let t = tokenCache.get(map)
+  if (!t) { t = map.files.map((f) => tokenizeRust(f.text)); tokenCache.set(map, t) }
+  return t
 }
 
 /** A per-trip value at a trip index (for the address tooltip). */

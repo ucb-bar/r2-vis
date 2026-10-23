@@ -34,6 +34,8 @@ export class Workbench {
   private readonly used = new Map<string, number>()
   private clock = 0
   private readonly timelines = new Map<string, TimelineArea>()
+  /** per Source area: requests to show a task's item */
+  private readonly sources = new Map<string, Store<number | null>>()
   private readonly allNodes: BlockSelection
 
   constructor(trace: Trace, store: ViewStore, layout: Layout) {
@@ -134,6 +136,13 @@ export class Workbench {
     return t
   }
 
+  /** The requests of a Source area (a task whose item it shows). */
+  sourceRequests(id: string): Store<number | null> {
+    let s = this.sources.get(id)
+    if (!s) { s = new Store<number | null>(null); this.sources.set(id, s) }
+    return s
+  }
+
   /** Node ids from stored paths: nodes absent from this trace are dropped; if none is
    * left, all nodes. */
   private nodeIds(paths: string[] | null): number[] {
@@ -180,6 +189,8 @@ export class Workbench {
     for (const [id, t] of this.timelines) {
       if (!ids.has(id)) { t.off(); this.timelines.delete(id) }
     }
+    const all = new Set(l.workspaces.flatMap((w) => leaves(w.root)).filter((a) => a.view === 'source').map((a) => a.id))
+    for (const id of this.sources.keys()) if (!all.has(id)) this.sources.delete(id)
     const wsIds = new Set(l.workspaces.map((w) => w.id))
     for (const id of this.mounted) if (!wsIds.has(id)) this.mounted.delete(id)
   }
@@ -337,24 +348,41 @@ export class Workbench {
   /** Shows a task in the most recently used Timeline area of the active workspace; if it
    * has none, in the default Timeline workspace (added again if it was deleted). */
   reveal(task: number): void {
+    const id = this.route('timeline', 'timeline', () => ({ name: 'Timeline', root: { kind: 'area', id: newId('a'), view: 'timeline' } }))
+    if (id) this.timeline(id).reveal.set(task)
+  }
+
+  /** Shows a task's item in the most recently used Source area of the active workspace; if
+   * it has none, in the default Source + Timeline workspace (added again if deleted). */
+  showSource(task: number): void {
+    const id = this.route('source', 'source-timeline', () => ({ name: 'Source + Timeline',
+      root: { kind: 'split', dir: 'row', ratio: 0.5, a: { kind: 'area', id: newId('a'), view: 'source' },
+        b: { kind: 'area', id: newId('a'), view: 'timeline' } } }))
+    if (id) this.sourceRequests(id).set(task)
+  }
+
+  /** The area that a request for a view goes to: the most recently used one of that view in
+   * the active workspace, else the first one in the default workspace `base` (made by
+   * `make` if there is none), which is shown; a maximized other area is restored. */
+  private route(view: ViewType, base: string, make: () => { name: string; root: LayoutNode }): string | null {
+    const of = (ws: WorkspaceDef) => leaves(ws.root).filter((l) => l.view === view)
     let ws = this.active
-    let leaf = this.latest(this.timelineLeaves(ws))
+    let leaf = this.latest(of(ws))
     if (!leaf) {
-      let found = this.defaultTimeline()
+      const all = this.layout.get().workspaces
+      let found = [...all.filter((w) => w.base === base), ...all].find((w) => of(w).length)
       if (!found) {
-        const added: WorkspaceDef = { id: newId('w'), name: 'Timeline', base: 'timeline',
-          root: { kind: 'area', id: newId('a'), view: 'timeline' } as LayoutNode }
+        const added: WorkspaceDef = { id: newId('w'), base, ...make() }
         this.update((l) => ({ ...l, workspaces: [...l.workspaces, added] }))
-        found = this.defaultTimeline()
+        found = added
       }
-      if (!found) return
-      ws = found.ws
-      leaf = found.leaf
+      ws = found
+      leaf = this.latest(of(ws))
       this.activate(ws.id)
     }
+    if (!leaf) return null
     if (ws.maximized && ws.maximized !== leaf.id) this.updateWs(ws.id, (w) => ({ ...w, maximized: null }))
-    const id = leaf.id
-    this.use(id)
-    this.timeline(id).reveal.set(task)
+    this.use(leaf.id)
+    return leaf.id
   }
 }

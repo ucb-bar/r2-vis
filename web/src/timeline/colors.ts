@@ -1,7 +1,8 @@
 // Task colors: one categorical slot per label kind, opcode as the fallback. The slots are
 // chosen so that the kinds that share a lane pass the palette validator (dataviz,
 // --pairs all): DMA lanes blue/aqua, Atlas lanes yellow/magenta/green/violet, Muon orange.
-// Kinds without a slot (router, join, none, unknown) are "other" (neutral).
+// Kinds without a slot (router, join, none, unknown) are "other" (neutral). RV runs: the
+// instruction DMA's imem_copy tasks have a slot; join and spawn stay "other".
 import { isDict, type DictColumn } from '../data/columns'
 import type { Trace } from '../data/trace'
 
@@ -10,10 +11,10 @@ export const OTHER = 8
 const KIND_SLOT: Record<string, number> = {
   dma_w: 0, vec: 1, dma_act: 2, qkv: 3, attn: 4, wo: 5, ffn_gate: 6, ffn_up: 6, ffn_down: 6,
 }
-const OPCODE_SLOT: Record<string, number> = { dma: 0, 'muon.vector': 1, 'atlas.matmul': 3 }
-/** The Source view's op colors: the opcode slots, and join, spawn and imem_copy (tasks of
- * those opcodes stay "other" in the timeline). */
-export const SOURCE_OP_SLOT: Record<string, number> = { ...OPCODE_SLOT, imem_copy: 5, join: 6, spawn: 7 }
+const OPCODE_SLOT: Record<string, number> = { dma: 0, 'muon.vector': 1, 'atlas.matmul': 3, imem_copy: 5 }
+/** The Source view's op colors: the opcode slots, and join and spawn (tasks of those
+ * opcodes stay "other" in the timeline). */
+export const SOURCE_OP_SLOT: Record<string, number> = { ...OPCODE_SLOT, join: 6, spawn: 7 }
 
 export interface LegendEntry {
   slot: number
