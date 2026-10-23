@@ -16,12 +16,14 @@ interface Props {
 }
 
 /** The block diagram view: wheel (or pinch) zooms around the cursor, drag pans,
- * double-click zooms to a box, the box toggle adds or removes it from the timeline. */
+ * double-click zooms to a box, the box toggle adds or removes it from the target timeline
+ * (the most recently used one, state/workbench.ts). */
 export function BlockView({ trace, store }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const [renderer] = useState(() => new BlockRenderer(trace, store.blocks, store.window.get(), readTheme()))
   const [checked, setChecked] = useState(store.blocks.get())
+  const requestRef = useRef<() => void>(() => {})
   const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
 
   useEffect(() => {
@@ -34,6 +36,7 @@ export function BlockView({ trace, store }: Props) {
     // Hidden tab: no drawing; the resize when it is shown draws again.
     const draw = () => { frame = 0; if (el.clientWidth > 0) renderer.draw(ctx, dpr) }
     const request = () => { if (!frame) frame = requestAnimationFrame(draw) }
+    requestRef.current = request
     const resize = () => {
       const w = el.clientWidth
       const h = el.clientHeight
@@ -50,7 +53,6 @@ export function BlockView({ trace, store }: Props) {
     ro.observe(el)
     resize()
     const offWindow = store.window.subscribe((w) => { renderer.setWindow(w); request() })
-    const offBlocks = store.blocks.subscribe((b) => { setChecked(b); request() })
     const offTheme = onThemeChange(() => { renderer.theme = readTheme(); request() })
     const pos = (e: MouseEvent) => {
       const r = cv.getBoundingClientRect()
@@ -122,7 +124,6 @@ export function BlockView({ trace, store }: Props) {
     return () => {
       ro.disconnect()
       offWindow()
-      offBlocks()
       offTheme()
       cv.removeEventListener('wheel', onWheel)
       cv.removeEventListener('pointerdown', onDown)
@@ -132,6 +133,21 @@ export function BlockView({ trace, store }: Props) {
       cv.removeEventListener('mouseleave', onLeave)
       if (frame) cancelAnimationFrame(frame)
     }
+  }, [renderer, store])
+
+  // The node set of the target timeline, and its changes.
+  useEffect(() => {
+    let offSet = () => {}
+    const follow = (sel: typeof renderer.blocks) => {
+      offSet()
+      renderer.blocks = sel
+      setChecked(sel.get())
+      requestRef.current()
+      offSet = sel.subscribe((b) => { setChecked(b); requestRef.current() })
+    }
+    follow(store.targetBlocks.get())
+    const offTarget = store.targetBlocks.subscribe(follow)
+    return () => { offTarget(); offSet() }
   }, [renderer, store])
 
   const inTimeline = trace.dims.nodes.filter((n) => checked.has(n.id as number))

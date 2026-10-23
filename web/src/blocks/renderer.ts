@@ -38,7 +38,8 @@ const STRIP_LINE: Record<Exclude<StripKind, 'programs'>, string> = {
 
 export class BlockRenderer {
   readonly trace: Trace
-  readonly blocks: BlockSelection
+  /** the node set of the target timeline (the boxes it shows are marked) */
+  blocks: BlockSelection
   readonly metrics: BlockMetrics
   root: Box
   aspect = 1.6

@@ -1,6 +1,7 @@
 // The state that all views share (views-design Sections 1 and 7): the timeline's time
 // window, the cursor (an instant, set by a click) or the range selection (set by a drag),
-// which exclude each other, the block selection and smoothing.
+// which exclude each other, the task selection and smoothing. Each Timeline area has its
+// own node set (state/workbench.ts); `targetBlocks` is the one the block diagram edits.
 import { BlockSelection } from './blocks'
 import { Store } from './store'
 
@@ -26,17 +27,23 @@ export class ViewStore {
   /** A request to show a task (task row) in the timeline and select it: the timeline
    * scrolls and pans to it, the workspace switches to the timeline. */
   readonly reveal = new Store<number | null>(null)
-  readonly blocks: BlockSelection
+  /** The node set of the target timeline (the block diagram shows and edits it). */
+  readonly targetBlocks: Store<BlockSelection>
   readonly endTime: number
 
   /** `home`: the window shown first (the recorded window of a windowed dump) */
   constructor(nodeIds: number[], endTime: number, home?: TimeRange) {
-    this.blocks = new BlockSelection(nodeIds)
+    this.targetBlocks = new Store(new BlockSelection(nodeIds))
     this.endTime = endTime
     this.window = new Store<TimeRange>(home ?? { a: 0, b: endTime })
     // The cursor and the range exclude each other: setting one clears the other.
     this.cursor.subscribe((c) => { if (c && this.range.get()) this.range.set(null) })
     this.range.subscribe((r) => { if (r && this.cursor.get()) this.cursor.set(null) })
+  }
+
+  /** The node set of the target timeline. */
+  get blocks(): BlockSelection {
+    return this.targetBlocks.get()
   }
 
   /** What an instant view shows: the cursor, else the range, else the window. */

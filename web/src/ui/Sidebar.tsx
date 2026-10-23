@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
+import { useAreaState } from './area'
 
 const KEY = 'r2vis.sidebar'
 const MIN_WIDTH = 180
@@ -26,10 +27,11 @@ function save(key: string, s: Saved): void {
 }
 
 /** The right sidebar: resizable by its left edge (at least 180 px), collapsible to a thin
- * strip; its width and state persist (per `name`: each view keeps its own). */
+ * strip. Each area keeps its own width and state; a new area starts from the last ones set
+ * (per `name`: each view keeps its own). */
 export function Sidebar({ children, name = '', width = 260 }: { children: ReactNode; name?: string; width?: number }) {
   const key = name ? `${KEY}.${name}` : KEY
-  const [state, setState] = useState<Saved>(() => load(key, width))
+  const [state, setState] = useAreaState<Saved>(`sidebar.${name}`, () => load(key, width))
   const drag = useRef<{ x: number; w: number } | null>(null)
   useEffect(() => save(key, state), [key, state])
   useEffect(() => {
@@ -42,7 +44,7 @@ export function Sidebar({ children, name = '', width = 260 }: { children: ReactN
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
-  }, [])
+  }, [setState])
   if (state.collapsed) {
     return (
       <aside className="sidebar collapsed">
@@ -59,10 +61,11 @@ export function Sidebar({ children, name = '', width = 260 }: { children: ReactN
   )
 }
 
-/** A titled sidebar section; a click on the title collapses it (kept per `view` and title). */
+/** A titled sidebar section; a click on the title collapses it (kept per area, `view` and
+ * title; a new area starts from the last state set). */
 export function Section({ title, view = '', children }: { title: string; view?: string; children: ReactNode }) {
   const key = `${KEY}.section.${view}.${title}`
-  const [open, setOpen] = useState(() => {
+  const [open, setOpen] = useAreaState(`section.${view}.${title}`, () => {
     try { return localStorage.getItem(key) !== 'closed' } catch { return true }
   })
   const toggle = () => {

@@ -260,13 +260,11 @@ export class TimelineRenderer {
   }
 
   prefs(): ViewPrefs {
-    const checked = this.blocks.get()
     return {
       hidden: [...this.hidden],
       heights: Object.fromEntries(this.heights),
       order: Object.fromEntries(this.order),
       smoothing: this.smoothing,
-      uncheckedBlocks: this.trace.dims.nodes.filter((n) => !checked.has(n.id as number)).map((n) => String(n.path)),
     }
   }
 
@@ -275,10 +273,6 @@ export class TimelineRenderer {
     this.heights = new Map(Object.entries(p.heights))
     this.order = new Map(Object.entries(p.order))
     this.smoothing = Math.max(1, Math.min(MAX_SMOOTH, Math.round(p.smoothing)))
-    const unchecked = new Set(p.uncheckedBlocks)
-    const ids = this.trace.dims.nodes.filter((n) => !unchecked.has(String(n.path))).map((n) => n.id as number)
-    const current = this.blocks.get()
-    if (ids.length !== current.size || ids.some((id) => !current.has(id))) this.blocks.set(new Set(ids))
     if (notify) this.changed()
   }
 
@@ -286,6 +280,8 @@ export class TimelineRenderer {
     this.collapsed = this.source.initialCollapsed()
     this.selection = null
     this.selectedRows.clear()
+    const ids = this.trace.dims.nodes.map((n) => n.id as number)
+    if (this.blocks.get().size !== ids.length) this.blocks.set(new Set(ids))
     this.applyPrefs(DEFAULT_PREFS)
   }
 

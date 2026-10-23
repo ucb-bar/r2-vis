@@ -1,16 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
-import { BlockView } from '../blocks/BlockView'
+// The workspaces of an open trace: the tabs at the top (a click shows one, a double click
+// renames it, a drag moves it; add a copy, delete, reset all) and the areas of each one
+// (ui/Areas.tsx). A workspace shown once stays mounted, so its areas keep their state.
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChargeCache } from '../data/charges'
+import { prepareControl } from '../control/ControlView'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
+import { leaves, loadLayout, type WorkspaceDef } from '../state/layout'
 import type { ViewStore } from '../state/viewstore'
-import type { TimelineRenderer } from '../timeline/renderer'
-import { Timeline } from '../timeline/Timeline'
-import { InstantView } from './InstantView'
-import { SourceView } from '../source/SourceView'
+import { Workbench } from '../state/workbench'
 import type { OpenSourceMap } from '../App'
-
-type Tab = 'timeline' | 'blocks' | 'instant' | 'source'
+import { AreaTree, IconButton, InlineIcon, type Shared } from './Areas'
 
 interface Props {
   trace: Trace
@@ -21,66 +21,103 @@ interface Props {
   onOpenSource: (file: File) => void
 }
 
-// The design starts at the top-level device: the block diagram is the way into the
-// timeline (views-design 6.5).
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'blocks', label: 'Block diagram' },
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'instant', label: 'Instant' },
-  { id: 'source', label: 'Source' },
-]
-
-/** Tabs Block diagram / Timeline / Instant (the block diagram first). Every view stays mounted (hidden when not
- * shown), so it keeps its state. The instant view can be docked under the timeline. */
 export function Workspace({ trace, charges, pool, store, source, onOpenSource }: Props) {
-  const [tab, setTab] = useState<Tab>('blocks')
-  const [docked, setDocked] = useState(false)
-  const [timeline, setTimeline] = useState<TimelineRenderer | null>(null)
-  const [split, setSplit] = useState(0.7)
-  const body = useRef<HTMLDivElement>(null)
-  const dragging = useRef(false)
-
-  // A task shown from another view: switch to the timeline (a docked instant view stays).
-  useEffect(() => store.reveal.subscribe((task) => { if (task !== null) setTab('timeline') }), [store])
+  const [bench] = useState(() => new Workbench(trace, store, loadLayout()))
+  const layout = useSyncExternalStore((cb) => bench.layout.subscribe(cb), () => bench.layout.get())
+  useSyncExternalStore((cb) => bench.changes.subscribe(cb), () => bench.changes.get())
+  const hovered = useRef<string | null>(null)
+  const shared = useMemo<Shared>(() => ({ trace, charges, pool, store, bench, source, onOpenSource }),
+    [trace, charges, pool, store, bench, source, onOpenSource])
 
   useEffect(() => {
-    const move = (e: PointerEvent) => {
-      if (!dragging.current || !body.current) return
-      const r = body.current.getBoundingClientRect()
-      setSplit(Math.max(0.2, Math.min(0.9, (e.clientY - r.top) / r.height)))
+    window.__r2workbench = bench
+    // A task shown from another view goes to a Timeline area (state/workbench.ts).
+    const offReveal = store.reveal.subscribe((task) => { if (task !== null) bench.reveal(task) })
+    // ctrl+space maximizes the area under the pointer (else the last used one), or restores it.
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.code !== 'Space') return
+      e.preventDefault()
+      const ws = bench.active
+      const ids = leaves(ws.root).map((l) => l.id)
+      const id = ws.maximized && ids.includes(ws.maximized) ? ws.maximized
+        : hovered.current && ids.includes(hovered.current) ? hovered.current : bench.lastUsedIn(ws)
+      if (id) bench.toggleMaximized(id)
     }
-    const up = () => { dragging.current = false }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
-    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
-  }, [])
+    window.addEventListener('keydown', onKey)
+    // The control data of the Instant views, built when the page is idle (the first
+    // Instant area then mounts faster).
+    const idle = requestIdleCallback(() => prepareControl(trace, pool), { timeout: 3000 })
+    return () => { offReveal(); window.removeEventListener('keydown', onKey); cancelIdleCallback(idle) }
+  }, [bench, store, trace, pool])
 
-  const showDock = docked && tab === 'timeline'
-  const instantHere = tab === 'instant' || showDock
   return (
     <div className="workspace">
-      <nav className="tabs">
-        {TABS.map((t) => (
-          <button key={t.id} className={tab === t.id ? 'tab active' : 'tab'} onClick={() => setTab(t.id)}>{t.label}</button>
+      <WorkspaceTabs bench={bench} workspaces={layout.workspaces} active={layout.active} />
+      <div className="workspace-body areas">
+        {layout.workspaces.filter((w) => bench.mounted.has(w.id)).map((w) => (
+          <AreaTree key={w.id} ws={w} visible={w.id === layout.active} shared={shared} hovered={hovered} />
         ))}
-      </nav>
-      <div className="workspace-body" ref={body}>
-        <div className="pane" style={{ display: tab === 'timeline' ? 'flex' : 'none', flex: showDock ? `0 0 ${split * 100}%` : '1 1 auto' }}>
-          <Timeline trace={trace} charges={charges} pool={pool} store={store} docked={docked} onDock={setDocked}
-            onRenderer={setTimeline} />
-        </div>
-        {showDock && <div className="splitter" onPointerDown={(e) => { e.preventDefault(); dragging.current = true }} />}
-        <div className="pane" style={{ display: tab === 'blocks' ? 'flex' : 'none', flex: '1 1 auto' }}>
-          <BlockView trace={trace} store={store} />
-        </div>
-        <div className="pane" style={{ display: tab === 'source' ? 'flex' : 'none', flex: '1 1 auto' }}>
-          <SourceView map={source.map} name={source.name} error={source.error} onOpen={onOpenSource} />
-        </div>
-        <div className="pane" style={{ display: instantHere ? 'flex' : 'none', flex: '1 1 auto' }}>
-          <InstantView trace={trace} charges={charges} store={store}
-            strip={tab === 'instant' && timeline ? timeline : null} pool={pool} />
-        </div>
       </div>
     </div>
+  )
+}
+
+function WorkspaceTabs({ bench, workspaces, active }: { bench: Workbench; workspaces: WorkspaceDef[]; active: string }) {
+  const [editing, setEditing] = useState<string | null>(null)
+  const dragged = useRef<string | null>(null)
+  const [drop, setDrop] = useState<{ id: string; after: boolean } | null>(null)
+
+  const onDrop = (target: string, after: boolean) => {
+    const id = dragged.current
+    dragged.current = null
+    setDrop(null)
+    if (!id || id === target) return
+    const rest = workspaces.filter((w) => w.id !== id)
+    const at = rest.findIndex((w) => w.id === target)
+    bench.move(id, at + (after ? 1 : 0))
+  }
+
+  return (
+    <nav className="tabs ws-tabs">
+      {workspaces.map((w) => {
+        if (editing === w.id) {
+          return (
+            <input key={w.id} className="tab-input" aria-label="workspace name" autoFocus defaultValue={w.name}
+              onFocus={(e) => e.target.select()}
+              onBlur={(e) => { bench.rename(w.id, e.target.value); setEditing(null) }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                else if (e.key === 'Escape') setEditing(null)
+              }} />
+          )
+        }
+        const cls = ['tab', w.id === active ? 'active' : '',
+          drop?.id === w.id ? (drop.after ? 'drop-after' : 'drop-before') : ''].join(' ').trim()
+        return (
+          <button key={w.id} className={cls} data-ws={w.id} draggable
+            onClick={() => bench.activate(w.id)} onDoubleClick={() => setEditing(w.id)}
+            onDragStart={(e) => { dragged.current = w.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', w.name) }}
+            onDragEnd={() => { dragged.current = null; setDrop(null) }}
+            onDragOver={(e) => {
+              if (!dragged.current) return
+              e.preventDefault()
+              const r = e.currentTarget.getBoundingClientRect()
+              const after = e.clientX > r.left + r.width / 2
+              if (drop?.id !== w.id || drop.after !== after) setDrop({ id: w.id, after })
+            }}
+            onDrop={(e) => { e.preventDefault(); onDrop(w.id, drop?.id === w.id ? drop.after : false) }}>
+            {w.name}
+            {w.id === active && workspaces.length > 1 && (
+              <InlineIcon icon="close" tip="Delete workspace" onClick={() => bench.remove(w.id)} />
+            )}
+          </button>
+        )
+      })}
+      <IconButton icon="add" tip="Add a copy of this workspace" onClick={() => bench.addCopy()} />
+      <span className="spacer" />
+      <IconButton icon="reset" tip="Reset all workspaces" onClick={() => {
+        if (window.confirm('Reset all workspaces to the defaults?')) bench.resetAll()
+      }} />
+    </nav>
   )
 }

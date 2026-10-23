@@ -15,7 +15,7 @@ interface Props {
   trace: Trace
   charges: ChargeCache
   store: ViewStore
-  /** the timeline's renderer when the scrubber is shown (not in the docked split) */
+  /** a timeline's renderer when the scrubber is shown (the area's workspace has no Timeline area) */
   strip: TimelineRenderer | null
   pool: WorkerPool
 }

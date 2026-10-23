@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChargeCache } from '../data/charges'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
+import type { BlockSelection } from '../state/blocks'
+import type { Store } from '../state/store'
 import { sameRange, selectTask, toggleTask, type ViewStore } from '../state/viewstore'
 import { clearPrefs, loadPrefs, prefsKey, savePrefs } from '../state/viewprefs'
 import { onThemeChange, readTheme } from '../theme/theme'
@@ -18,14 +20,14 @@ interface Props {
   charges: ChargeCache
   pool: WorkerPool
   store: ViewStore
-  docked: boolean
-  onDock: (docked: boolean) => void
+  /** the nodes this timeline shows (its area's) */
+  blocks: BlockSelection
+  /** requests to show a task here (routed to this area by the workbench) */
+  reveal: Store<number | null>
+  /** this timeline handles the keyboard (Esc, Delete) */
+  isKeyTarget: () => boolean
   /** Receives the renderer (the Instant scrubber shows its minimap). */
-  onRenderer?: (renderer: TimelineRenderer) => void
-}
-
-declare global {
-  interface Window { __r2timeline?: TimelineRenderer }
+  onRenderer?: (renderer: TimelineRenderer | null) => void
 }
 
 const EDGE_PX = 3
@@ -96,8 +98,7 @@ interface Menu {
  *   the selected rows; dragging a label moves the row inside its node group; dragging a
  *   row's lower edge in the labels resizes it (double-click resets);
  * - a click on a group header collapses it; a right-click lists its hidden rows. */
-export function Timeline({ trace, charges, pool, store, docked, onDock, onRenderer }: Props) {
-  const blocks = store.blocks
+export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTarget, onRenderer }: Props) {
   const scroller = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const prefsKeyRef = useRef(prefsKey(trace.manifest))
@@ -127,10 +128,12 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
     request()
   }, [renderer, request])
 
-  useEffect(() => onRenderer?.(renderer), [renderer, onRenderer])
+  useEffect(() => {
+    onRenderer?.(renderer)
+    return () => onRenderer?.(null)
+  }, [renderer, onRenderer])
 
   useEffect(() => {
-    window.__r2timeline = renderer
     const el = scroller.current as HTMLDivElement
     const cv = canvas.current as HTMLCanvasElement
     const ctx = cv.getContext('2d', { alpha: false }) as CanvasRenderingContext2D
@@ -145,7 +148,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
     requestRef.current = () => {
       if (!frame.current) frame.current = requestAnimationFrame(draw)
     }
-    charges.onLoad = request
+    const offCharges = charges.subscribe(request)
     renderer.deps.onReady = () => { request(); updateTip() }
     renderer.onPrefs = () => savePrefs(prefsKeyRef.current, renderer.prefs())
     let mapPending = false
@@ -193,12 +196,14 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
 
     // Show a task from another view: its node in the timeline and expanded, the view
     // zoomed to it, its lane scrolled into view, the task selected. Applied when the
-    // timeline has a size (it may be in a hidden tab when the request comes).
-    let revealPending: number | null = null
+    // timeline has a size (it may be in a hidden workspace when the request comes, or the
+    // request may come before this timeline was mounted).
+    let revealPending: number | null = reveal.get()
     const applyReveal = () => {
       const task = revealPending
       if (task === null || el.clientHeight === 0) return
       revealPending = null
+      reveal.set(null)  // done: a later mount does not show it again
       const c = trace.facts.tasks.cols
       const lane = (c.lane as Int32Array)[task]
       const nodes = trace.dims.nodes
@@ -222,7 +227,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       store.tasks.set(sel)
       request()
     }
-    const offReveal = store.reveal.subscribe((task) => {
+    const offReveal = reveal.subscribe((task) => {
       if (task === null) return
       revealPending = task
       applyReveal()
@@ -414,6 +419,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       setTip(null)
     }
     const onKey = (e: KeyboardEvent) => {
+      if (!isKeyTarget()) return
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
       if (e.key === 'Escape') {
@@ -451,7 +457,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       offTasks()
       offWindow()
       offReveal()
-      charges.onLoad = null
+      offCharges()
       renderer.deps.onReady = null
       renderer.onPrefs = null
       renderer.onView = null
@@ -468,7 +474,7 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
       if (frame.current) cancelAnimationFrame(frame.current)
       frame.current = 0
     }
-  }, [renderer, charges, blocks, store, request, refresh])
+  }, [renderer, charges, blocks, reveal, isKeyTarget, store, request, refresh])
 
   const restore = (keys: string[]) => {
     renderer.restore(keys)
@@ -510,10 +516,6 @@ export function Timeline({ trace, charges, pool, store, docked, onDock, onRender
               <input type="range" min={1} max={MAX_SMOOTH} value={smoothing}
                 onChange={(e) => store.smoothing.set(Number(e.target.value))} />
               <span className="tool-value">{smoothing === 1 ? 'off' : `${smoothing} px`}</span>
-            </label>
-            <label className="tool">
-              <input type="checkbox" checked={docked} onChange={(e) => onDock(e.target.checked)} />
-              dock the instant view below
             </label>
             {pinned !== null && (
               <span className="chip">pinned at {Math.round(pinned).toLocaleString('en-US')}

@@ -36,14 +36,33 @@ const STATS: { value: Statistic; label: string }[] = [
   { value: 'at', label: 'at the cursor' }, { value: 'average', label: 'range average' }, { value: 'peak', label: 'range peak' },
 ]
 
+/** The index and the occupancy data of a trace, shared by the control views of all
+ * areas (they depend on the trace only). */
+const shared = new WeakMap<Trace, { index: ControlIndex; data: ControlData; load: Promise<void> | null }>()
+
+function controlOf(trace: Trace) {
+  let s = shared.get(trace)
+  if (!s) {
+    s = { index: new ControlIndex(trace), data: new ControlData(trace), load: null }
+    shared.set(trace, s)
+  }
+  return s
+}
+
+/** Builds the shared index and data of a trace ahead of the first control view. */
+export function prepareControl(trace: Trace, pool: WorkerPool): void {
+  const s = controlOf(trace)
+  s.load ??= s.data.load(pool)
+}
+
 /** The control instant view (views-design 6.3): the Neutrinos as a force-directed tree,
  * each filled by the pressure (occupancy / capacity) of a selected metric; a click selects
  * a Neutrino and the sidebar lists its tables and their items. */
 export function ControlView({ trace, store, pool }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
-  const index = useMemo(() => new ControlIndex(trace), [trace])
-  const data = useMemo(() => new ControlData(trace), [trace])
+  const index = useMemo(() => controlOf(trace).index, [trace])
+  const data = useMemo(() => controlOf(trace).data, [trace])
   const tree = useMemo(() => new NeutrinoTree(trace), [trace])
   const [ready, setReady] = useState(false)
   const [metricKey, setMetricKey] = useState('worst:all')
@@ -67,7 +86,8 @@ export function ControlView({ trace, store, pool }: Props) {
     window.__r2controlData = data
     window.__r2tree = tree
     let alive = true
-    data.load(pool).then(() => { if (alive) setReady(true) })
+    prepareControl(trace, pool)
+    controlOf(trace).load?.then(() => { if (alive) setReady(true) })
     let frame = 0
     let next = store.cursor.get()
     const offs = [

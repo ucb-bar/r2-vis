@@ -1,6 +1,6 @@
 // The view state that persists per trace in localStorage: hidden rows, row heights, row
-// order inside node groups, smoothing, the Blocks selection. Keyed by the run identity of
-// the manifest.
+// order inside node groups, smoothing. Keyed by the run identity of the manifest. (The
+// nodes a timeline shows are kept per area with the layout, state/layout.ts.)
 import type { Manifest } from '../data/manifest'
 
 export interface ViewPrefs {
@@ -8,10 +8,9 @@ export interface ViewPrefs {
   heights: Record<string, number>     // row key -> height in CSS px
   order: Record<string, string[]>     // node path -> row keys of its own rows, in order
   smoothing: number                   // moving-average window in pixels (1 = off)
-  uncheckedBlocks: string[]           // node paths not shown (Blocks panel)
 }
 
-export const DEFAULT_PREFS: ViewPrefs = { hidden: [], heights: {}, order: {}, smoothing: 1, uncheckedBlocks: [] }
+export const DEFAULT_PREFS: ViewPrefs = { hidden: [], heights: {}, order: {}, smoothing: 1 }
 
 /** A short stable key from the run identity (config, program, params, commit, created). */
 export function prefsKey(m: Manifest): string {
@@ -35,7 +34,6 @@ export function loadPrefs(key: string): ViewPrefs {
       heights: p.heights && typeof p.heights === 'object' ? p.heights : {},
       order: p.order && typeof p.order === 'object' ? p.order : {},
       smoothing: typeof p.smoothing === 'number' ? p.smoothing : 1,
-      uncheckedBlocks: Array.isArray(p.uncheckedBlocks) ? p.uncheckedBlocks : [],
     }
   } catch {
     return { ...DEFAULT_PREFS }
