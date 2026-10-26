@@ -10,7 +10,7 @@ import type { Store } from '../state/store'
 import type { ViewStore } from '../state/viewstore'
 import { AreaContext, useAreaState } from '../ui/area'
 import { Tooltip, tipPlace, type TipContent } from '../ui/Tooltip'
-import { linkFor, programIndex, type LoadedMap, type MapProgram, type Producer } from './links'
+import { itemPcs, linkFor, programIndex, taskSource, type LoadedMap, type MapProgram, type Producer } from './links'
 import { tokenSpans } from './parts'
 import { opColor, Readable, regionKey, type CardLinks } from './Readable'
 import { tokenizeRust, type Token } from './rust'
@@ -46,6 +46,10 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
   const [pending, setPending] = useState<number | null>(null)
   const [missing, setMissing] = useState<string | null>(null)
+  // a task whose pc no item of its program has (the build's dry run did not reach it)
+  const [noItem, setNoItem] = useState<string | null>(null)
+  // a line shown by a link (a closure's call): marked and scrolled into view
+  const [markLine, setMarkLine] = useState<{ key: string; line: number; seq: number } | null>(null)
   const host = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLInputElement>(null)
@@ -101,7 +105,29 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
     if (flip.length) setToggledList((l) => [...l.filter((x) => !flip.includes(x)), ...flip.filter((x) => !l.includes(x))])
     store?.sourceSelection.set({ map: e.m.name, program: e.p.program, id: node.id, from: me.current })
   }
-  const select = (n: Node | null) => { if (entry) show(at, n) }
+  const select = (n: Node | null) => { setNoItem(null); if (entry) show(at, n) }
+  /** Shows a line of the file shown: the regions around it open, the line marked. */
+  const goLine = (line: number) => {
+    if (!index) return
+    const inner = innermostAt(index.all, file, line)
+    const flip: string[] = []
+    for (let a: Node | null = inner; a; a = a.parent) {
+      const k2 = `${pkey}#${regionKey(a)}`
+      if (a.item.kind === 'region' && active(a) === toggled.has(k2)) flip.push(k2)
+    }
+    if (flip.length) setToggledList((l) => [...l.filter((x) => !flip.includes(x)), ...flip.filter((x) => !l.includes(x))])
+    setMarkLine({ key: pkey, line, seq: (markLine?.seq ?? 0) + 1 })
+  }
+  /** The start that gave the shown program its argument values: the spawn at args_from's pc
+   * in the starting program (of the same map first). */
+  const argsFrom = (() => {
+    const from = program?.args_from
+    if (!from || !entry) return null
+    const pc = Number(from.pc)
+    const k = [entries.findIndex((e) => e.mi === entry.mi && e.p.program === from.program), entries.findIndex((e) => e.p.program === from.program)].find((x) => x >= 0)
+    const node = k === undefined ? null : programIndex(entries[k].p).all.find((n) => itemPcs(n).includes(pc)) ?? null
+    return { program: from.program, k, node }
+  })()
   /** A program by name: of the same map first, else of any map. */
   const goProgram = (programName: string) => {
     let k = entries.findIndex((e) => e.mi === entry?.mi && e.p.program === programName)
@@ -127,6 +153,8 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
     if ('missing' in loc) { setMissing(loc.missing); return }
     setPending(null)
     setMissing(null)
+    const src = trace ? taskSource(trace, pending) : null
+    setNoItem(loc.node || !src ? null : `No item of ${src.name} has pc 0x${src.pc.toString(16)}: the build's dry run did not reach it.`)
     show(entries.findIndex((e) => e.mi === loc.mp.mi && e.pi === loc.mp.pi), loc.node)
   }, [pending, link, entries])
   useEffect(() => {
@@ -143,6 +171,10 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
     const r = el?.getBoundingClientRect()
     if (el && box && r && (r.top < box.top || r.bottom > box.bottom)) el.scrollIntoView({ block: 'center' })
   }, [selectedId, pkey, mode])
+  useEffect(() => {
+    if (!markLine || markLine.key !== pkey) return
+    scroller.current?.querySelector<HTMLElement>(`.rd-row[data-line="${markLine.line}"]`)?.scrollIntoView({ block: 'center' })
+  }, [markLine, pkey])
   useEffect(() => {
     const el = scroller.current
     if (!el || !area) return
@@ -208,6 +240,13 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
           <span className="badge muted src-status" onMouseEnter={(e) => hover(e, { title: 'unverified', sections: [{ kind: 'note', text: 'no sha256 in the map: matched by name and bytes' }] })}
             onMouseLeave={clear}>unverified</span>
         )}
+        {argsFrom && (
+          <span className="source-meta src-args-from">arguments of the first start:{' '}
+            {argsFrom.k !== undefined && argsFrom.node
+              ? <button className="link" onClick={() => show(argsFrom.k as number, argsFrom.node)}>{argsFrom.program} line {argsFrom.node.item.lines[0]}</button>
+              : argsFrom.program}
+          </span>
+        )}
         <span className="source-meta">{map.config}</span>
         <span className="source-meta">{program.image.elf}</span>
         {notes.length > 0 && (
@@ -219,12 +258,14 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
         {picker}
       </div>
       {missingNote}
+      {noItem && <div className="source-missing">{noItem}</div>}
       {mode === 'readable' ? (
         <div className="source-readable" ref={scroller}>
           <Readable program={program} roots={index.roots} lines={tokens[file] ?? []} file={file} deps={deps}
             selected={selectedId} highlight={highlight?.key === pkey ? highlight.id : null}
             isOpen={isOpen} toggle={toggle} onSelect={select} onProducer={onProducer} links={cardLinks}
-            selectTasks={(rows) => store?.tasks.set(new Set(rows))} goProgram={goProgram} hover={hover} clear={clear} />
+            selectTasks={(rows) => store?.tasks.set(new Set(rows))} goProgram={goProgram} hover={hover} clear={clear}
+            goLine={goLine} markLine={markLine?.key === pkey ? markLine.line : null} />
         </div>
       ) : (
         <SourcePane scroller={scroller} tokens={tokens} index={index.all} file={file} selected={selected}

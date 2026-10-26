@@ -1,0 +1,22 @@
+[package]
+name = "gemm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nu-abi = { path = "../../../r2-toolchain/nu-abi" }
+nu-soc = { path = "../../../r2-toolchain/nu-soc" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true
+
+[profile.dev]
+panic = "abort"
+
+# A kernel is its own workspace: it only uses the toolchain crates.
+[workspace]

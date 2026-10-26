@@ -6,3 +6,6 @@ __pycache__/
 docs/*.md
 .ruff_cache/
 web/dist/
+
+# Workload kernels: r2-build output (images, source map, cargo target)
+workloads/*/out/

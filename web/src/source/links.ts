@@ -53,6 +53,13 @@ export interface Producer {
   tasks: number[]
 }
 
+/** The pcs that a trace's tasks of an item can have: its static_pcs (every instruction the
+ * debug info places at it, reached in the dry run or not), else the dry run's pcs. */
+export function taskPcs(n: Node): number[] {
+  const s = n.item.static_pcs
+  return s ? s.map(Number).filter(Number.isFinite) : itemPcs(n)
+}
+
 const indexes = new WeakMap<Program, ReturnType<typeof indexProgram>>()
 
 /** The item tree of a program, built once per program. */
@@ -133,6 +140,18 @@ export class SourceLink {
    * distinct (program, pc) of the producing tasks, each with its map program and item (null
    * if no loaded map holds it) and the producing task rows. */
   producersOf(mp: MapProgram, n: Node, k: number): Producer[] {
+    const ck = `${this.key(mp)}:${n.id}:${k}`
+    let hit = this.producerCache.get(ck)
+    if (!hit) { hit = this.findProducers(mp, n, k); this.producerCache.set(ck, hit) }
+    return hit
+  }
+
+  /** Per item (and dependency): its tasks and producers, computed once (a large trace has
+   * hundreds of thousands of tasks; a card renders them at each fold). */
+  private readonly taskCache = new Map<string, number[]>()
+  private readonly producerCache = new Map<string, Producer[]>()
+
+  private findProducers(mp: MapProgram, n: Node, k: number): Producer[] {
     const d = this.trace.facts.deps.cols
     const consumer = d.consumer as Int32Array
     const idx = d.idx as Int32Array | Int8Array | undefined
@@ -172,9 +191,17 @@ export class SourceLink {
 
   /** The task rows of a map program's instances whose pc is one of an item's pcs. */
   tasksOf(mp: MapProgram, n: Node): number[] {
+    const ck = `${this.key(mp)}:${n.id}`
+    let hit = this.taskCache.get(ck)
+    if (!hit) { hit = this.findTasks(mp, n); this.taskCache.set(ck, hit) }
+    return hit
+  }
+
+  private findTasks(mp: MapProgram, n: Node): number[] {
     const m = this.byPc.get(this.key(mp))
     if (!m) return []
-    return itemPcs(n).flatMap((pc) => m.get(pc) ?? [])
+    // a per-trip pc repeats over the trips of a loop: each pc once
+    return [...new Set(taskPcs(n))].flatMap((pc) => m.get(pc) ?? [])
   }
 
   /** Where a task's pc is in the source: the map program and the item (null if no item has
@@ -185,7 +212,7 @@ export class SourceLink {
     const inst = this.instance[src.program]
     if (!inst) return { missing: src.name }
     const program = this.maps[inst.mp.mi].map.programs[inst.mp.pi]
-    const node = programIndex(program).all.find((n) => itemPcs(n).includes(src.pc)) ?? null
+    const node = programIndex(program).all.find((n) => taskPcs(n).includes(src.pc)) ?? null
     return { mp: inst.mp, node }
   }
 }

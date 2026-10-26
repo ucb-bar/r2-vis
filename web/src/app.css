@@ -446,3 +446,20 @@ html, body { overscroll-behavior: none; }
   background: var(--color-surface-raised); border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-m); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
 }
+
+/* Closures' calls and the calling lines (source/Readable.tsx) */
+.rd-calls { cursor: pointer; font: inherit; font-size: var(--font-size-xs); }
+.rd-calls.open { background: var(--color-hover); }
+.rd-call-list {
+  display: grid; grid-template-columns: auto minmax(0, 48ch) auto; justify-content: start; column-gap: var(--space-4); row-gap: 1px;
+  padding: var(--space-1) 0 var(--space-2); font-family: var(--font-sans); font-size: var(--font-size-xs);
+}
+.rd-call-row { display: contents; }
+.rd-call-line { justify-self: start; }
+.rd-call-src { color: var(--color-ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-sans); }
+.rd-call-count { justify-self: start; text-align: left; white-space: normal; }
+.rd-call-marker { margin-left: var(--space-3); font-family: var(--font-sans); font-size: var(--font-size-xs); color: var(--color-ink-muted); }
+.rd-call-marker:hover { color: var(--color-accent); }
+.rd-code-line.marked { background: var(--color-accent-area); }
+.src-args-from { font-size: var(--font-size-xs); }
+.rd-code-line.selected { background: var(--color-accent-area); box-shadow: inset 3px 0 0 var(--color-accent); }

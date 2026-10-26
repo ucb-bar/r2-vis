@@ -14,7 +14,8 @@ export interface Field {
   self_offset?: Trips<string>
   bytes?: string
   version?: Trips<number>
-  mask?: string
+  /** the destination mask in granules; per trip in a loop */
+  mask?: Trips<string>
 }
 
 export interface Descriptor {
@@ -43,6 +44,13 @@ export interface Item {
   uncertain?: boolean
   program?: string
   child?: Trips<string>
+  /** a spawn: the started program's arguments by field (its #[repr(C)] args struct) */
+  child_args?: Record<string, Field>
+  /** an invoke or wait: the IMEM offsets of every nu.* instruction that the debug info
+   * places at the item (also when the dry run did not reach it); hex strings */
+  static_pcs?: string[]
+  /** a closure: per call, the line of the statement that made it (null: not known) */
+  call_lines?: (number | null)[]
   key?: Field
 }
 
@@ -52,6 +60,9 @@ export interface Program {
   /** sha256: of the IMEM image, lowercase hex (a trace names its images by it) */
   image: { elf: string; entry: string; bytes: number; sha256?: string }
   items: Item[]
+  /** the argument values of the dry run come from the first start of this program: the
+   * starting program and the pc of its spawn */
+  args_from?: { program: string; pc: string }
   notes?: string[]
 }
 
@@ -250,16 +261,39 @@ function dstRanges(all: Node[]): DstRange[] {
     if (n.item.kind !== 'invoke' || !d) continue
     const bytes = big(d.bytes)
     if (bytes === null) continue
-    const mask = big(d.mask)
     const self = d.addr === null || (d.addr === undefined && d.self_offset !== undefined)
     for (const e of tripEntries(self ? d.self_offset : d.addr)) {
       const base = big(e.value as string | null)
       if (base === null) continue
       const version = valueAt(d.version, e.idx)
+      // the mask of this trip (per trip in a loop; absent: the whole range)
+      const mask = big(valueAt(d.mask, e.idx))
       out.push({ node: n, idx: e.idx, self, base, bytes, version: version ?? null, mask })
     }
   }
   return out
+}
+
+/** Of the ranges that hold a key (an unversioned record reused by every call of a closure
+ * holds the keys of all its calls), the producer of the key's trip: in the same closures as
+ * the key's item, with as many trip levels, and the same trip; else the last such trip
+ * before it; else the first range. */
+function closest(hits: DstRange[], from: Node, idx: number[]): DstRange | undefined {
+  const closures = (n: Node) => n.levels.filter((l) => l.item.kind === 'closure')
+  const mine = closures(from)
+  const local = hits.filter((r) => {
+    const theirs = closures(r.node)
+    return r.idx.length === idx.length && theirs.length === mine.length && theirs.every((c, k) => c === mine[k])
+  })
+  const at = idx.join(',')
+  const exact = local.find((r) => r.idx.join(',') === at)
+  if (exact) return exact
+  const before = (a: number[], b: number[]) => {
+    for (let k = 0; k < Math.min(a.length, b.length); k++) if (a[k] !== b[k]) return a[k] < b[k]
+    return a.length <= b.length
+  }
+  const earlier = local.filter((r) => before(r.idx, idx))
+  return earlier[earlier.length - 1] ?? hits[0]
 }
 
 /** Links from keys to destinations, built once per program. */
@@ -274,15 +308,21 @@ export class DepIndex {
 
   /** Per trip of a key field (a dep or a wait key): the destination that holds it, or
    * null. Global addresses match global ranges, (self) offsets match (self) ranges; the
-   * versions must be equal; a masked range holds the granules whose index has no bit
-   * outside the mask. */
-  resolve(f: Field): { idx: number[]; link: DepLink | null }[] {
+   * versions must be equal (failing that, a range of unknown version); a masked range
+   * holds the granules whose index has no bit outside the mask. With `from` (the key's
+   * item), the producer in the same closures and trip (closest). */
+  resolve(f: Field, from?: Node): { idx: number[]; link: DepLink | null }[] {
     const self = f.addr === null || (f.addr === undefined && f.self_offset !== undefined)
     return tripEntries(self ? f.self_offset : f.addr).map((e) => {
       const key = big(e.value as string | null)
       if (key === null) return { idx: e.idx, link: null }
       const version = valueAt(f.version, e.idx) ?? null
-      const hit = this.ranges.find((r) => r.self === self && key >= r.base && key < r.base + r.bytes && r.version === version && this.inMask(r, key))
+      const holds = this.ranges.filter((r) => r.self === self && key >= r.base && key < r.base + r.bytes && this.inMask(r, key))
+      // The same version; else a range whose version the build cannot know (a range of
+      // another node: its owner assigns the version).
+      let hits = holds.filter((r) => r.version === version)
+      if (!hits.length && version !== null) hits = holds.filter((r) => r.version === null)
+      const hit = from ? closest(hits, from, e.idx) : hits[0]
       return { idx: e.idx, link: hit ? { node: hit.node, idx: hit.idx } : null }
     })
   }

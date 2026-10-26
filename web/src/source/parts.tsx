@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import { count } from '../ui/format'
 import type { TipContent } from '../ui/Tooltip'
 import { tokenizeRust, type Token } from './rust'
-import { isPerTrip, splitAddress, tripCount, tripEntries, type Field, type Trips } from './srcmap'
+import { isPerTrip, splitAddress, tripEntries, type Field, type Trips } from './srcmap'
 
 export type Hover = (e: React.MouseEvent, content: TipContent | null) => void
 
@@ -57,14 +57,21 @@ export function unknownValue(v: string | null | undefined): boolean {
   return v === null || v === undefined || v.includes('?')
 }
 
-/** "× n": the trips of a per-trip value (a toggle for its trip table). */
+/** The trips in which an item ran: the entries of a per-trip value that are not null
+ * (a trip of a loop in which the item did not run, a branch not taken, is null). */
+export function ranTrips(v: Trips<unknown>): number {
+  return tripEntries(v).filter((e) => e.value !== null).length
+}
+
+/** "× n": the trips of a per-trip value that ran (a toggle for its trip table). */
 export function tripsButton(v: Trips<unknown>, onClick: () => void): ReactNode {
-  return <button className="src-trips" onClick={(e) => { e.stopPropagation(); onClick() }}>× {count(tripCount(v))}</button>
+  return <button className="src-trips" onClick={(e) => { e.stopPropagation(); onClick() }}>× {count(ranTrips(v))}</button>
 }
 
 /** The trip table of a per-trip value: a grid for two levels without links, else a list;
- * `cell` renders one trip. */
-export function tripTable(v: Trips<string>, cell: (e: { idx: number[]; value: string | null }) => ReactNode, grid: boolean): ReactNode {
+ * `cell` renders one trip; `label` names index i of level j (default: the index). */
+export function tripTable(v: Trips<string>, cell: (e: { idx: number[]; value: string | null }) => ReactNode, grid: boolean,
+  label: (level: number, i: number) => string = (_, i) => String(i)): ReactNode {
   const entries = tripEntries<string>(v)
   const depth = entries[0]?.idx.length ?? 0
   if (depth === 2 && grid) {
@@ -73,9 +80,9 @@ export function tripTable(v: Trips<string>, cell: (e: { idx: number[]; value: st
     const at = new Map(entries.map((e) => [e.idx.join(','), e]))
     return (
       <table className="src-trip-table">
-        <thead><tr><th>i \ j</th>{Array.from({ length: cols }, (_, j) => <th key={j}>{j}</th>)}</tr></thead>
+        <thead><tr><th>i \ j</th>{Array.from({ length: cols }, (_, j) => <th key={j}>{label(1, j)}</th>)}</tr></thead>
         <tbody>{Array.from({ length: rows }, (_, i) => (
-          <tr key={i}><th>{i}</th>{Array.from({ length: cols }, (_, j) => {
+          <tr key={i}><th>{label(0, i)}</th>{Array.from({ length: cols }, (_, j) => {
             const e = at.get(`${i},${j}`)
             return <td key={j}>{e ? cell(e) : null}</td>
           })}</tr>
@@ -86,7 +93,7 @@ export function tripTable(v: Trips<string>, cell: (e: { idx: number[]; value: st
   return (
     <table className="src-trip-table">
       <thead><tr><th>{depth > 1 ? ['i', 'j', 'k', 'l'].slice(0, depth).join(', ') : 'i'}</th><th /></tr></thead>
-      <tbody>{entries.map((e) => <tr key={e.idx.join(',')}><th>{e.idx.join(', ')}</th><td>{cell(e)}</td></tr>)}</tbody>
+      <tbody>{entries.map((e) => <tr key={e.idx.join(',')}><th>{e.idx.map((i, k) => label(k, i)).join(', ')}</th><td>{cell(e)}</td></tr>)}</tbody>
     </table>
   )
 }

@@ -8,7 +8,7 @@ import type { ReactNode } from 'react'
 import { SOURCE_OP_SLOT } from '../timeline/colors'
 import { count } from '../ui/format'
 import type { Producer } from './links'
-import { address, code, tokenSpans, tripsButton, tripTable, unknownValue, type Hover } from './parts'
+import { address, code, ranTrips, tokenSpans, tripsButton, tripTable, unknownValue, type Hover } from './parts'
 import type { Token } from './rust'
 import {
   firstValue, isPerTrip, seenCalls, tripEntries, type DepIndex, type DepLink, type Field, type Node, type Program, type Trips,
@@ -44,6 +44,10 @@ export interface ReadableProps {
   links: CardLinks | null
   selectTasks: (rows: number[]) => void
   goProgram: (name: string) => void
+  /** shows a line of the file (its regions opened) and marks it */
+  goLine: (line: number) => void
+  /** the line marked by goLine */
+  markLine: number | null
   hover: Hover
   clear: () => void
 }
@@ -75,8 +79,33 @@ export function Readable(p: ReadableProps) {
       </div>,
     )
   }
-  const codeLine = (l: number, badges?: ReactNode) =>
-    row(`l${l}`, l, <><code className="rd-src">{tokenSpans(text(l) ?? [])}</code>{badges}</>, 'rd-code-line')
+  // The closures' calling lines: line -> (closure, its calls from that line).
+  const callers = new Map<number, { node: Node; calls: number[] }[]>()
+  const visit = (n: Node) => {
+    n.item.call_lines?.forEach((l, i) => {
+      if (l === null || n.item.file !== file) return
+      const at = callers.get(l) ?? []
+      const e = at.find((x) => x.node === n)
+      if (e) e.calls.push(i)
+      else at.push({ node: n, calls: [i] })
+      callers.set(l, at)
+    })
+    n.children.forEach(visit)
+  }
+  p.roots.forEach(visit)
+  /** "27 calls: 1, 5, 9, … 105": the first few calls and the last. */
+  const callIndices = (calls: number[]) => (calls.length > 4 ? `${calls.slice(0, 3).join(', ')}, … ${calls[calls.length - 1]}` : calls.join(', '))
+  const callsLabel = (calls: number[]) => `${count(calls.length)} ${calls.length === 1 ? 'call' : 'calls'}`
+  const codeLine = (l: number, badges?: ReactNode, selected?: Node) =>
+    row(`l${l}`, l, <>
+      <code className="rd-src">{tokenSpans(text(l) ?? [])}</code>{badges}
+      {callers.get(l)?.map((c) => (
+        <button key={c.node.id} className="link rd-call-marker" onClick={(e) => { e.stopPropagation(); p.onSelect(c.node) }}>
+          → {c.node.item.name ?? 'closure'} · {callsLabel(c.calls)}
+        </button>
+      ))}
+    </>, ['rd-code-line', p.markLine === l ? 'marked' : '', selected && p.selected === selected.id ? 'selected' : ''].join(' ').trim(),
+    0, selected ? { 'data-id': selected.id } as never : undefined)
 
   // ---- values ------------------------------------------------------------------------------
   const exprOrUnknown = (expr: string | null | undefined): ReactNode =>
@@ -88,25 +117,36 @@ export function Readable(p: ReadableProps) {
   const value = (f: Field, tkey: string, strip = false): ReactNode => {
     const v = f.value
     const shown = (t: string) => (strip ? bare(t) : t)
+    // unknown: on the text shown (a dst whose only unknown part is its version is known)
+    const unknown = (t: string | null) => unknownValue(t === null ? null : shown(t))
     if (isPerTrip(v)) {
       const entries = tripEntries<string>(v)
-      if (entries.every((e) => unknownValue(e.value))) return exprOrUnknown(f.expr)
-      const first = entries.find((e) => !unknownValue(e.value)) ?? entries[0]
+      if (entries.every((e) => unknown(e.value))) return exprOrUnknown(f.expr)
+      const first = entries.find((e) => !unknown(e.value)) ?? entries[0]
       return <>{address(f, shown(first.value as string), first.idx, hover, clear)}{tripsButton(v, () => toggle(tkey, false))}</>
     }
-    if (unknownValue(v as string | null)) return exprOrUnknown(f.expr)
+    if (unknown(v as string | null)) return exprOrUnknown(f.expr)
     return address(f, shown(v as string), [], hover, clear)
   }
 
+  /** The rows of a trip table for an item inside closures: "call i · line N". */
+  let levels: Node[] = []
+  /** the item whose fields are rendered (its keys resolve to producers in its own loops) */
+  let current: Node | undefined
+  const tripLabel = (level: number, i: number): string => {
+    const lv = levels[level]
+    const line = lv?.item.call_lines?.[i]
+    return lv?.item.kind === 'closure' && line !== undefined && line !== null ? `call ${i} · line ${line}` : String(i)
+  }
   /** The trip table of a field (with the static link of each trip for a key). */
   const tableOf = (f: Field, isKey: boolean, strip = false): ReactNode => {
-    const links = isKey ? new Map(deps.resolve(f).map((l) => [l.idx.join(','), l.link])) : null
+    const links = isKey ? new Map(deps.resolve(f, current).map((l) => [l.idx.join(','), l.link])) : null
     return tripTable(f.value as Trips<string>, (e) => (
       <>
         {e.value === null ? <span className="src-unknown">not run</span> : address(f, strip ? bare(e.value) : e.value, e.idx, hover, clear)}
         {links?.get(e.idx.join(',')) && <> {staticLink(links.get(e.idx.join(',')) as DepLink, e.idx, true)}</>}
       </>
-    ), !links)
+    ), !links, tripLabel)
   }
 
   // ---- producers ---------------------------------------------------------------------------
@@ -130,8 +170,10 @@ export function Readable(p: ReadableProps) {
    * (`inRow`), the same trip goes without a word. */
   const staticLink = (link: DepLink, keyIdx: number[] | null, inRow = false): ReactNode => {
     let suffix = ''
-    if (keyIdx === null) suffix = link.idx.length ? ` · ${trip(link.idx)}` : ''
-    else if (same(keyIdx, link.idx)) suffix = inRow ? '' : ' · same trip'
+    if (keyIdx === null || link.idx.length < keyIdx.length) {
+      // a key outside loops, or a producer in fewer loops (an outer loop): its own trip only
+      suffix = link.idx.length ? ` · ${trip(link.idx)}` : ''
+    } else if (same(keyIdx, link.idx)) suffix = inRow ? '' : ' · same trip'
     else suffix = inRow ? ` · ${trip(link.idx)}` : ` · ${trip(keyIdx)} → ${trip(link.idx)}`
     return producerButton(`s${link.node.id}`, <>{nodeLabel(link.node)}{suffix}</>,
       () => p.onSelect(link.node), p.links ? p.links.tasks(link.node) : null)
@@ -139,7 +181,7 @@ export function Readable(p: ReadableProps) {
   /** The static link of a key on its line. A per-trip key: "same trip" when every trip's
    * producer is in the same trip, else the first trip that differs (the trip table lists all). */
   const firstStatic = (f: Field): ReactNode => {
-    const links = deps.resolve(f).filter((l) => l.link)
+    const links = deps.resolve(f, current).filter((l) => l.link)
     if (!links.length) return null
     if (!isPerTrip(f.value)) return staticLink(links[0].link as DepLink, null)
     const differ = links.find((l) => !same(l.idx, (l.link as DepLink).idx))
@@ -174,7 +216,7 @@ export function Readable(p: ReadableProps) {
   const perTrip = (v: Trips<string> | undefined): ReactNode => {
     if (v === undefined || v === null) return null
     if (!isPerTrip(v)) return v as string
-    return <>{firstValue(v) ?? '?'} <span className="src-times">× {count(tripEntries(v).length)}</span></>
+    return <>{firstValue(v) ?? '?'} <span className="src-times">× {count(ranTrips(v))}</span></>
   }
   const sourceToggle = (n: Node, raw: boolean) => (
     <button className={raw ? 'rd-toggle active' : 'rd-toggle'} aria-label={raw ? 'show the card' : 'show the source lines'}
@@ -197,6 +239,8 @@ export function Readable(p: ReadableProps) {
 
   const card = (n: Node) => {
     const it = n.item
+    levels = n.levels
+    current = n
     const [a, b] = it.lines
     const raw = isOpen(`c:${n.id}`, false)
     const indent = indentOf(a)
@@ -213,12 +257,16 @@ export function Readable(p: ReadableProps) {
       if (dst.version !== undefined) {
         const v = dst.version
         const known = isPerTrip(v) ? tripEntries<number>(v).some((e) => e.value !== null) : v !== null
+        // An unknown version (a range of another node: its owner assigns it) has no code.
         fieldLines(fields, 'version', null, `${n.id}|version`,
-          known ? <>{isPerTrip(v) ? perTrip(v as unknown as Trips<string>) : String(v)}</> : exprOrUnknown(dst.expr))
+          known ? <>{isPerTrip(v) ? perTrip(v as unknown as Trips<string>) : String(v)}</> : <span className="src-unknown">?</span>)
       }
       fieldLines(fields, 'dst', dst, `${n.id}|dst`, value(dst, `t:${n.id}|dst`, true), { strip: true })
-      if (dst.mask !== undefined && !/^0x[fF]+$/.test(dst.mask)) {
-        fieldLines(fields, 'mask', null, `${n.id}|mask`, unknownValue(dst.mask) ? exprOrUnknown(dst.expr) : <span className="rd-num">{dst.mask}</span>)
+      // The mask (per trip in a loop): shown when it is not all ones.
+      const masks = tripEntries<string>(dst.mask as Trips<string> | undefined).map((e) => e.value).filter((m) => m !== null)
+      if (masks.some((m) => !/^0x[fF]+$/.test(m))) {
+        const mask: Field = { expr: dst.expr, value: dst.mask as Trips<string> }
+        fieldLines(fields, 'mask', mask, `${n.id}|mask`, value(mask, `t:${n.id}|mask`))
       }
       if (d.deps.length) {
         const open = isOpen(`d:${n.id}`, false)
@@ -250,6 +298,19 @@ export function Readable(p: ReadableProps) {
         }
       }
     }
+    // A spawn: the started program's arguments, by field of its args struct.
+    const childArgs = Object.entries(it.child_args ?? {})
+    if (childArgs.length) {
+      const open = isOpen(`g:${n.id}`, false)
+      fields.push(
+        <div key={`${n.id}|child`} className="rd-field">
+          <span className="rd-name"><button className="rd-fold" onClick={(e) => { e.stopPropagation(); toggle(`g:${n.id}`, false) }}>{open ? '▾' : '▸'}</button>
+            args of {it.program ?? 'the program'}</span>
+          <span className="rd-eq" /><span className="rd-value rd-dim">{childArgs.length}</span>
+        </div>,
+      )
+      if (open) for (const [k, f] of childArgs) fieldLines(fields, k, f, `${n.id}|child.${k}`, value(f, `t:${n.id}|child.${k}`))
+    }
     row(`c${n.id}`, a, (
       <div className={cls(n, 'rd-card')} data-id={n.id} onClick={() => p.onSelect(n)}>
         <div className="rd-card-head">
@@ -278,6 +339,8 @@ export function Readable(p: ReadableProps) {
       for (let l = a; l <= b; l++) codeLine(l)
       return
     }
+    levels = n.levels
+    current = n
     const k = it.key
     const fence = k && firstValue(k.value) === 'fence'
     const table = k && isPerTrip(k.value) && isOpen(`t:${n.id}|key`, false)
@@ -317,14 +380,61 @@ export function Readable(p: ReadableProps) {
     if (it.kind === 'loop') return <span className="rd-facts"><span className="badge muted">trips {it.trips ?? '?'}</span></span>
     if (it.kind === 'closure') {
       const seen = it.calls === undefined ? seenCalls(n) : null
-      return <span className="rd-facts"><span className="badge muted">calls {it.calls ?? '?'}</span>{seen !== null && <span className="badge muted">seen {seen}</span>}</span>
+      const calls = it.call_lines?.length
+        ? <button className={isOpen(`k:${n.id}`, false) ? 'badge muted rd-calls open' : 'badge muted rd-calls'}
+          onClick={(e) => { e.stopPropagation(); toggle(`k:${n.id}`, false) }}>calls {it.calls ?? '?'} ▾</button>
+        : <span className="badge muted">calls {it.calls ?? '?'}</span>
+      return <span className="rd-facts">{calls}{seen !== null && <span className="badge muted">seen {seen}</span>}</span>
     }
     return null
   }
 
+  /** A closure's calls by calling line, in source order: the line (a link), what it is (the
+   * summary of the region around it, else its source text), and its calls ("27 calls: 1, 5,
+   * 9, … 105"; a click on the count lists them all). */
+  const callList = (n: Node) => {
+    const byLine = new Map<number | null, number[]>()
+    ;(n.item.call_lines ?? []).forEach((l, i) => byLine.set(l, [...(byLine.get(l) ?? []), i]))
+    const lines = [...byLine.keys()].sort((x, y) => (x ?? Infinity) - (y ?? Infinity))
+    // the innermost region with a summary around a line (a call's first line, "run_gemm(GemmArgs {", says little)
+    const regionAt = (l: number): string | null => {
+      let best: Node | null = null
+      const walk = (x: Node) => {
+        const [a, b] = x.item.lines
+        if (x.item.file !== file || l < a || l > b) return
+        if (x.item.kind === 'region' && x.item.summary) best = x
+        x.children.forEach(walk)
+      }
+      p.roots.forEach(walk)
+      return (best as Node | null)?.item.summary ?? null
+    }
+    const source = (l: number) => regionAt(l) ?? (text(l) ?? []).map((t) => t.text).join('').trim()
+    row(`k${n.id}`, null, (
+      <div className="rd-call-list">
+        {lines.map((l) => {
+          const calls = byLine.get(l) ?? []
+          const key = `kx:${n.id}:${l}`
+          const all = isOpen(key, false)
+          return (
+            <div key={String(l)} className="rd-call-row">
+              {l === null ? <span className="src-unknown">line ?</span>
+                : <button className="link rd-call-line" onClick={(e) => { e.stopPropagation(); p.goLine(l) }}>line {l}</button>}
+              <span className="rd-call-src">{l === null ? '' : source(l)}</span>
+              <button className="link rd-call-count" onClick={(e) => { e.stopPropagation(); toggle(key, false) }}>
+                {callsLabel(calls)}: {all ? calls.join(', ') : callIndices(calls)}
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    ), '', indentOf(n.item.lines[0]) + 2)
+  }
+
   const container = (n: Node) => {
     const [a, b] = n.item.lines
-    codeLine(a, facts(n))
+    // the header line stands for a loop or closure (a marker of a calling line selects it)
+    codeLine(a, facts(n), n.item.kind === 'closure' || n.item.kind === 'loop' ? n : undefined)
+    if (n.item.kind === 'closure' && n.item.call_lines?.length && isOpen(`k:${n.id}`, false)) callList(n)
     if (b > a) {
       range(n.children, a + 1, b - 1)
       codeLine(b)
