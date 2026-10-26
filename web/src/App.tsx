@@ -14,7 +14,7 @@ import { Workspace } from './ui/Workspace'
 import { ThemeToggle } from './ui/ThemeToggle'
 import { parseSourceMap } from './source/srcmap'
 import type { LoadedMap } from './source/links'
-import { fetchIndex, parseServerUrl, resetWhole, servedFiles, traceUrl, type ServedTrace } from './data/tracefile'
+import { fetchIndex, parseServerUrl, readText, resetWhole, servedFiles, traceUrl, type ServedTrace } from './data/tracefile'
 import { bytes } from './ui/format'
 import { SourceView } from './source/SourceView'
 
@@ -44,12 +44,13 @@ export function App() {
   const [opened, setOpened] = useState<{ base: string; name: string } | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
   const forget = (url: string) => { setServers(removeServer(url)); if (failed === url) setFailed(null) }
-  /** Adds a source map; a map with the same file name replaces the old one. */
+  /** Adds a source map; a map that the user opened with the same file name replaces the
+   * old one. */
   const openSourceMap = async (file: File) => {
     try {
       const map = parseSourceMap(await file.text(), file.name)
       setSrc((s) => {
-        const at = s.maps.findIndex((m) => m.name === file.name)
+        const at = s.maps.findIndex((m) => m.name === file.name && !m.inTrace)
         const maps = at < 0 ? [...s.maps, { name: file.name, map }] : s.maps.map((m, k) => (k === at ? { name: file.name, map } : m))
         return { maps, error: null }
       })
@@ -76,6 +77,7 @@ export function App() {
       const trace = await loadTrace(tf, pool(), (done, total) =>
         setState({ kind: 'loading', name: tf.name, done, total }))
       void indexLabels(trace, pool())   // which task labels are shared (task names), in a worker
+      await loadTraceMaps(tf, trace)
       const charges = new ChargeCache(trace)
       const store = new ViewStore(trace.dims.nodes.map((n) => n.id as number), trace.manifest.end_time, homeRange(trace))
       window.__r2vis = { ...window.__r2vis, trace, charges, store }
@@ -83,6 +85,24 @@ export function App() {
     } catch (err) {
       setState({ kind: 'error', message: String((err as Error).message ?? err) })
     }
+  }
+
+  /** The source maps in the trace (manifest `sources`, format 1.10), as if opened by the
+   * user, marked "in trace": they replace those of the previous trace; maps the user
+   * opened stay. A map that does not read is reported, the trace still opens. */
+  const loadTraceMaps = async (tf: TraceFiles, trace: Trace) => {
+    const maps: LoadedMap[] = []
+    const errors: string[] = []
+    for (const s of trace.manifest.sources ?? []) {
+      const f = tf.files.get(s.file)
+      try {
+        if (!f) throw new Error(`${s.file}: listed in manifest.json, not in the trace`)
+        maps.push({ name: s.file.slice(s.file.lastIndexOf('/') + 1), map: parseSourceMap(await readText(f), s.file), inTrace: true })
+      } catch (err) {
+        errors.push(String((err as Error).message ?? err))
+      }
+    }
+    setSrc((st) => ({ maps: [...maps, ...st.maps.filter((m) => !m.inTrace)], error: errors.length ? errors.join('; ') : st.error }))
   }
 
   /** A server base URL lists its traces; a trace URL opens that trace. A server that

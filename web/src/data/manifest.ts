@@ -42,6 +42,8 @@ export interface Manifest {
   charge_block_span: number
   charge_blocks: ChargeBlock[]
   tables: Record<string, { rows: number; description: string; columns: Record<string, string> }>
+  /** format 1.10: the source maps in the trace (sources/NAME.json) whose programs ran */
+  sources?: { file: string; from?: string; programs?: string[] }[]
 }
 
 export function parseManifest(text: string): Manifest {

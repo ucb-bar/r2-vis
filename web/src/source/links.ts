@@ -7,8 +7,9 @@ import type { Trace } from '../data/trace'
 import { indexProgram, tripEntries, type Node, type Program, type SourceMap } from './srcmap'
 
 /** A source map as loaded (the file name identifies it: a new file of the same name
- * replaces it). */
-export interface LoadedMap { name: string; map: SourceMap }
+ * replaces it). `inTrace`: from the open trace's sources/ (format 1.10), replaced when
+ * another trace opens. */
+export interface LoadedMap { name: string; map: SourceMap; inTrace?: boolean }
 
 /** A program of a loaded map: map index and program index. */
 export interface MapProgram { mi: number; pi: number }

@@ -107,7 +107,8 @@ export function traceUrl(base: string, name: string): string {
 export function servedFiles(base: string, t: ServedTrace): Map<string, TraceFile> {
   const files = new Map<string, TraceFile>()
   for (const [name, size] of Object.entries(t.files)) {
-    files.set(name, { kind: 'url', name, size, url: `${traceUrl(base, t.name)}${encodeURIComponent(name)}` })
+    // a file of a subdirectory ("sources/NAME.json") keeps its slash
+    files.set(name, { kind: 'url', name, size, url: `${traceUrl(base, t.name)}${name.split('/').map(encodeURIComponent).join('/')}` })
   }
   return files
 }

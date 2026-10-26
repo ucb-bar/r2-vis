@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { Trace } from '../data/trace'
 import type { ViewStore } from '../state/viewstore'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { BlockRenderer } from './renderer'
 import { tipPlace, Tooltip, type TipContent } from '../ui/Tooltip'
 import { pct, splitPath } from '../ui/format'
+import { AreaContext, useAreaState } from '../ui/area'
 
 declare global {
   interface Window { __r2blocks?: BlockRenderer }
@@ -150,26 +152,48 @@ export function BlockView({ trace, store }: Props) {
     return () => { offTarget(); offSet() }
   }, [renderer, store])
 
+  // The "In the timeline" list: a button in the area header (in the diagram's corner outside
+  // an area); open, it closes on a click outside or Esc. Kept per area.
+  const area = useContext(AreaContext)
+  const [panelOpen, setPanelOpen] = useAreaState<boolean>('blocks.panel', () => false)
+  const corner = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!panelOpen) return
+    const away = (e: PointerEvent) => { if (!corner.current?.contains(e.target as globalThis.Node)) setPanelOpen(false) }
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setPanelOpen(false) }
+    window.addEventListener('pointerdown', away)
+    window.addEventListener('keydown', esc)
+    return () => { window.removeEventListener('pointerdown', away); window.removeEventListener('keydown', esc) }
+  }, [panelOpen, setPanelOpen])
+
   const inTimeline = trace.dims.nodes.filter((n) => checked.has(n.id as number))
+  const list = (
+    <div className={area?.slot ? 'float-corner in-head' : 'float-corner'} ref={corner}>
+      <button className={panelOpen ? 'button small active' : 'button small'} aria-expanded={panelOpen}
+        onClick={() => setPanelOpen(!panelOpen)}>In the timeline ({inTimeline.length})</button>
+      {panelOpen && (
+        <div className="float-panel">
+          <div className="float-panel-head">
+            <span className="spacer" />
+            <button className="button small" onClick={() => renderer.fit(renderer.root)}>Fit</button>
+          </div>
+          {inTimeline.length === 0 && <div className="menu-empty">none</div>}
+          {inTimeline.map((n) => (
+            <div key={n.id as number} className="float-item">
+              <span>{String(n.path)}</span>
+              <button className="chip-x" aria-label={`remove ${n.path}`}
+                onClick={() => store.blocks.setChecked(n.id as number, false)}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
   return (
     <div className="block-view" ref={host}>
       <canvas ref={canvas} className="block-canvas" />
       {tip && <Tooltip tip={tip.content} style={tipPlace(tip, host.current)} />}
-      <div className="float-panel">
-        <div className="float-panel-head">
-          <strong>In the timeline</strong>
-          <span className="spacer" />
-          <button className="button small" onClick={() => renderer.fit(renderer.root)}>Fit</button>
-        </div>
-        {inTimeline.length === 0 && <div className="menu-empty">none</div>}
-        {inTimeline.map((n) => (
-          <div key={n.id as number} className="float-item">
-            <span>{String(n.path)}</span>
-            <button className="chip-x" aria-label={`remove ${n.path}`}
-              onClick={() => store.blocks.setChecked(n.id as number, false)}>×</button>
-          </div>
-        ))}
-      </div>
+      {area?.slot ? createPortal(list, area.slot) : list}
     </div>
   )
 }

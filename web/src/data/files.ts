@@ -9,14 +9,22 @@ export interface TraceFiles {
   url?: string
 }
 
-/** From <input type="file" webkitdirectory>: the files next to manifest.json. */
+/** Subdirectories of a trace whose files are read (format 1.10: the source maps). */
+const SUBDIRS = ['sources']
+
+/** From <input type="file" webkitdirectory>: the files next to manifest.json, and those of
+ * its subdirectories in SUBDIRS (named "sources/NAME.json"). */
 export function fromFileList(list: FileList): TraceFiles {
   const all = Array.from(list)
   const manifest = all.find((f) => baseName(pathOf(f)) === 'manifest.json')
   if (!manifest) throw new Error('the folder has no manifest.json (pick the .r2t folder)')
   const dir = dirName(pathOf(manifest))
   const files = new Map<string, TraceFile>()
-  for (const f of all) if (dirName(pathOf(f)) === dir) files.set(baseName(pathOf(f)), localFile(f))
+  for (const f of all) {
+    const d = dirName(pathOf(f))
+    if (d === dir) files.set(baseName(pathOf(f)), localFile(f))
+    else if (SUBDIRS.some((s) => d === (dir ? `${dir}/${s}` : s))) files.set(`${baseName(d)}/${baseName(pathOf(f))}`, localFile(f))
+  }
   return { name: baseName(dir) || 'trace', files }
 }
 
@@ -30,6 +38,11 @@ export async function fromDrop(dt: DataTransfer): Promise<TraceFiles> {
     const files = new Map<string, TraceFile>()
     for (const entry of await readAll(dirs[0])) {
       if (entry.isFile) files.set(entry.name, localFile(await fileOf(entry as FileSystemFileEntry)))
+      else if (entry.isDirectory && SUBDIRS.includes(entry.name)) {
+        for (const sub of await readAll(entry as FileSystemDirectoryEntry)) {
+          if (sub.isFile) files.set(`${entry.name}/${sub.name}`, localFile(await fileOf(sub as FileSystemFileEntry)))
+        }
+      }
     }
     if (!files.has('manifest.json')) throw new Error(`${dirs[0].name} has no manifest.json`)
     return { name: dirs[0].name, files }

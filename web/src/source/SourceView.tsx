@@ -172,7 +172,11 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   if (!map || !program || !index || !deps || !entry) {
     return (
       <div className="source-view empty" ref={host}>
-        <div className="source-empty">{missingNote}{picker}{error && <div className="error">{error}</div>}</div>
+        <div className="source-empty">
+          {missingNote}
+          {trace && !trace.manifest.sources?.length && <div className="source-none">This trace has no source map</div>}
+          {picker}{error && <div className="error">{error}</div>}
+        </div>
       </div>
     )
   }
@@ -184,7 +188,7 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
         <label className="tool">
           program
           <select value={at} onChange={(e) => show(Number(e.target.value), null)}>
-            {entries.map((e, k) => <option key={`${e.mi}:${e.pi}`} value={k}>{e.p.program}{maps.length > 1 ? ` · ${e.m.name}` : ''}</option>)}
+            {entries.map((e, k) => <option key={`${e.mi}:${e.pi}`} value={k}>{e.p.program}{e.m.inTrace ? ' · in trace' : maps.length > 1 ? ` · ${e.m.name}` : ''}</option>)}
           </select>
         </label>
         <div className="segmented source-mode" role="tablist">

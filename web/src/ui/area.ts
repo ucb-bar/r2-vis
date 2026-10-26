@@ -4,6 +4,8 @@ import { createContext, useCallback, useContext, useState } from 'react'
 
 export interface AreaApi {
   id: string
+  /** the area header's place for the view's own controls (before split, close, maximize) */
+  slot: HTMLElement | null
   ui: (key: string) => unknown
   setUi: (key: string, value: unknown) => void
 }

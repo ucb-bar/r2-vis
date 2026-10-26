@@ -133,6 +133,17 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
   }, [bench, ws.id])
 
   const placed = useMemo(() => place(ws.root), [ws.root])
+  // per area: the header's slot for the view's controls (a view renders into it)
+  const [slots, setSlots] = useState<Record<string, HTMLElement | null>>({})
+  const slotRefs = useRef(new Map<string, (el: HTMLElement | null) => void>())
+  const slotRef = (id: string) => {
+    let f = slotRefs.current.get(id)
+    if (!f) {
+      f = (el) => setSlots((s) => (s[id] === el ? s : { ...s, [id]: el }))
+      slotRefs.current.set(id, f)
+    }
+    return f
+  }
 
   // Corner drags: the preview follows the pointer; release applies it; Esc or a right
   // click cancels.
@@ -232,10 +243,10 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
             style={{ ...rectStyle(r), display: shown ? 'flex' : 'none' }}
             onPointerDownCapture={() => bench.use(leaf.id)} onPointerEnter={() => { hovered.current = leaf.id }}>
             <AreaHeader ws={ws} leaf={leaf} bench={bench} only={only} maximized={maximized === leaf.id}
-              canSplit={{ row: px.w >= 2 * MIN_AREA.w + GAP, column: px.h >= 2 * MIN_AREA.h + GAP }} />
+              canSplit={{ row: px.w >= 2 * MIN_AREA.w + GAP, column: px.h >= 2 * MIN_AREA.h + GAP }} slot={slotRef(leaf.id)} />
             <div className="area-body">
               <AreaContent key={`${leaf.id}:${leaf.view}`} id={leaf.id} view={leaf.view} shared={shared}
-                strip={leaf.view === 'instant' ? strip : null} />
+                strip={leaf.view === 'instant' ? strip : null} slot={slots[leaf.id] ?? null} />
             </div>
             {!maximized && (['tl', 'tr', 'bl', 'br'] as const).map((c) => (
               <div key={c} className={`area-corner ${c}`} data-corner={c}
@@ -289,9 +300,10 @@ interface HeaderProps {
   only: boolean
   maximized: boolean
   canSplit: { row: boolean; column: boolean }
+  slot: (el: HTMLElement | null) => void
 }
 
-function AreaHeader({ leaf, bench, only, maximized, canSplit }: HeaderProps) {
+function AreaHeader({ leaf, bench, only, maximized, canSplit, slot }: HeaderProps) {
   return (
     <div className="area-head">
       <select className="area-view" aria-label="view" value={leaf.view}
@@ -299,6 +311,7 @@ function AreaHeader({ leaf, bench, only, maximized, canSplit }: HeaderProps) {
         {VIEWS.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
       </select>
       <span className="spacer" />
+      <span className="area-head-slot" ref={slot} />
       {!maximized && <>
         <IconButton icon="splitRow" tip="Split left and right" disabled={!canSplit.row} onClick={() => bench.split(leaf.id, 'row')} />
         <IconButton icon="splitColumn" tip="Split top and bottom" disabled={!canSplit.column} onClick={() => bench.split(leaf.id, 'column')} />
@@ -315,13 +328,14 @@ interface ContentProps {
   view: ViewType
   shared: Shared
   strip: TimelineRenderer | null
+  slot: HTMLElement | null
 }
 
 /** The view of an area, in the area's context (its sidebar state). Memoized: a layout
  * change that moves the area does not render the view again. */
-const AreaContent = memo(function AreaContent({ id, view, shared, strip }: ContentProps) {
+const AreaContent = memo(function AreaContent({ id, view, shared, strip, slot }: ContentProps) {
   const { trace, charges, pool, store, bench, source, onOpenSource } = shared
-  const api = useMemo<AreaApi>(() => ({ id, ui: (k) => bench.ui(id, k), setUi: (k, v) => bench.setUi(id, k, v) }), [bench, id])
+  const api = useMemo<AreaApi>(() => ({ id, slot, ui: (k) => bench.ui(id, k), setUi: (k, v) => bench.setUi(id, k, v) }), [bench, id, slot])
   const isKeyTarget = useCallback(() => bench.isKeyTarget(id), [bench, id])
   const onRenderer = useCallback((r: TimelineRenderer | null) => bench.setRenderer(id, r), [bench, id])
   let body

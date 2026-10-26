@@ -3,7 +3,7 @@ import { useRef, useState, type ReactNode } from 'react'
 interface Props {
   onFiles: (list: FileList) => void
   onDrop: (dt: DataTransfer) => void
-  /** a source map (.json) picked or dropped (the Source view) */
+  /** a source map (.json) dropped (a trace carries its maps; the Source view opens others) */
   onSourceMap?: (file: File) => void
   /** an r2t-serve URL (a server or a trace) */
   onUrl?: (url: string) => void
@@ -13,16 +13,16 @@ interface Props {
   children?: ReactNode
 }
 
-/** Folder picker and drop zone for a .r2t directory, and a file picker for a source map. */
+/** Folder picker and drop zone for a .r2t directory (with its source maps, sources/); a
+ * dropped single .json opens a source map. */
 export function OpenPanel({ onFiles, onDrop, onSourceMap, onUrl, compact, recent, children }: Props) {
   const input = useRef<HTMLInputElement>(null)
-  const srcInput = useRef<HTMLInputElement>(null)
   const [url, setUrl] = useState('')
   const [over, setOver] = useState(false)
   const picker = (
     <>
       <button className={compact ? 'button' : 'button primary'} onClick={() => input.current?.click()}>
-        Open trace folder…
+        Open trace and source…
       </button>
       <input
         ref={input} type="file" hidden multiple
@@ -48,16 +48,7 @@ export function OpenPanel({ onFiles, onDrop, onSourceMap, onUrl, compact, recent
       onDrop={(e) => { e.preventDefault(); setOver(false); drop(e.dataTransfer) }}
     >
       <div>Drop a <code>.r2t</code> folder or a source map here</div>
-      <div className="tool-row">
-        {picker}
-        {onSourceMap && (
-          <>
-            <button className="button" onClick={() => srcInput.current?.click()}>Open source map…</button>
-            <input ref={srcInput} type="file" accept=".json,application/json" hidden
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) onSourceMap(f); e.target.value = '' }} />
-          </>
-        )}
-      </div>
+      <div className="tool-row">{picker}</div>
       {onUrl && (
         <form className="tool-row open-url" onSubmit={(e) => { e.preventDefault(); if (url.trim()) onUrl(url.trim()) }}>
           <input type="url" placeholder="http://127.0.0.1:8765/TOKEN/" value={url} onChange={(e) => setUrl(e.target.value)} />
