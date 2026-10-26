@@ -14,7 +14,8 @@ a remote machine needs no copy: forward the port over SSH and open the printed l
 
 Endpoints, below /TOKEN/:
 * `index.json`: {"traces": [{"name", "path", "files": {file: bytes}}]}.
-* `TRACE/FILE`: one file of a trace, with HEAD and `Range: bytes=a-b` (206).
+* `TRACE/FILE` and `TRACE/sources/FILE`: one file of a trace, with HEAD and
+  `Range: bytes=a-b` (206).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ DEFAULT_PORT = 8765
 APP_URL = "https://ucb-bar.github.io/r2-vis/"
 ALLOWED_ORIGINS = ("https://ucb-bar.github.io", "http://127.0.0.1:5173", "http://localhost:5173")
 CHUNK = 1 << 20
+SOURCES = "sources"                        # source maps inside a trace (format 1.10)
 LINKS = 8                                  # print one link per trace up to this many
 RANGE = re.compile(r"bytes=(\d*)-(\d*)$")
 
@@ -76,8 +78,12 @@ def is_trace(path: Path) -> bool:
 
 
 def files_of(trace: Path) -> dict[str, int]:
-    return {p.name: p.stat().st_size for p in sorted(trace.iterdir())
-            if p.is_file() and not p.name.startswith(".")}
+    """The files of a trace and of its sources/ folder (format 1.10), by path in the trace."""
+    files = [p for p in sorted(trace.iterdir()) if p.is_file()]
+    if (trace / SOURCES).is_dir():
+        files += [p for p in sorted((trace / SOURCES).iterdir()) if p.is_file()]
+    return {p.relative_to(trace).as_posix(): p.stat().st_size for p in files
+            if not p.name.startswith(".")}
 
 
 def byte_range(header: str | None, size: int) -> tuple[int, int] | None:
@@ -120,9 +126,9 @@ def make_handler(catalog: Catalog, token: str, origins: frozenset[str], verbose:
             if rest in ([], [""], ["index.json"]):
                 data = json.dumps(catalog.index()).encode()
                 return self.send_bytes(data, "application/json", body)
-            if len(rest) != 2:
+            if len(rest) not in (2, 3):
                 return self.fail(HTTPStatus.NOT_FOUND)
-            path = catalog.file(rest[0], rest[1])
+            path = catalog.file(rest[0], "/".join(rest[1:]))
             if path is None:
                 return self.fail(HTTPStatus.NOT_FOUND)
             self.send_file(path, body)

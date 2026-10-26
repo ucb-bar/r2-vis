@@ -33,6 +33,13 @@ pixi run r2t-convert RUN.raw RUN.r2t --stats RUN.json
 the statistics of the run. The converter reports each check that fails and
 still writes the trace.
 
+For a run of RV images, the converter puts the source maps of the run into
+the trace (`RUN.r2t/sources/`), and the interface opens them with the
+trace. It finds a `srcmap.json` next to an image file or one directory up
+(as r2-build writes them); `--srcmap FILE` adds another one. A map goes in
+only when the image hash of one of its programs equals that of a program
+that ran.
+
 Without r2-sim, `r2t-synth` writes synthetic raw dumps for tests:
 
 ```bash
@@ -86,8 +93,11 @@ it.
 ## Sources
 
 The Source tab shows a Neutrino program from the source map that
-`r2-build` writes (`srcmap.json`): the invokes with their descriptors,
-loops, closures and the source code. Open it with "Open source map".
+`r2-build` writes (`srcmap.json`): the source code, with each invoke as
+a card of its descriptor values, regions (`// region:` ... `// endregion`)
+as folds, and the tasks of the trace that each invoke made. A trace
+carries its source maps (see above), so "Open trace and source" opens
+both; "Open source map" in the Source tab adds another map.
 
 `pixi run build` writes a static build to `web/dist` (or to the directory
 in `R2VIS_DIST`). Serve that directory with any static file server.

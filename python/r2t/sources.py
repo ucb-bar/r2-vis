@@ -1,0 +1,74 @@
+"""Source maps that go into a processed trace (format 1.10): `OUT/sources/NAME.json`.
+
+A source map (r2-toolchain docs/source-map.md, version 1) belongs to a run when one of its
+programs has the image of a program that ran: equal `image.sha256` and the manifest's
+`images[].sha256` (raw 1.10). The candidates are the maps given with --srcmap and a
+`srcmap.json` next to an image file of the run, or one directory up (r2-build writes
+out/srcmap.json, the ELFs in out/ and the raw images in out/images/).
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+from pathlib import Path
+
+SOURCES_DIR = "sources"
+
+
+def candidates(images: list[dict], given: list[Path]) -> list[Path]:
+    """The given maps, then the srcmap.json next to each image file or one directory up,
+    without repeats."""
+    found = [p.resolve() for p in given]
+    for image in images:
+        if image.get("file"):
+            folder = Path(image["file"]).parent
+            found += [p.resolve() for p in (folder / "srcmap.json", folder.parent / "srcmap.json")
+                      if p.is_file()]
+    return list(dict.fromkeys(found))
+
+
+def matching(path: Path, hashes: set[str]) -> tuple[str, ...]:
+    """The programs of the map whose image ran; empty if the file is not a version 1 map."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ()
+    if data.get("format") != "r2-srcmap" or data.get("version") != 1:
+        return ()
+    return tuple(p["program"] for p in data.get("programs", [])
+                 if p.get("image", {}).get("sha256") in hashes)
+
+
+def name_of(path: Path, taken: set[str]) -> str:
+    """A file name for the map: its crate directory (the parent of r2-build's out/)."""
+    base = path.parent.parent.name if path.parent.name == "out" else path.parent.name
+    name, k = base or "srcmap", 1
+    while name in taken:
+        k += 1
+        name = f"{base}-{k}"
+    return name
+
+
+def copy_maps(images: list[dict], given: list[Path], out: Path) -> list[dict]:
+    """Copies the maps that belong to the run into OUT/sources; returns the manifest entries.
+    A given map that matches no image of the run is reported and left out."""
+    hashes = {x["sha256"] for x in images if x.get("sha256")}
+    given_set = {p.resolve() for p in given}
+    entries: list[dict] = []
+    taken: set[str] = set()
+    for path in candidates(images, given):
+        programs = matching(path, hashes)
+        if not programs:
+            if path in given_set:
+                print(f"warning: {path}: no program of this map ran in the trace "
+                      "(image sha256 differs, or not a version 1 source map)", file=sys.stderr)
+            continue
+        name = name_of(path, taken)
+        taken.add(name)
+        (out / SOURCES_DIR).mkdir(exist_ok=True)
+        shutil.copyfile(path, out / SOURCES_DIR / f"{name}.json")
+        entries.append({"file": f"{SOURCES_DIR}/{name}.json", "from": str(path),
+                        "programs": list(programs)})
+    return entries

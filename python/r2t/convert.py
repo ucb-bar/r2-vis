@@ -22,11 +22,11 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from r2t import checks, dims, facts, schema, timeline
+from r2t import checks, dims, facts, schema, sources, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 9)
+FORMAT_VERSION = (1, 10)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
 ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288,
@@ -82,7 +82,8 @@ def prepare_out(out: Path) -> None:
     out.mkdir(parents=True)
 
 
-def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[str]]:
+def convert(raw_dir: Path, out: Path, stats: dict | None,
+            srcmaps: list[Path] = ()) -> tuple[dict, list[str]]:
     """Converts one dump. Returns the r2t manifest and the check violations."""
     dump = load(raw_dir)
     m = dump.manifest
@@ -155,6 +156,7 @@ def convert(raw_dir: Path, out: Path, stats: dict | None) -> tuple[dict, list[st
         "charge_blocks": blocks,
         "tables": {name: schema.describe(name, rows[name], label_fields)
                    for name in [*tables, "charges"]},
+        "sources": sources.copy_maps(m.get("images") or [], list(srcmaps), out),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     (out / "views.sql").write_text(views_sql(m.get("label", {}), end_time, width, origin))
@@ -176,12 +178,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("out", type=Path, help="output directory, e.g. RUN.r2t")
     ap.add_argument("--stats", type=Path,
                     help="the run's --stats JSON: check busy_cycles against the charges")
+    ap.add_argument("--srcmap", type=Path, action="append", default=[],
+                    help="a source map (r2-build srcmap.json) to put into the trace if a "
+                         "program of it ran; a srcmap.json next to an image file is found "
+                         "without this")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
     stats = json.loads(args.stats.read_text()) if args.stats else None
     t0 = time.perf_counter()
     try:
-        manifest, errors = convert(args.raw, args.out, stats)
+        manifest, errors = convert(args.raw, args.out, stats, args.srcmap)
     except FormatError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
