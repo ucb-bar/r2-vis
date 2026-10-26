@@ -4,8 +4,11 @@ The GUI opens a served trace by URL and reads its Parquet files by byte range, s
 a remote machine needs no copy: forward the port over SSH and open the printed link.
 
 * The server binds 127.0.0.1 only. There is no option for another address.
-* Every path starts with a random token that the server prints at start. Other users of the
-  same machine can reach the loopback port, but not the files without the token.
+* Every path starts with a random token. Other users of the same machine can reach the
+  loopback port, but not the files without the token. The token is kept in a file that
+  only the user can read ($XDG_RUNTIME_DIR/r2t-serve/token), so the URLs stay the same
+  across restarts until a reboot; --new-token makes a new one. `r2t-serve --url` prints the
+  URL without serving.
 * Cross-origin reads are allowed only from the origins in ALLOWED_ORIGINS and --allow-origin,
   so that another web page in the same browser cannot read a trace through the forward.
 
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import secrets
 import sys
@@ -193,6 +197,29 @@ def make_handler(catalog: Catalog, token: str, origins: frozenset[str], verbose:
     return Handler
 
 
+def token_file() -> Path | None:
+    """The file that keeps the token, in the user's private runtime directory; None if the
+    system has none (then every start makes a new token)."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    return Path(runtime) / "r2t-serve" / "token" if runtime and Path(runtime).is_dir() else None
+
+
+def load_token(renew: bool) -> str:
+    """The kept token, or a new one (kept for the next start)."""
+    path = token_file()
+    if path is not None and not renew and path.is_file():
+        token = path.read_text().strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{16,}", token):
+            return token
+    token = secrets.token_urlsafe(18)
+    if path is not None:
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+    return token
+
+
 def app_link(url: str) -> str:
     """The GUI opens the trace (or the list of traces) at `url`. The URL is in the fragment,
     so the token never reaches the server of the GUI."""
@@ -201,13 +228,24 @@ def app_link(url: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Serve r2t traces on 127.0.0.1 for the r2-vis GUI")
-    ap.add_argument("paths", type=Path, nargs="+",
+    ap.add_argument("paths", type=Path, nargs="*",
                     help="a trace directory (RUN.r2t), or a directory of trace directories")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default {DEFAULT_PORT}")
     ap.add_argument("--allow-origin", action="append", default=[],
                     help="another origin that may read the traces, e.g. http://127.0.0.1:4173")
     ap.add_argument("--verbose", action="store_true", help="log every request")
+    ap.add_argument("--new-token", action="store_true",
+                    help="make a new token (the old URLs stop working)")
+    ap.add_argument("--url", action="store_true",
+                    help="print the server URL and the GUI link for --port, and exit")
     args = ap.parse_args(argv)
+    if args.url:
+        base = f"http://{HOST}:{args.port}/{load_token(args.new_token)}/"
+        print(base)
+        print(app_link(base))
+        return 0
+    if not args.paths:
+        ap.error("give at least one trace directory")
     missing = [p for p in args.paths if not p.is_dir()]
     if missing:
         print(f"error: not a directory: {', '.join(map(str, missing))}", file=sys.stderr)
@@ -217,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no processed trace (a directory with manifest.json and views.sql) found",
               file=sys.stderr)
         return 2
-    token = secrets.token_urlsafe(18)
+    token = load_token(args.new_token)
     origins = frozenset(ALLOWED_ORIGINS + tuple(args.allow_origin))
     handler = make_handler(catalog, token, origins, args.verbose)
     try:

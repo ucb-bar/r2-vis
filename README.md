@@ -75,9 +75,13 @@ pixi run r2t-serve RUN.r2t        # or a directory of .r2t directories
 It prints an `ssh -L` command and one link per trace. Forward the port
 from your computer with that command, then open the link. The link opens
 the interface with the trace URL after `#trace=`; the interface reads the
-files by byte range, so a large trace needs no copy. Each start makes a
-new random token in the URLs. The browser asks once for access to the
-local network; allow it.
+files by byte range, so a large trace needs no copy. The URLs hold a
+random token, kept in a file that only you can read
+(`$XDG_RUNTIME_DIR/r2t-serve/token`), so they stay the same across
+restarts until a reboot; `--new-token` makes a new one, and
+`r2t-serve --url` prints the URL. The interface keeps a list of recent
+servers. The browser asks once for access to the local network; allow
+it.
 
 ## Sources
 
