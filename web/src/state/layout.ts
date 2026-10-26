@@ -110,11 +110,13 @@ export function replaceAt(node: LayoutNode, path: string, by: LayoutNode): Layou
     : { ...node, b: replaceAt(node.b, path.slice(1), by) }
 }
 
-/** An area split in two: the area stays first (left or above), `added` goes second. */
-export function splitArea(root: LayoutNode, id: string, dir: SplitDir, added: AreaLeaf): LayoutNode {
+/** An area split in two at `ratio` (the share of the left or upper part): `added` goes
+ * second (right or below), or first when `addedFirst`. */
+export function splitArea(root: LayoutNode, id: string, dir: SplitDir, added: AreaLeaf, ratio = 0.5, addedFirst = false): LayoutNode {
   const path = pathOf(root, id)
   if (path === null) return root
-  return replaceAt(root, path, { kind: 'split', dir, ratio: 0.5, a: nodeAt(root, path), b: added })
+  const area = nodeAt(root, path)
+  return replaceAt(root, path, { kind: 'split', dir, ratio, a: addedFirst ? added : area, b: addedFirst ? area : added })
 }
 
 /** The neighbor of an area: the other side of its split, and where it is. */

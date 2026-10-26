@@ -7,6 +7,8 @@ import { ChargeCache } from './data/charges'
 import { ViewStore } from './state/viewstore'
 import { homeRange } from './timeline/rows'
 import { OpenPanel } from './ui/OpenPanel'
+import { ServerMenu } from './ui/ServerMenu'
+import { addServer, loadServers, removeServer, serverLabel } from './data/servers'
 import { LoadReport } from './ui/LoadReport'
 import { Workspace } from './ui/Workspace'
 import { ThemeToggle } from './ui/ThemeToggle'
@@ -37,6 +39,11 @@ export function App() {
   const [src, setSrc] = useState<OpenSourceMap>({ maps: [], error: null })
   // The traces of an r2t-serve base URL, listed on the start page.
   const [served, setServed] = useState<{ base: string; traces: ServedTrace[] } | null>(null)
+  // The servers opened before; the open served trace; a saved server that failed to open.
+  const [servers, setServers] = useState(loadServers)
+  const [opened, setOpened] = useState<{ base: string; name: string } | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+  const forget = (url: string) => { setServers(removeServer(url)); if (failed === url) setFailed(null) }
   /** Adds a source map; a map with the same file name replaces the old one. */
   const openSourceMap = async (file: File) => {
     try {
@@ -61,6 +68,7 @@ export function App() {
 
   const open = async (tf: TraceFiles) => {
     setState({ kind: 'loading', name: tf.name, done: 0, total: 1 })
+    setOpened(null)
     setFragment(tf.url ?? null)
     try {
       pool().reset()
@@ -77,22 +85,28 @@ export function App() {
     }
   }
 
-  /** A server base URL lists its traces; a trace URL opens that trace. */
+  /** A server base URL lists its traces; a trace URL opens that trace. A server that
+   * answers is kept in the recent servers; a saved one that fails can be removed. */
   const openUrl = async (input: string) => {
+    let base: string | null = null
     try {
-      const { base, trace } = parseServerUrl(input)
-      const traces = await fetchIndex(base)
-      if (trace === null) {
-        setServed({ base, traces })
-        setFragment(base)
+      const parsed = parseServerUrl(input)
+      base = parsed.base
+      const traces = await fetchIndex(parsed.base)
+      setServers(addServer(parsed.base))
+      setFailed(null)
+      setServed({ base: parsed.base, traces })
+      if (parsed.trace === null) {
+        setFragment(parsed.base)
         setState({ kind: 'idle' })
         return
       }
-      const t = traces.find((x) => x.name === trace)
-      if (!t) throw new Error(`${base}: no trace named ${trace} (the server lists ${traces.map((x) => x.name).join(', ') || 'none'})`)
-      setServed({ base, traces })
-      await open({ name: t.name, files: servedFiles(base, t), url: traceUrl(base, t.name) })
+      const t = traces.find((x) => x.name === parsed.trace)
+      if (!t) throw new Error(`${parsed.base}: no trace named ${parsed.trace} (the server lists ${traces.map((x) => x.name).join(', ') || 'none'})`)
+      await open({ name: t.name, files: servedFiles(parsed.base, t), url: traceUrl(parsed.base, t.name) })
+      setOpened({ base: parsed.base, name: t.name })
     } catch (err) {
+      if (base && loadServers().some((s) => s.url === base)) setFailed(base)
       setState({ kind: 'error', message: String((err as Error).message ?? err) })
     }
   }
@@ -130,6 +144,11 @@ export function App() {
             Loaded in {Math.round(state.trace.load.totalMs)} ms
           </button>
         )}
+        {state.kind === 'loaded' && (
+          <ServerMenu servers={servers} onServer={(u) => void openUrl(u)} onRemove={forget}
+            current={opened && served?.base === opened.base ? { base: opened.base, traces: served.traces.map((t) => t.name), open: opened.name } : null}
+            onTrace={(base, name) => void openUrl(traceUrl(base, name))} />
+        )}
         {(state.kind === 'loaded' || src.maps.length > 0) && <OpenPanel compact onFiles={onFiles} onDrop={onDrop} />}
         <ThemeToggle />
       </header>
@@ -145,7 +164,8 @@ export function App() {
           </div>
         )}
         {state.kind !== 'loaded' && !src.maps.length && (
-          <OpenPanel onFiles={onFiles} onDrop={onDrop} onSourceMap={(f) => void openSourceMap(f)} onUrl={(u) => void openUrl(u)}>
+          <OpenPanel onFiles={onFiles} onDrop={onDrop} onSourceMap={(f) => void openSourceMap(f)} onUrl={(u) => void openUrl(u)}
+            recent={<ServerMenu servers={servers} onServer={(u) => void openUrl(u)} onRemove={forget} />}>
             {served && state.kind !== 'loading' && (
               <table className="served">
                 <tbody>{served.traces.map((t) => (
@@ -163,6 +183,9 @@ export function App() {
               </>
             )}
             {state.kind === 'error' && <div className="error">{state.message}</div>}
+            {state.kind === 'error' && failed && (
+              <button className="button small" onClick={() => forget(failed)}>Remove {serverLabel(failed)} from the recent servers</button>
+            )}
             {src.error && <div className="error">{src.error}</div>}
           </OpenPanel>
         )}

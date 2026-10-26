@@ -515,7 +515,7 @@ export class TimelineRenderer {
       if (g) out.push(g)
       else {
         missing = true
-        void this.charges.get(blk)
+        this.charges.prefetch(blk)
       }
     }
     return missing ? null : out

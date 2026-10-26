@@ -66,10 +66,22 @@ export class ChargeCache {
         for (const cb of this.listeners) cb()
         return g
       })
+      // A failed read (a served trace whose server stopped) can be tried again.
+      p.catch(() => this.inflight.delete(block.group))
       this.inflight.set(block.group, p)
     }
     return p
   }
+
+  /** Starts loading a group for a later draw; a failure is reported once and not thrown. */
+  prefetch(block: ChargeBlock): void {
+    this.get(block).catch((err) => {
+      if (this.warned) return
+      this.warned = true
+      console.warn(`charge group ${block.group}: ${(err as Error).message ?? err}`)
+    })
+  }
+  private warned = false
 
   /** Other views: called when a group finishes loading. Returns the unsubscribe. */
   subscribe(cb: () => void): () => void {

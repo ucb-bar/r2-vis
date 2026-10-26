@@ -244,7 +244,9 @@ export class Workbench {
     return this.find(areaId)?.ws ?? null
   }
 
-  split(id: string, dir: SplitDir): void {
+  /** Splits an area (the button: in half, the new area right or below; a corner drag: at
+   * `ratio`, the new area on the side the drag started from). */
+  split(id: string, dir: SplitDir, ratio = 0.5, addedFirst = false): void {
     const found = this.find(id)
     if (!found) return
     const { leaf } = found
@@ -256,7 +258,7 @@ export class Workbench {
       added.nodes = set ? (set.size === this.trace.dims.nodes.length ? null
         : this.trace.dims.nodes.filter((n) => set.has(n.id as number)).map((n) => String(n.path))) : leaf.nodes
     }
-    this.updateWs(found.ws.id, (w) => ({ ...w, maximized: null, root: splitArea(w.root, id, dir, added) }))
+    this.updateWs(found.ws.id, (w) => ({ ...w, maximized: null, root: splitArea(w.root, id, dir, added, ratio, addedFirst) }))
   }
 
   close(id: string): void {

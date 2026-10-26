@@ -49,10 +49,14 @@ function controlOf(trace: Trace) {
   return s
 }
 
-/** Builds the shared index and data of a trace ahead of the first control view. */
+/** Builds the shared index and data of a trace ahead of the first control view. A failed
+ * load (a served trace whose server stopped) is reported and tried again by the next view. */
 export function prepareControl(trace: Trace, pool: WorkerPool): void {
   const s = controlOf(trace)
-  s.load ??= s.data.load(pool)
+  s.load ??= s.data.load(pool).catch((err) => {
+    s.load = null
+    console.warn(`control data: ${(err as Error).message ?? err}`)
+  })
 }
 
 /** The control instant view (views-design 6.3): the Neutrinos as a force-directed tree,

@@ -8,11 +8,13 @@ interface Props {
   /** an r2t-serve URL (a server or a trace) */
   onUrl?: (url: string) => void
   compact?: boolean
+  /** the recent servers, next to the Open URL field */
+  recent?: ReactNode
   children?: ReactNode
 }
 
 /** Folder picker and drop zone for a .r2t directory, and a file picker for a source map. */
-export function OpenPanel({ onFiles, onDrop, onSourceMap, onUrl, compact, children }: Props) {
+export function OpenPanel({ onFiles, onDrop, onSourceMap, onUrl, compact, recent, children }: Props) {
   const input = useRef<HTMLInputElement>(null)
   const srcInput = useRef<HTMLInputElement>(null)
   const [url, setUrl] = useState('')
@@ -60,6 +62,7 @@ export function OpenPanel({ onFiles, onDrop, onSourceMap, onUrl, compact, childr
         <form className="tool-row open-url" onSubmit={(e) => { e.preventDefault(); if (url.trim()) onUrl(url.trim()) }}>
           <input type="url" placeholder="http://127.0.0.1:8765/TOKEN/" value={url} onChange={(e) => setUrl(e.target.value)} />
           <button className="button" type="submit">Open URL</button>
+          {recent}
         </form>
       )}
       {children}

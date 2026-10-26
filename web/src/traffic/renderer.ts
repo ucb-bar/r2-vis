@@ -462,7 +462,7 @@ export class TrafficRenderer {
       const out = []
       for (const blk of this.charges.groupsFor(x, y)) {
         const g = this.charges.peek(blk.group)
-        if (!g) { void this.charges.get(blk); return null }
+        if (!g) { this.charges.prefetch(blk); return null }
         out.push(g)
       }
       return chargesAmount(out, resource, x, y)
@@ -667,7 +667,7 @@ export class TrafficRenderer {
     for (const blk of blocks) {
       const g = this.charges.peek(blk.group)
       if (g) groups.push(g)
-      else void this.charges.get(blk)
+      else this.charges.prefetch(blk)
     }
     if (groups.length < blocks.length) return 'loading'
     const resources = l.kind === 'cross' || l.kind === 'self' ? l.members : [...directionSet(l, 0), ...directionSet(l, 1)]

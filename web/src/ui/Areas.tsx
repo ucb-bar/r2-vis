@@ -1,6 +1,8 @@
 // The areas of one workspace (state/layout.ts): placed side by side as absolute boxes, all
 // children of one element, so that a split, a merge or a close does not remount the views
-// that stay. Each area has a thin header: its view, split, merge, close, maximize.
+// that stay. Each area has a thin header: its view, split, close, maximize. Its corners
+// are action zones (as in Blender): a drag into the area splits it, a drag across an edge
+// into the neighbor of the same split joins the two.
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { BlockView } from '../blocks/BlockView'
 import type { ChargeCache } from '../data/charges'
@@ -72,7 +74,19 @@ function rectStyle(r: Rect): CSSProperties {
   }
 }
 
-const MERGE_ICON: Record<string, IconName> = { left: 'mergeLeft', right: 'mergeRight', above: 'mergeUp', below: 'mergeDown' }
+/** A corner drag: the area, the corner (its right or bottom side), the start. */
+interface Gesture { id: string; rect: Rect; right: boolean; bottom: boolean; x0: number; y0: number }
+
+/** What a corner drag would do on release: a split at a line (refused when a part would be
+ * under the minimum size), or a join (the kept area takes the dropped one's space). */
+type Preview =
+  | { kind: 'split'; dir: SplitDir; ratio: number; ok: boolean; line: { x: number; y: number; w: number; h: number } }
+  | { kind: 'join'; keep: Px; drop: Px }
+
+interface Px { x: number; y: number; w: number; h: number }
+
+/** A drag shorter than this (CSS px) does nothing. */
+const DRAG_MIN = 6
 
 interface TreeProps {
   ws: WorkspaceDef
@@ -88,6 +102,10 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
   const host = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 0, h: 0 })
   const drag = useRef<{ path: string; dir: SplitDir; start: number; len: number; lo: number; hi: number } | null>(null)
+  const gesture = useRef<Gesture | null>(null)
+  const [preview, setPreview] = useState<Preview | null>(null)
+  const previewRef = useRef<Preview | null>(null)
+  const show = (p: Preview | null) => { previewRef.current = p; setPreview(p) }
 
   useEffect(() => {
     const el = host.current as HTMLDivElement
@@ -115,6 +133,75 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
   }, [bench, ws.id])
 
   const placed = useMemo(() => place(ws.root), [ws.root])
+
+  // Corner drags: the preview follows the pointer; release applies it; Esc or a right
+  // click cancels.
+  useEffect(() => {
+    const px = (r: Rect): Px => ({ x: r.x * size.w, y: r.y * size.h, w: r.w * size.w, h: r.h * size.h })
+    const move = (e: PointerEvent) => {
+      const g = gesture.current
+      if (!g) return
+      const box = (host.current as HTMLDivElement).getBoundingClientRect()
+      const x = e.clientX - box.left
+      const y = e.clientY - box.top
+      const a = px(g.rect)
+      const dx = e.clientX - g.x0
+      const dy = e.clientY - g.y0
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < DRAG_MIN) { show(null); return }
+      const inside = x >= a.x && x <= a.x + a.w && y >= a.y && y <= a.y + a.h
+      if (inside) {
+        // the dominant axis: a horizontal drag splits left and right
+        const dir: SplitDir = Math.abs(dx) >= Math.abs(dy) ? 'row' : 'column'
+        const pos = dir === 'row' ? x - a.x : y - a.y
+        const len = dir === 'row' ? a.w : a.h
+        const min = dir === 'row' ? MIN_AREA.w : MIN_AREA.h
+        const line = dir === 'row' ? { x: x - 1, y: a.y, w: 2, h: a.h } : { x: a.x, y: y - 1, w: a.w, h: 2 }
+        show({ kind: 'split', dir, ratio: pos / len, ok: pos >= min && len - pos >= min, line })
+        return
+      }
+      // across an edge: a join if the neighbor there is the sibling area of the same split
+      const over = { left: a.x - x, right: x - (a.x + a.w), above: a.y - y, below: y - (a.y + a.h) }
+      const side = (Object.entries(over) as [keyof typeof over, number][]).sort((p, q) => q[1] - p[1])[0][0]
+      const nb = neighborOf(ws.root, g.id)
+      const target = nb && nb.side === side && nb.node.kind === 'area' ? placed.areas.find((p) => p.leaf.id === (nb.node as AreaLeaf).id) : null
+      const d = target ? px(target.rect) : null
+      if (target && d && x >= d.x && x <= d.x + d.w && y >= d.y && y <= d.y + d.h) show({ kind: 'join', keep: a, drop: d })
+      else show(null)
+    }
+    const end = (apply: boolean) => {
+      const g = gesture.current
+      const p = previewRef.current
+      gesture.current = null
+      show(null)
+      if (!g || !apply || !p) return
+      if (p.kind === 'split' && p.ok) {
+        const first = p.dir === 'row' ? !g.right : !g.bottom
+        bench.split(g.id, p.dir, p.ratio, first)
+      } else if (p.kind === 'join') bench.merge(g.id)
+    }
+    const up = (e: PointerEvent) => { if (gesture.current && e.button === 0) end(true) }
+    const down = (e: PointerEvent) => { if (gesture.current && e.button !== 0) { e.preventDefault(); end(false) } }
+    const key = (e: KeyboardEvent) => { if (gesture.current && e.key === 'Escape') { e.preventDefault(); end(false) } }
+    const menu = (e: MouseEvent) => { if (gesture.current) { e.preventDefault(); end(false) } }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointerdown', down, true)
+    window.addEventListener('keydown', key, true)
+    window.addEventListener('contextmenu', menu, true)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointerdown', down, true)
+      window.removeEventListener('keydown', key, true)
+      window.removeEventListener('contextmenu', menu, true)
+    }
+  }, [bench, ws.root, placed, size])
+  const startGesture = (e: React.PointerEvent, id: string, rect: Rect, right: boolean, bottom: boolean) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    gesture.current = { id, rect, right, bottom, x0: e.clientX, y0: e.clientY }
+  }
   const maximized = ws.maximized && placed.areas.some((a) => a.leaf.id === ws.maximized) ? ws.maximized : null
   const only = placed.areas.length === 1
   const hasTimeline = placed.areas.some((a) => a.leaf.view === 'timeline')
@@ -150,6 +237,10 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
               <AreaContent key={`${leaf.id}:${leaf.view}`} id={leaf.id} view={leaf.view} shared={shared}
                 strip={leaf.view === 'instant' ? strip : null} />
             </div>
+            {!maximized && (['tl', 'tr', 'bl', 'br'] as const).map((c) => (
+              <div key={c} className={`area-corner ${c}`} data-corner={c}
+                onPointerDown={(e) => startGesture(e, leaf.id, rect, c[1] === 'r', c[0] === 'b')} />
+            ))}
           </div>
         )
       })}
@@ -160,7 +251,34 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
         return <div key={`s${path}`} className={`area-border ${dir}`} data-split={path} style={style}
           onPointerDown={(e) => startDrag(e, path, dir, rect)} />
       })}
+      {preview?.kind === 'split' && (
+        <div className={preview.ok ? 'area-preview-line' : 'area-preview-line refused'}
+          style={{ left: preview.line.x, top: preview.line.y, width: preview.line.w, height: preview.line.h }} />
+      )}
+      {preview?.kind === 'join' && <JoinPreview keep={preview.keep} drop={preview.drop} />}
     </div>
+  )
+}
+
+/** The join preview: the area to be removed darkened, an arrow from the kept area into it. */
+function JoinPreview({ keep, drop }: { keep: Px; drop: Px }) {
+  const from = { x: keep.x + keep.w / 2, y: keep.y + keep.h / 2 }
+  const to = { x: drop.x + drop.w / 2, y: drop.y + drop.h / 2 }
+  const len = Math.hypot(to.x - from.x, to.y - from.y)
+  const ux = (to.x - from.x) / len
+  const uy = (to.y - from.y) / len
+  const head = 14
+  const tip = { x: to.x - ux * 8, y: to.y - uy * 8 }
+  const left = { x: tip.x - ux * head - uy * head * 0.6, y: tip.y - uy * head + ux * head * 0.6 }
+  const right = { x: tip.x - ux * head + uy * head * 0.6, y: tip.y - uy * head - ux * head * 0.6 }
+  return (
+    <>
+      <div className="area-preview-drop" style={{ left: drop.x, top: drop.y, width: drop.w, height: drop.h }} />
+      <svg className="area-preview-arrow" width="100%" height="100%">
+        <line x1={from.x} y1={from.y} x2={tip.x - ux * head * 0.5} y2={tip.y - uy * head * 0.5} />
+        <polygon points={`${tip.x},${tip.y} ${left.x},${left.y} ${right.x},${right.y}`} />
+      </svg>
+    </>
   )
 }
 
@@ -173,8 +291,7 @@ interface HeaderProps {
   canSplit: { row: boolean; column: boolean }
 }
 
-function AreaHeader({ ws, leaf, bench, only, maximized, canSplit }: HeaderProps) {
-  const nb = neighborOf(ws.root, leaf.id)
+function AreaHeader({ leaf, bench, only, maximized, canSplit }: HeaderProps) {
   return (
     <div className="area-head">
       <select className="area-view" aria-label="view" value={leaf.view}
@@ -185,8 +302,6 @@ function AreaHeader({ ws, leaf, bench, only, maximized, canSplit }: HeaderProps)
       {!maximized && <>
         <IconButton icon="splitRow" tip="Split left and right" disabled={!canSplit.row} onClick={() => bench.split(leaf.id, 'row')} />
         <IconButton icon="splitColumn" tip="Split top and bottom" disabled={!canSplit.column} onClick={() => bench.split(leaf.id, 'column')} />
-        {nb && <IconButton icon={MERGE_ICON[nb.side]} tip={`Merge with the area ${nb.side === 'left' || nb.side === 'right' ? `on the ${nb.side}` : nb.side}`}
-          disabled={nb.node.kind !== 'area'} onClick={() => bench.merge(leaf.id)} />}
         <IconButton icon="close" tip="Close" disabled={only} onClick={() => bench.close(leaf.id)} />
       </>}
       {(!only || maximized) && <IconButton icon={maximized ? 'restore' : 'maximize'} tip={maximized ? 'Restore' : 'Maximize'}
