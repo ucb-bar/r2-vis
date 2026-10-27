@@ -215,8 +215,6 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
   }
   const maximized = ws.maximized && placed.areas.some((a) => a.leaf.id === ws.maximized) ? ws.maximized : null
   const only = placed.areas.length === 1
-  const hasTimeline = placed.areas.some((a) => a.leaf.view === 'timeline')
-  const strip = hasTimeline ? null : bench.stripRenderer()
 
   const startDrag = (e: React.PointerEvent, path: string, dir: SplitDir, r: Rect) => {
     e.preventDefault()
@@ -246,7 +244,7 @@ export function AreaTree({ ws, visible, shared, hovered }: TreeProps) {
               canSplit={{ row: px.w >= 2 * MIN_AREA.w + GAP, column: px.h >= 2 * MIN_AREA.h + GAP }} slot={slotRef(leaf.id)} />
             <div className="area-body">
               <AreaContent key={`${leaf.id}:${leaf.view}`} id={leaf.id} view={leaf.view} shared={shared}
-                strip={leaf.view === 'instant' ? strip : null} slot={slots[leaf.id] ?? null} />
+                slot={slots[leaf.id] ?? null} />
             </div>
             {!maximized && (['tl', 'tr', 'bl', 'br'] as const).map((c) => (
               <div key={c} className={`area-corner ${c}`} data-corner={c}
@@ -327,13 +325,12 @@ interface ContentProps {
   id: string
   view: ViewType
   shared: Shared
-  strip: TimelineRenderer | null
   slot: HTMLElement | null
 }
 
 /** The view of an area, in the area's context (its sidebar state). Memoized: a layout
  * change that moves the area does not render the view again. */
-const AreaContent = memo(function AreaContent({ id, view, shared, strip, slot }: ContentProps) {
+const AreaContent = memo(function AreaContent({ id, view, shared, slot }: ContentProps) {
   const { trace, charges, pool, store, bench, source, onOpenSource } = shared
   const api = useMemo<AreaApi>(() => ({ id, slot, ui: (k) => bench.ui(id, k), setUi: (k, v) => bench.setUi(id, k, v) }), [bench, id, slot])
   const isKeyTarget = useCallback(() => bench.isKeyTarget(id), [bench, id])
@@ -346,7 +343,7 @@ const AreaContent = memo(function AreaContent({ id, view, shared, strip, slot }:
   } else if (view === 'blocks') {
     body = <BlockView trace={trace} store={store} />
   } else if (view === 'instant') {
-    body = <InstantView trace={trace} charges={charges} store={store} strip={strip} pool={pool} />
+    body = <InstantView trace={trace} charges={charges} store={store} pool={pool} />
   } else {
     body = <SourceView maps={source.maps} error={source.error} onOpen={onOpenSource} trace={trace} store={store}
       request={bench.sourceRequests(id)} />

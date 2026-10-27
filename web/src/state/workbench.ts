@@ -25,7 +25,7 @@ export interface TimelineArea {
 
 export class Workbench {
   readonly layout: Store<Layout>
-  /** Bumped when the use order or a timeline's renderer changes (the Instant strip). */
+  /** Bumped when the use order or a timeline's renderer changes. */
   readonly changes = new Store(0)
   /** The workspaces shown at least once: their areas stay mounted. */
   readonly mounted = new Set<string>()
@@ -44,8 +44,8 @@ export class Workbench {
     this.allNodes = new BlockSelection(trace.dims.nodes.map((n) => n.id as number))
     this.layout = new Store(layout)
     this.mounted.add(layout.active)
-    // The default Timeline workspace is mounted from the start (the Instant strip and the
-    // block diagram show its timeline, as before the workspaces).
+    // The default Timeline workspace is mounted from the start (the block diagram edits its
+    // timeline's node set, as before the workspaces).
     const tl = this.defaultTimeline()
     if (tl) this.mounted.add(tl.ws.id)
     this.refresh()
@@ -90,7 +90,7 @@ export class Workbench {
     return null
   }
 
-  /** The timeline that the block diagram, the Instant strip and window.__r2timeline use:
+  /** The timeline that the block diagram and window.__r2timeline use:
    * the most recently used one of the active workspace, else of any workspace, else the
    * one of the default Timeline workspace. */
   targetTimeline(): string | null {
@@ -106,7 +106,7 @@ export class Workbench {
   }
 
   /** The renderer of the target timeline, or of any mounted timeline. */
-  stripRenderer(): TimelineRenderer | null {
+  timelineRenderer(): TimelineRenderer | null {
     const id = this.targetTimeline()
     const r = id ? this.timelines.get(id)?.renderer : null
     return r ?? [...this.timelines.values()].find((t) => t.renderer)?.renderer ?? null
@@ -200,7 +200,7 @@ export class Workbench {
     const id = this.targetTimeline()
     const sel = id ? this.timeline(id).blocks : this.allNodes
     if (this.store.targetBlocks.get() !== sel) this.store.targetBlocks.set(sel)
-    const r = this.stripRenderer()
+    const r = this.timelineRenderer()
     if (r) window.__r2timeline = r
     this.changes.set(this.changes.get() + 1)
   }

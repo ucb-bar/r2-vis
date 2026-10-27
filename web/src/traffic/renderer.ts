@@ -11,10 +11,10 @@ import { tipList, type TipContent, type TipRow } from '../ui/Tooltip'
 import { recorded, type Recorded } from '../timeline/rows'
 import { rgba } from '../timeline/raster'
 import { chargesAmount, rangeAmount } from '../timeline/util'
-import { channelStrips, columns, layout, LOOP_LEG, type Layout, type PLink, type PStrip } from './layout'
+import { columns, layout, LOOP_LEG, type BandKind, type Layout, type PBand, type PLink, type PStrip } from './layout'
 import { MergeTree, type MGroup } from './merge'
 import { pack } from './pack'
-import { attachmentExtras, CLASS_ORDER, type LinkClass } from './model'
+import { type LinkClass } from './model'
 import { TrafficModel } from './model'
 
 const LABEL_MIN = 64                // the gutter of the band names: at least, and at most a
@@ -32,8 +32,8 @@ const LOOP_MARGIN = 14              // px between a hairpin's end and the next b
 const BUS_COL_WEIGHT = 1.3          // relative widths of the bus and block columns
 const BLOCK_COL_WEIGHT = 0.75
 const OUTLINE_MIN_W = 5             // unlimited links: a dashed outline from this width
+const MAX_ZOOM_X = 16               // the largest horizontal zoom
 const MAX_SPEED = 80                // pattern speed at 100 % (px/s)
-const STOP_SAMPLES = 64             // zoom samples for the cuts of the zoom slider
 const TINT = 0.35                   // the pattern: the class color mixed with white
 const MAX_TOOLTIP_GROUPS = 8
 const CLASS_SLOT: Record<LinkClass, string> = { global: 'global-2', local: 'local-0', control: 'control-2' }
@@ -106,6 +106,13 @@ export class TrafficRenderer {
   /** the zoom: the height (px) the drawing takes; the scroll offset in px */
   zoomH = 400
   scroll = 0
+  /** the horizontal zoom (1: the plot fits the width; text keeps its size) and the share
+   * of the zoomed plot left of the view (a share: it holds across a resize) */
+  zoomX = 1
+  xStart = 0
+  /** the plot's left edge (after the name gutter) and its width at zoom 1 (px) */
+  plotLeft = 0
+  plotW = 1
   range = { a: 0, b: 1 }
   /** per class: visible (the layout leaves hidden classes out), and collapse when no
    * traffic (a link with no traffic in the range is a thin line) */
@@ -133,11 +140,19 @@ export class TrafficRenderer {
   readonly overrides = new Map<string, boolean>()
   private picked: { key: string; lay: Layout; cut: Set<string> } | null = null
   private stops: { key: string; zooms: number[] } | null = null
+  /** the zoom levels (levelCuts), made once */
+  private levels: Set<string>[] | null = null
   /** after a click: the cut to draw as it is (the previous cut with the split or merge) */
   private pending: Set<string> | null = null
   private allOpen: Set<string> | null = null
-  /** gutter names and block-group brackets: a click merges the group back */
-  private bandHits: { x0: number; x1: number; y0: number; y1: number; key: string }[] = []
+  /** gutter names and block-group brackets: a click merges the group back (a closed
+   * group's name: splits it) */
+  private bandHits: { x0: number; x1: number; y0: number; y1: number; key: string; split?: boolean }[] = []
+  /** The gutter labels of the last base draw: per open node and closed group of nodes,
+   * its span (the rows of its boxes and strips) and where its name is drawn. */
+  gutter: GutterLabel[] = []
+  /** the widest strip's bandwidth of the last base draw (strip widths) */
+  private bwRef = 1
   private readonly bidir: Map<number, boolean>  // resource -> carried traffic over the run
   private current: { lay: Layout } | null = null
   private loads = new Map<string, LinkLoad>()
@@ -194,101 +209,73 @@ export class TrafficRenderer {
     return this.allOpen
   }
 
-  /** The height (px) of a closed item: its box (a block, a block group, or a group of
-   * nodes with its loops and edges) and the gap to the next. */
-  private closedHeight(g: MGroup): number {
-    const v = this.visibleClasses
-    const d = this.trace.dims
-    const separate = this.channels === 'separate'
-    let slots = 0
-    const one = g.members.length === 1 ? g.members[0] : null
-    if (one && 'block' in one) {
-      const node = this.model.nodes[one.block.node]
-      for (const att of one.block.atts) {
-        const a = d.attachments[att]
-        const bus = node.buses.find((b) => b.id === a.bus)
-        if (!bus || !v[bus.cls]) continue
-        const x = attachmentExtras(this.trace, att)
-        const ok = (rs: unknown[]) => rs.filter((r): r is number => r !== null && r !== undefined)
-        slots += channelStrips(d, [ok([a.in_resource, ...x.fwd]), ok([a.out_resource, ...x.rev])], separate).length
-      }
-    } else {
-      const { inner, cross } = this.tree.groupLinks(g)
-      const nodes = 'node' in g.members[0]
-      for (const cls of CLASS_ORDER) {
-        if (!v[cls]) continue
-        if (nodes && inner[cls].fwd.length + inner[cls].rev.length) slots += LOOP_LEG + 1
-        const k = cross[cls]
-        if (k.fwd.length + k.rev.length) slots += channelStrips(d, [k.fwd, k.rev], separate).length
+  /** The zoom levels, coarsest first: each a cut that treats every parent at a depth the
+   * same. A level has, per depth, the number of merge-tree splits of every run of children
+   * of the nodes at that depth (0: a run is one box), and the depth down to which nodes are
+   * open. The order: at each depth the runs of child nodes split step by step until their
+   * nodes are single, then those nodes open (one depth down); then the runs of blocks split
+   * further, the shallow depths first. Siblings with different counts take the same steps. */
+  levelCuts(): Set<string>[] {
+    if (this.levels) return this.levels
+    const m = this.model
+    const tree = this.tree
+    const steps = (g: MGroup): number => (g.parts.length ? 1 + Math.max(...g.parts.map(steps)) : 0)
+    const isNodes = (g: MGroup) => 'node' in g.members[0]
+    const nodeK = Array.from({ length: m.depth + 1 }, () => 0)
+    const blockK = Array.from({ length: m.depth + 1 }, () => 0)
+    for (const n of m.nodes) {
+      for (const g of tree.runs[n.id]) {
+        const k = steps(g)
+        if (isNodes(g)) nodeK[n.depth] = Math.max(nodeK[n.depth], k)
+        else blockK[n.depth] = Math.max(blockK[n.depth], k)
       }
     }
-    return this.boxHeight(slots) + BOX_GAP
+    const cut = (k: number[], openDepth: number): Set<string> => {
+      const open = new Set([`n${m.root}`])
+      const visit = (id: number) => { for (const g of tree.runs[id]) split(g, k[m.nodes[id].depth]) }
+      const split = (g: MGroup, left: number) => {
+        if (g.parts.length) {
+          if (left <= 0) return
+          open.add(g.key)
+          for (const q of g.parts) split(q, left - 1)
+        } else if (isNodes(g)) {
+          const c = (g.members[0] as { node: number }).node
+          if (m.nodes[c].depth <= openDepth) { open.add(g.key); visit(c) }
+        }
+      }
+      visit(m.root)
+      return open
+    }
+    const out: Set<string>[] = []
+    const push = (c: Set<string>) => {
+      const last = out[out.length - 1]
+      if (!last || last.size !== c.size || [...c].some((x) => !last.has(x))) out.push(c)
+    }
+    const k = Array.from({ length: m.depth + 1 }, () => 0)
+    for (let d = 0; d <= m.depth; d++) {
+      for (let s = 0; s <= nodeK[d]; s++) { k[d] = s; push(cut(k, d)) }
+    }
+    for (let d = 0; d <= m.depth; d++) {
+      for (let s = k[d] + 1; s <= Math.max(nodeK[d], blockK[d]); s++) { k[d] = s; push(cut(k, m.depth)) }
+    }
+    this.levels = out
+    return out
   }
 
-  /** The estimated height of a cut: per open node, its children's items, and its own
-   * blocks with its links to its parent (they cross the block column), side by side.
-   * `memo` keeps the heights of items; the caller drops the entries of a changed item and
-   * its ancestors. */
-  private estimate(open: Set<string>, memo = new Map<string, number>()): number {
-    const v = this.visibleClasses
-    const node = (id: number): number => {
-      let kids = 0
-      let blocks = 0
-      for (const g of this.tree.runs[id]) {
-        const h = item(g)
-        if ('node' in g.members[0]) kids += h
-        else blocks += h
-      }
-      for (const l of this.model.nodes[id].uplinks) {
-        if (!v[l.cls]) continue
-        const both = [l.up, ...l.upPorts].some((r) => this.bidir.get(r)) && [l.down, ...l.downPorts].some((r) => this.bidir.get(r))
-        blocks += (both ? 2 : 1) * this.pitch
-      }
-      return Math.max(kids, blocks)
+  /** A level's cut with the user's splits (the group and the groups and nodes around it
+   * open) and merges (the group closed, with everything inside it). */
+  private withOverrides(cut: Set<string>): Set<string> {
+    if (!this.overrides.size) return cut
+    const out = new Set(cut)
+    const inside = (k: string, of: string): boolean => {
+      for (let x: string | undefined = k; x; x = this.tree.parentOf.get(x)) if (x === of) return true
+      return false
     }
-    const item = (g: MGroup): number => {
-      let h = memo.get(g.key)
-      if (h !== undefined) return h
-      const one = g.members.length === 1 ? g.members[0] : null
-      if (one && 'node' in one) h = open.has(g.key) ? node(one.node) : this.closedHeight(g)
-      else if (one || !open.has(g.key)) h = this.closedHeight(g)
-      else h = g.parts.reduce((sum, p) => sum + item(p), 0)
-      memo.set(g.key, h)
-      return h
-    }
-    return node(this.model.root)
-  }
-
-  /** The cut for a height budget (in estimate px): from the root, breadth first, each node
-   * and group opens while the estimate of the drawing stays within the budget (different
-   * subtrees can be cut at different depths); the user's splits and merges win. */
-  private cutFor(budget: number): Set<string> {
-    // A split forces the groups and nodes around it open.
-    const forced = new Set<string>()
     for (const [key, on] of this.overrides) {
-      for (let k: string | undefined = key; on && k; k = this.tree.parentOf.get(k)) forced.add(k)
+      if (on) for (let x: string | undefined = key; x; x = this.tree.parentOf.get(x)) out.add(x)
+      else for (const x of [...out]) if (inside(x, key)) out.delete(x)
     }
-    const open = new Set([`n${this.model.root}`])
-    const memo = new Map<string, number>()
-    const changed = (key: string) => {
-      for (let k: string | undefined = key; k; k = this.tree.parentOf.get(k)) memo.delete(k)
-    }
-    const queue = [...this.tree.runs[this.model.root]]
-    for (let q = 0; q < queue.length; q++) {
-      const g = queue[q]
-      const one = g.members.length === 1 ? g.members[0] : null
-      if (one && 'block' in one) continue
-      if (this.overrides.get(g.key) === false) continue
-      open.add(g.key)
-      changed(g.key)
-      if (!forced.has(g.key) && this.estimate(open, memo) > budget) {
-        open.delete(g.key)
-        changed(g.key)
-        continue
-      }
-      queue.push(...(one && 'node' in one ? this.tree.runs[one.node] : g.parts))
-    }
-    return open
+    return out
   }
 
   /** The layout for the zoom: the cut whose packed drawing fits in the zoom height (the
@@ -305,48 +292,33 @@ export class TrafficRenderer {
       this.picked = { key, lay, cut }
       return lay
     }
-    const full = this.lay(this.fullCut)
-    let cut: Set<string>
-    if (this.zoomH >= full.height) cut = this.cutFor(Infinity)
-    else {
-      // The estimate in the packed drawing's px; when the packing comes out taller than
-      // the zoom, the largest budget whose packing fits (bisection, five steps).
-      const budget = this.zoomH * this.estimate(this.fullCut) / Math.max(1, full.height)
-      cut = this.cutFor(budget)
-      if (this.lay(cut).height > this.zoomH) {
-        let lo = 0
-        let hi = budget
-        cut = this.cutFor(0)
-        for (let k = 0; k < 5; k++) {
-          const mid = (lo + hi) / 2
-          const c = this.cutFor(mid)
-          if (this.lay(c).height <= this.zoomH) { lo = mid; cut = c } else hi = mid
-        }
-      }
+    // The finest level whose packed drawing fits in the zoom height.
+    const levels = this.levelCuts()
+    let cut = this.withOverrides(levels[0])
+    for (let i = levels.length - 1; i > 0; i--) {
+      const c = this.withOverrides(levels[i])
+      if (this.lay(c).height <= this.zoomH) { cut = c; break }
     }
     const lay = this.lay(cut)
     this.picked = { key, lay, cut }
     return lay
   }
 
-  /** The zoom of each cut from the coarsest to the full one, for the zoom slider: a zoom
-   * height that shows it (sampled on a geometric scale; the user's splits and merges
-   * apply). Cached per state. */
+  /** The zoom of each level from the coarsest to the full one, for the zoom slider: the
+   * height of its packed drawing (the zoom from which it is picked; a level that packs no
+   * taller than the next is left out, the user's splits and merges apply). Cached per state. */
   zoomStops(): number[] {
     const v = this.visibleClasses
     const key = `${+v.global}${+v.local}${+v.control}|${this.pitch}|${this.channels}|${[...this.overrides].join(',')}`
     if (this.stops?.key === key) return this.stops.zooms
     const keep = { zoomH: this.zoomH, picked: this.picked, pending: this.pending }
     this.pending = null
-    const full = this.fullHeight
     const zooms: number[] = []
     let last: Layout | null = null
-    const lo = 40
-    for (let k = 0; k <= STOP_SAMPLES; k++) {
-      const z = k === STOP_SAMPLES ? full : lo * (full / lo) ** (k / STOP_SAMPLES)
-      this.zoomH = z
+    for (const c of this.levelCuts()) {
+      this.zoomH = Math.max(40, this.lay(this.withOverrides(c)).height)
       const lay = this.pick()
-      if (lay !== last) zooms.push(z)
+      if (lay !== last && (!zooms.length || this.zoomH > zooms[zooms.length - 1])) zooms.push(this.zoomH)
       last = lay
     }
     this.zoomH = keep.zoomH
@@ -384,6 +356,13 @@ export class TrafficRenderer {
     // The rest of the cut stays as it is (drawn once as it is; the zoom follows the change).
     const now = new Set(this.picked?.cut ?? [])
     const band = this.bandHits.find(hit)
+    if (band?.split) {
+      this.overrides.set(band.key, true)
+      for (let k: string | undefined = band.key; k; k = this.tree.parentOf.get(k)) now.add(k)
+      this.pending = now
+      this.zoomH = Math.max(this.zoomH, this.lay(now).height)
+      return true
+    }
     if (band) {
       this.overrides.set(band.key, false)
       const inside = (k: string): boolean => k === band.key || (this.tree.parentOf.has(k) && inside(this.tree.parentOf.get(k) as string))
@@ -433,6 +412,52 @@ export class TrafficRenderer {
   scrollBy(dy: number): void {
     this.scroll += dy
     this.clampScroll()
+  }
+
+  // ---- the horizontal zoom ----------------------------------------------------------------
+
+  /** The plot's horizontal scroll (px). */
+  get scrollX(): number {
+    return this.xStart * this.plotW * this.zoomX
+  }
+
+  /** Zooms horizontally around x (px); the point under it stays. */
+  zoomXAt(x: number, factor: number): void {
+    const at = Math.max(0, Math.min(this.plotW, x - this.plotLeft)) / this.plotW  // share of the view
+    const p = this.xStart + at / this.zoomX                                          // share of the plot
+    this.zoomX = Math.max(1, Math.min(MAX_ZOOM_X, this.zoomX * factor))
+    this.xStart = p - at / this.zoomX
+    this.clampX()
+  }
+
+  scrollXBy(dx: number): void {
+    this.xStart += dx / (this.plotW * this.zoomX)
+    this.clampX()
+  }
+
+  /** The visible part of the plot as shares of its zoomed width (the scroll bar's thumb). */
+  get xView(): { start: number; end: number } {
+    return { start: this.xStart, end: this.xStart + 1 / this.zoomX }
+  }
+
+  /** Shows the shares [start, end) of the plot (a thumb drag; [0, 1): fit). */
+  setXView(start: number, end: number): void {
+    const span = Math.max(1 / MAX_ZOOM_X, Math.min(1, end - start))
+    this.zoomX = 1 / span
+    this.xStart = start
+    this.clampX()
+  }
+
+  private clampX(): void {
+    this.xStart = Math.max(0, Math.min(1 - 1 / this.zoomX, this.xStart))
+  }
+
+  /** Clips a layer to the plot (left of it, the name gutter). */
+  private clipPlot(ctx: CanvasRenderingContext2D): void {
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(this.plotLeft - 6, 0, this.width - this.plotLeft + 6, this.height)
+    ctx.clip()
   }
 
   private clampScroll(): void {
@@ -805,31 +830,122 @@ export class TrafficRenderer {
     const isBus = new Set(Array.from({ length: this.model.depth + 1 }, (_, d) => busCol(d)))
     const weight = Array.from({ length: lay.cols }, (_, i) => (isBus.has(i) ? BUS_COL_WEIGHT : BLOCK_COL_WEIGHT))
     const labelW = this.labelWidth()
-    const unit = (this.width - labelW - 16) / weight.reduce((p, q) => p + q, 0)
+    this.plotLeft = 8 + labelW
+    this.plotW = Math.max(1, this.width - labelW - 16)
+    this.clampX()
+    // The horizontal zoom scales the columns; the text keeps its size.
+    const unit = this.plotW * this.zoomX / weight.reduce((p, q) => p + q, 0)
     const start = [0]
     for (const w of weight) start.push(start[start.length - 1] + w * unit)
     const X = (x: number) => {
       const i = Math.max(0, Math.min(lay.cols - 1, Math.floor(x)))
-      return 8 + labelW + start[i] + (x - i) * weight[i] * unit
+      return this.plotLeft + start[i] + (x - i) * weight[i] * unit - this.scrollX
     }
     return { lay, X, Y: (y: number) => 10 + y - this.scroll, labelW }
   }
 
-  /** The gutter: one column, the names of the open nodes and node groups indented by
-   * depth, as wide as the widest indented name of the full layout (the same at every cut,
-   * so the plot does not move with the zoom). */
+  /** The gutter: one column, the names of the open nodes and of the closed groups of
+   * nodes indented by depth, as wide as the widest indented name of any level (the same at
+   * every level, so the plot does not move with the zoom). */
   private labelWidth(): number {
     const font = `${this.theme.fontSizeXs + TEXT_UP}px ${this.theme.fontSans}`
-    const v = this.visibleClasses
-    const key = `${font}|${+v.global}${+v.local}${+v.control}`
-    if (this.labelW?.key !== key) {
+    if (this.labelW?.key !== font) {
       const ctx = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D
       ctx.font = font
-      const w = Math.max(0, ...this.lay(this.fullCut).bands.filter((b) => b.nest >= 1)
-        .map((b) => indent(b.nest) + ctx.measureText(b.label).width))
-      this.labelW = { key, w: w + 10 }
+      let w = 0
+      const visit = (g: MGroup, depth: number) => {
+        if ('node' in g.members[0]) w = Math.max(w, indent(depth) + ctx.measureText(g.label).width)
+        for (const p of g.parts) visit(p, depth)
+      }
+      for (const n of this.model.nodes) for (const g of this.tree.runs[n.id]) visit(g, n.depth + 1)
+      this.labelW = { key: font, w: w + 10 }
     }
     return Math.max(LABEL_MIN, Math.min(this.width * LABEL_MAX, this.labelW.w))
+  }
+
+  /** A strip's width (px): fixed, or the square root of its bandwidth (the widest link of
+   * the drawn level at SCALED_MAX). */
+  private stripWidth(bw: number): number {
+    return this.scaleByBandwidth ? Math.max(3, SCALED_MAX * Math.sqrt(bw / this.bwRef)) : STRIP_H
+  }
+
+  /** The rows (px) of a unit: its box, and the strips of its links. */
+  private unitRows(u: PBand['units'][number], Y: (y: number) => number): [number, number] {
+    let y0 = Infinity
+    let y1 = -Infinity
+    if (u.box) [y0, y1] = this.boxSpan(Y, u.box.yc, u.box.slots)
+    for (const l of u.links) {
+      const rows = l.kind === 'self'
+        ? [[l.slot, Math.max(this.bandwidth(l, 0).bw, this.bandwidth(l, 1).bw)], [l.slot + LOOP_LEG, Math.max(this.bandwidth(l, 0).bw, this.bandwidth(l, 1).bw)]]
+        : l.strips.map((st, i) => [l.slot + i, this.bandwidth(l, st.dir ?? 0).bw])
+      for (const [slot, bw] of rows) {
+        const y = this.slotY(Y, l.yc, slot, l.slots)
+        const h = this.stripWidth(bw) / 2
+        y0 = Math.min(y0, y - h)
+        y1 = Math.max(y1, y + h)
+      }
+    }
+    return [y0, y1]
+  }
+
+  /** The gutter (left of the plot, fixed with the horizontal zoom): per open node and per
+   * closed group of nodes, a bracket over the rows of its boxes and strips and its name at
+   * the top of them (kept in view while the span is). Names never overlap: one pushed down
+   * within its span, else drawn at its top with the name it meets shortened. */
+  private drawGutter(ctx: CanvasRenderingContext2D, lay: Layout, Y: (y: number) => number, labelW: number): void {
+    const th = this.theme
+    ctx.font = `${th.fontSizeXs + TEXT_UP}px ${th.fontSans}`
+    ctx.textBaseline = 'middle'
+    ctx.textAlign = 'left'
+    const LINE = th.fontSizeXs + TEXT_UP + 4
+    const out: GutterLabel[] = []
+    for (const b of lay.bands) {
+      if (b.kind === 'group' || b.nest < 1) continue
+      let y0 = Infinity
+      let y1 = -Infinity
+      for (const u of b.units) {
+        const [a, c] = this.unitRows(u, Y)
+        y0 = Math.min(y0, a)
+        y1 = Math.max(y1, c)
+      }
+      if (!(y1 > y0)) continue
+      const x = indent(b.nest)
+      const full = ctx.measureText(b.label).width
+      out.push({ key: b.key, kind: b.kind as Exclude<BandKind, 'group'>, label: b.label, nest: b.nest, y0, y1, x,
+        yt: NaN, w: Math.min(full, labelW - x - 4), full })
+    }
+    out.sort((p, q) => p.y0 - q.y0 || p.nest - q.nest)
+    const placed: GutterLabel[] = []
+    const meets = (p: GutterLabel, q: GutterLabel, yt: number) => Math.abs(q.yt - yt) < LINE && p.x < q.x + q.w && q.x < p.x + p.w
+    for (const g of out) {
+      if (g.y1 < 0 || g.y0 > this.height) continue
+      const top = Math.max(g.y0, 0) + LINE / 2
+      let yt = Math.min(top, g.y1 - LINE / 2)
+      for (let q = placed.find((p) => meets(g, p, yt)); q; q = placed.find((p) => meets(g, p, yt))) yt = q.yt + LINE
+      if (yt + LINE / 2 > g.y1 + 1) {
+        // no room below: at the top, and the names it meets end before it
+        yt = Math.max(g.y0 + LINE / 2, Math.min(top, g.y1 - LINE / 2))
+        for (const p of placed) if (Math.abs(p.yt - yt) < LINE && p.x < g.x) p.w = Math.min(p.w, g.x - p.x - 4)
+      }
+      g.yt = yt
+      placed.push(g)
+    }
+    this.gutter = out
+    for (const g of placed) {
+      ctx.fillStyle = th.axis
+      ctx.fillRect(g.x - 4, g.y0, 1, Math.max(1, g.y1 - g.y0))
+      ctx.fillStyle = g.kind === 'node' ? th.inkSecondary : th.inkMuted
+      clip(ctx, g.label, g.x, g.yt, g.w)
+      this.bandHits.push({ x0: g.x - 4, x1: g.x + g.w, y0: g.yt - LINE / 2, y1: g.yt + LINE / 2,
+        key: g.kind === 'agg' ? g.key.slice(1) : g.key, split: g.kind === 'agg' })
+    }
+  }
+
+  /** The gutter label under (x, y), or null. */
+  gutterAt(x: number, y: number): GutterLabel | null {
+    if (x >= this.plotLeft - 6) return null
+    const LINE = this.theme.fontSizeXs + TEXT_UP + 4
+    return this.gutter.find((g) => g.yt === g.yt && Math.abs(y - g.yt) < LINE / 2 && x >= g.x - 4 && x <= g.x + g.w) ?? null
   }
 
   /** The y (px) of a slot of a box centered at row yc with `slots` slots. */
@@ -854,33 +970,17 @@ export class TrafficRenderer {
     ctx.fillRect(0, 0, this.width, this.height)
     const { lay, X, Y, labelW } = this.geometry()
     ctx.textBaseline = 'middle'
-    // Bands of the open nodes and node groups: in the gutter a thin bracket and the name at
-    // the band's top, indented by depth (a click on the name merges it back; a name that
-    // would meet the one above moves down a line); a rule under each innermost band.
-    ctx.font = `${th.fontSizeXs + TEXT_UP}px ${th.fontSans}`
-    ctx.textAlign = 'left'
+    // A rule under each innermost open node (the names: drawGutter, after the plot).
     this.bandHits = []
-    const LINE = th.fontSizeXs + TEXT_UP + 4
-    let free = -Infinity
-    const bands = lay.bands.filter((b) => b.nest >= 1).sort((p, q) => p.y0 - q.y0 || p.nest - q.nest)
-    for (const b of bands) {
-      const y0 = Y(b.y0)
+    const nodeBands = lay.bands.filter((b) => b.kind === 'node' && b.nest >= 1)
+    for (const b of nodeBands) {
       const y1 = Y(b.y1)
-      const yt = Math.max(y0 + 9, free)
-      free = yt + LINE
-      if (y1 < 0 || y0 > this.height) continue
-      const x = indent(b.nest)
-      if (!lay.bands.some((c) => c.nest > b.nest && c.y0 >= b.y0 && c.y1 <= b.y1)) {
-        ctx.fillStyle = th.grid
-        ctx.fillRect(x - 4, y1 - 0.5, this.width, 1)
-      }
-      ctx.fillStyle = th.axis
-      ctx.fillRect(x - 4, y0 + 2, 1, Math.max(1, y1 - y0 - 4))
-      const w = labelW - x - 4
-      ctx.fillStyle = b.isNode ? th.inkSecondary : th.inkMuted
-      clip(ctx, b.label, x, yt, w)
-      this.bandHits.push({ x0: x - 4, x1: x + Math.min(w, ctx.measureText(b.label).width), y0: yt - 7, y1: yt + 7, key: b.key })
+      if (y1 < 0 || Y(b.y0) > this.height) continue
+      if (nodeBands.some((c) => c.nest > b.nest && c.y0 >= b.y0 && c.y1 <= b.y1)) continue
+      ctx.fillStyle = th.grid
+      ctx.fillRect(indent(b.nest) - 4, y1 - 0.5, this.width, 1)
     }
+    this.clipPlot(ctx)
     // Boxes of the blocks and aggregated rows, sized to their strips (drawn on the top
     // layer; kept here for the hairpins, the texts and the hit tests).
     this.boxes = []
@@ -913,8 +1013,8 @@ export class TrafficRenderer {
     }
     // Strip widths: fixed, or the square root of the bandwidth (the widest link of the
     // drawn level at SCALED_MAX).
-    const bwRef = Math.max(1e-9, ...lay.links.map((l) => Math.max(this.bandwidth(l, 0).bw, this.bandwidth(l, 1).bw)))
-    const widthOf = (bw: number) => (this.scaleByBandwidth ? Math.max(3, SCALED_MAX * Math.sqrt(bw / bwRef)) : STRIP_H)
+    this.bwRef = Math.max(1e-9, ...lay.links.map((l) => Math.max(this.bandwidth(l, 0).bw, this.bandwidth(l, 1).bw)))
+    const widthOf = (bw: number) => this.stripWidth(bw)
     this.strips = []
     const endY = new Map<number, { y: number; w: number }[]>()   // bus attachment -> strip ends
     for (const l of lay.links) {
@@ -939,6 +1039,8 @@ export class TrafficRenderer {
       this.busBoxes.push({ x: X(b.x), y0: Math.min(...ends.map((e) => e.y - e.w / 2)) - BOX_PAD,
         y1: Math.max(...ends.map((e) => e.y + e.w / 2)) + BOX_PAD, label: b.label, cls: b.cls, path: b.path, atts: b.atts })
     }
+    ctx.restore()
+    this.drawGutter(ctx, lay, Y, labelW)
     this.stats.drawMs.push(performance.now() - t0)
     if (this.stats.drawMs.length > 2000) this.stats.drawMs.splice(0, 1000)
   }
@@ -1047,6 +1149,7 @@ export class TrafficRenderer {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, this.width, this.height)
     if (!this.current) return
+    this.clipPlot(ctx)
     ctx.textBaseline = 'middle'
     for (const s of this.strips) {
       if (s.kind === 'line') continue
@@ -1105,6 +1208,7 @@ export class TrafficRenderer {
       ctx.lineWidth = 1.5
       ctx.strokeRect(s.a - 1, s.y - Math.max(s.w, 3) / 2 - 1, s.b - s.a + 2, Math.max(s.w, 3) + 2)
     }
+    ctx.restore()
   }
 
   /** "32 % · 164 B/cycle" on a strip (format.ts: "<0.1 % · 0.01 B/cycle"), in its longest segment free of the boxes drawn over
@@ -1152,6 +1256,7 @@ export class TrafficRenderer {
     const t0 = performance.now()
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     if (clear) ctx.clearRect(0, 0, this.width, this.height)
+    this.clipPlot(ctx)
     for (const s of this.strips) {
       if (s.kind === 'line') continue
       const len = s.b - s.a
@@ -1164,6 +1269,7 @@ export class TrafficRenderer {
       } else if (s.mode === 'still') this.fillPattern(ctx, s, 'stripe', true, s.a, top, len, s.w, 0)
       else this.fillPattern(ctx, s, 'chevron', s.pointsRight ?? true, s.a, top, len, s.w, s.vTop * t)
     }
+    ctx.restore()
     this.stats.animMs.push(performance.now() - t0)
     if (this.stats.animMs.length > 2000) this.stats.animMs.splice(0, 1000)
   }
@@ -1248,6 +1354,7 @@ export class TrafficRenderer {
 
   /** The link under (x, y), or null. */
   linkAt(x: number, y: number): PLink | null {
+    if (x < this.plotLeft - 6) return null // the label column hides the plot scrolled under it
     let best: PLink | null = null
     let bestD = 5
     for (const s of this.strips) {
@@ -1320,6 +1427,22 @@ function clip(ctx: CanvasRenderingContext2D, s: string, x: number, y: number, ma
     else hi = mid - 1
   }
   if (lo > 0) ctx.fillText(`${s.slice(0, lo)}…`, x, y)
+}
+
+/** A name in the gutter: an open node, or a closed group of nodes (its box), `nest` open
+ * nodes deep; its span [y0, y1) (px), where its name is drawn (yt: NaN when not drawn) and
+ * the width of the name drawn (`full`: of the whole name). */
+export interface GutterLabel {
+  key: string
+  kind: 'node' | 'agg'
+  label: string
+  nest: number
+  y0: number
+  y1: number
+  x: number
+  yt: number
+  w: number
+  full: number
 }
 
 /** The x (px) of a gutter name nested `nest` deep (1: below the root). */

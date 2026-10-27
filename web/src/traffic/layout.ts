@@ -13,6 +13,8 @@ export interface PBlock {
   x1: number
   label: string
   path: string
+  /** its node (a block group: the node of its blocks) */
+  node: number
   /** strips attached to it (one per bus it is on, two for a link with traffic both ways) */
   slots: number
   /** its center (px, from pack) */
@@ -102,15 +104,20 @@ export interface PAgg {
   open: string
 }
 
-/** The px rows of an open node or group (from pack), nested `nest` deep below the root. */
+/** What a band holds: an open node, an open merge group (its parts), or a closed group
+ * of nodes (its box). */
+export type BandKind = 'node' | 'group' | 'agg'
+
+/** The px rows of a band (from pack), `nest` open nodes deep (0: the root), with the units
+ * placed in it (nested bands' units included). */
 export interface PBand {
   y0: number
   y1: number
   label: string
   key: string
   nest: number
-  /** an open node (else an open group) */
-  isNode: boolean
+  kind: BandKind
+  units: PUnit[]
 }
 
 /** A split block group (memory banks): no band; a thin bracket beside its members, which
@@ -134,7 +141,7 @@ export interface PUnit {
 
 /** The order of packing: units, and the opening and closing of a band (a band's units go
  * no higher than the bottom of everything placed before the band opened). */
-export type PStep = PUnit | { open: string; label: string; isNode: boolean } | { close: string }
+export type PStep = PUnit | { open: string; label: string; kind: BandKind } | { close: string }
 
 export interface Layout {
   /** the depth of the deepest open node */
@@ -217,7 +224,7 @@ export function layout(m: TrafficModel, tree: MergeTree, isOpen: (key: string) =
     const each = atts.map(({ att }, k) => strips([d.attachments[att].in_resource as number | null, ...extras[k].fwd],
       [d.attachments[att].out_resource as number | null, ...extras[k].rev]))
     const slots = each.reduce((n, p) => n + p.length, 0)
-    const block: PBlock = { x0, x1, label: b.label, path: b.key, slots, yc: 0 }
+    const block: PBlock = { x0, x1, label: b.label, path: b.key, node: b.node, slots, yc: 0 }
     out.blocks.push(block)
     let slot = 0
     const links = atts.map(({ att, bus }, k): PLink => {
@@ -252,7 +259,7 @@ export function layout(m: TrafficModel, tree: MergeTree, isOpen: (key: string) =
     }
     let slot = 0
     const slotOf = items.map((it) => { const s0 = slot; slot += it.strips.length; return s0 })
-    const block: PBlock = { x0, x1, label: g.label, path: g.key, slots: slot, yc: 0, open: g.key }
+    const block: PBlock = { x0, x1, label: g.label, path: g.key, node: g.parent, slots: slot, yc: 0, open: g.key }
     out.blocks.push(block)
     unit(block, items.map((it, k) => ({ ...it, slot: slotOf[k], slots: slot })), band)
   }
@@ -319,7 +326,7 @@ export function layout(m: TrafficModel, tree: MergeTree, isOpen: (key: string) =
   /** A closed group of nodes in a band of its own, below everything before it (beside an
    * open sibling it could cover the sibling's bus boxes, which are not packed). */
   const placeClosed = (g: MGroup) => {
-    out.seq.push({ open: `a${g.key}`, label: '', isNode: false })
+    out.seq.push({ open: `a${g.key}`, label: g.label, kind: 'agg' })
     placeAgg(g, `a${g.key}`)
     out.seq.push({ close: `a${g.key}` })
   }
@@ -328,7 +335,7 @@ export function layout(m: TrafficModel, tree: MergeTree, isOpen: (key: string) =
     const one = g.members.length === 1 ? g.members[0] : null
     if (one && 'node' in one) {
       if (isOpen(g.key)) {
-        out.seq.push({ open: g.key, label: g.label, isNode: true })
+        out.seq.push({ open: g.key, label: g.label, kind: 'node' })
         visitNode(one.node)
         placeLinks(m.nodes[one.node].uplinks, g.key)
         out.seq.push({ close: g.key })
@@ -343,14 +350,14 @@ export function layout(m: TrafficModel, tree: MergeTree, isOpen: (key: string) =
       out.brackets.push({ key: g.key, label: g.label, blocks: out.blocks.slice(first),
         level: nested.length ? 1 + Math.max(...nested.map((b) => b.level)) : 0, left: m.nodes[g.parent].depth === D })
     } else if (isOpen(g.key)) {
-      out.seq.push({ open: g.key, label: g.label, isNode: false })
+      out.seq.push({ open: g.key, label: g.label, kind: 'group' })
       for (const p of g.parts) placeItem(p, g.key)
       out.seq.push({ close: g.key })
     } else if ('node' in g.members[0]) placeClosed(g)
     else placeBlockGroup(g, band)
   }
 
-  out.seq.push({ open: `n${m.root}`, label: m.nodes[m.root].name, isNode: true })
+  out.seq.push({ open: `n${m.root}`, label: m.nodes[m.root].name, kind: 'node' })
   visitNode(m.root)
   out.seq.push({ close: `n${m.root}` })
   const used = new Set(out.links.flatMap((l) => l.ends))

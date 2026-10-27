@@ -1,11 +1,10 @@
 import { useEffect, useRef } from 'react'
 import { onThemeChange, readTheme } from '../theme/theme'
-import type { TimeAxis } from './axis'
 import { GUTTER, type TimelineRenderer } from './renderer'
 import { laneBusy, sampleBins, sampleFabric } from './util'
 import { zoomFactor } from './viewport'
 
-const HEIGHT = 52     // default height (px); the Instant scrubber's is adjustable
+const HEIGHT = 52     // height (px)
 const EDGE_PX = 6
 
 interface Props {
@@ -13,17 +12,14 @@ interface Props {
   /** Increments when the main view or the focus row changes. */
   version: number
   onChange: () => void
-  height?: number
-  /** the time axis whose window the box shows and moves (default: the timeline's; the
-   * Instant scrubber's own, which has a size when the timeline was never shown) */
-  axis?: TimeAxis
 }
 
 /** Minimap and scrollbar: the full-run series of the focus row, with a box for the shown
  * range. Drag the box to pan, drag its edges to zoom, click outside it to center there,
  * double-click to fit the time (the home window). */
-export function Minimap({ renderer, version, onChange, height = HEIGHT, axis: shown }: Props) {
-  const axis = shown ?? renderer.axis
+export function Minimap({ renderer, version, onChange }: Props) {
+  const axis = renderer.axis
+  const height = HEIGHT
   const canvas = useRef<HTMLCanvasElement>(null)
   const series = useRef<{ key: string | null; width: number; height: number; theme: string; image: HTMLCanvasElement | null }>({ key: null, width: 0, height: 0, theme: '', image: null })
 

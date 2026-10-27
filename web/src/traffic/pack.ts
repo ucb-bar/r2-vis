@@ -6,7 +6,7 @@
 // column and of different columns share a height when their x intervals do not overlap),
 // and no higher than the bottom of everything placed before its band opened (the bands of
 // sibling nodes do not interleave, so their bus boxes do not overlap).
-import { LOOP_LEG, type Layout, type PLink, type PUnit } from './layout'
+import { LOOP_LEG, type BandKind, type Layout, type PLink, type PUnit } from './layout'
 
 export interface PackSizes {
   /** slot pitch, strip height, gap between strips, gap between boxes (px) */
@@ -54,24 +54,30 @@ function parts(u: PUnit, P: PackSizes): Rect[] {
 
 const overlapX = (p: Rect, r: Rect) => p.a < r.b && r.a < p.b
 
-/** Gives every box and link of the layout its center y, the node bands and the height. */
+/** Gives every box and link of the layout its center y, the bands and the height. A band's
+ * nest counts the open nodes around it (merge groups do not nest). */
 export function pack(lay: Layout, P: PackSizes): void {
   const rects: Rect[] = []
-  const open = new Map<string, { y0: number; label: string; isNode: boolean; nest: number }>()
-  let nest = 0
+  const open = new Map<string, { y0: number; label: string; kind: BandKind; nest: number; units: PUnit[] }>()
+  const stack: string[] = []
+  let nodes = 0
   let bottom = 0
   lay.bands = []
   for (const s of lay.seq) {
     if ('open' in s) {
-      open.set(s.open, { y0: bottom, label: s.label, isNode: s.isNode, nest: nest++ })
+      open.set(s.open, { y0: bottom, label: s.label, kind: s.kind, nest: nodes, units: [] })
+      stack.push(s.open)
+      if (s.kind === 'node') nodes++
       continue
     }
     if ('close' in s) {
       const b = open.get(s.close)
-      nest--
-      if (b && b.label && bottom > b.y0) lay.bands.push({ y0: b.y0, y1: bottom, label: b.label, key: s.close, nest: b.nest, isNode: b.isNode })
+      stack.pop()
+      if (b?.kind === 'node') nodes--
+      if (b && b.label && b.units.length) lay.bands.push({ y0: b.y0, y1: bottom, label: b.label, key: s.close, nest: b.nest, kind: b.kind, units: b.units })
       continue
     }
+    for (const k of stack) open.get(k)?.units.push(s)
     const ps = parts(s, P)
     const floor = open.get(s.band)?.y0 ?? 0
     const lowest = floor - Math.min(...ps.map((p) => p.y0))

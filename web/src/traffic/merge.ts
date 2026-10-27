@@ -2,7 +2,7 @@
 // nodes, then its own blocks) in runs of adjacent siblings of the same kind (the same name
 // stem: sm0..sm3, hbm.b0..b63); each run
 // merged pairwise (sm0-1, sm2-3), then the pairs (sm0-3), an odd member joining the last
-// group. The drawn layout is a cut of this tree (see cutFor in the renderer).
+// group. The drawn layout is a cut of this tree (see levelCuts in the renderer).
 import { attachmentExtras, mergedName, type Dirs, type LinkClass, type TBlock, type TrafficModel } from './model'
 
 export type Member = { node: number } | { block: TBlock }

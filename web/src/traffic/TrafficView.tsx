@@ -7,6 +7,7 @@ import type { ViewStore } from '../state/viewstore'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { zoomFactor } from '../timeline/viewport'
 import { Section, Sidebar } from '../ui/Sidebar'
+import { useAreaState } from '../ui/area'
 import { CLASS_ORDER, type LinkClass } from './model'
 import { TrafficRenderer, type ClassOptions } from './renderer'
 
@@ -19,6 +20,10 @@ interface Props {
   charges: ChargeCache
   store: ViewStore
 }
+
+/** The zoom slider has tick marks only up to this many levels. */
+const MAX_TICKS = 8
+let ticks = 0
 
 interface Tip {
   x: number
@@ -59,22 +64,33 @@ function savePrefs(p: Prefs): void {
 }
 
 /** The traffic view: the fabric at the active time range of the shared state. Wheel
- * scrolls, ctrl+wheel (or pinch) zooms: the zoom picks the deepest level whose packed
- * drawing fits in the zoom height (deeper levels aggregated per parent). Three stacked canvases: the base and the top layer are drawn on a
- * change; only the pattern layer between them is drawn per animation frame. */
+ * scrolls; alt+wheel or the slider zooms vertically: the zoom picks the finest level (the
+ * same merge step for every parent at a depth) whose packed drawing fits in the zoom
+ * height. ctrl+wheel (or pinch) zooms horizontally around the pointer, shift+wheel (or a
+ * horizontal wheel) scrolls horizontally, and so does the scroll bar under the plot (drag
+ * the thumb; drag an end to zoom; double click: fit). Three stacked canvases: the base and
+ * the top layer are drawn on a change; only the pattern layer between them is drawn per
+ * animation frame. */
 export function TrafficView({ trace, charges, store }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const baseCanvas = useRef<HTMLCanvasElement>(null)
   const animCanvas = useRef<HTMLCanvasElement>(null)
   const topCanvas = useRef<HTMLCanvasElement>(null)
+  const bar = useRef<HTMLDivElement>(null)
+  // The horizontal view, kept per area: the shares of the plot shown.
+  const [xv, setXv] = useAreaState<{ start: number; end: number }>('traffic.x', () => ({ start: 0, end: 1 }))
   const [renderer] = useState(() => {
     const r = new TrafficRenderer(trace, charges, readTheme())
     const p = loadPrefs()
     r.scaleByBandwidth = p.scaleByBandwidth
     r.classes = p.classes
     r.channels = p.channels
+    r.setXView(xv.start, xv.end)
     return r
   })
+  const [plot, setPlot] = useState({ left: 0, width: 0 })
+  const [tickId] = useState(() => `traffic-zoom-ticks-${++ticks}`)
+  const syncX = () => { const v = renderer.xView; setXv({ start: v.start, end: v.end }) }
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
   const [reducedMotion, setReducedMotion] = useState(() => matchMedia('(prefers-reduced-motion: reduce)').matches)
   const [level, setLevel] = useState(renderer.model.depth)
@@ -124,7 +140,10 @@ export function TrafficView({ trace, charges, store }: Props) {
       if (key !== renderer.hoverKey) renderer.hoverKey = key
       if (l) { setTip({ x: hover.x, y: hover.y, content: renderer.linkTip(l) }); return }
       const b = renderer.busAt(hover.x, hover.y)
-      setTip(b ? { x: hover.x, y: hover.y, content: renderer.busTip(b) } : null)
+      if (b) { setTip({ x: hover.x, y: hover.y, content: renderer.busTip(b) }); return }
+      // a gutter name: the whole name (it may be shortened)
+      const g = renderer.gutterAt(hover.x, hover.y)
+      setTip(g ? { x: hover.x, y: hover.y, content: { title: g.label, sections: [] } } : null)
     }
     const tick = () => {
       loop = 0
@@ -147,6 +166,7 @@ export function TrafficView({ trace, charges, store }: Props) {
         renderer.drawBase(bctx, dpr)
         renderer.drawAnim(actx, dpr, now(), true)
         setLevel(renderer.level)
+        setPlot((p) => (p.left === renderer.plotLeft && p.width === renderer.plotW ? p : { left: renderer.plotLeft, width: renderer.plotW }))
         // The zoom slider: the cuts' stops (computed after the frame; cached per state).
         setTimeout(() => {
           const stops = renderer.zoomStops()
@@ -198,9 +218,11 @@ export function TrafficView({ trace, charges, store }: Props) {
     }
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const { y } = pos(e)
+      const { x, y } = pos(e)
       const scale = e.deltaMode === 1 ? 16 : 1
-      if (e.ctrlKey) renderer.zoomAt(y, zoomFactor(e.deltaY * scale))
+      if (e.ctrlKey) { renderer.zoomXAt(x, zoomFactor(e.deltaY * scale)); syncX() }
+      else if (e.altKey) renderer.zoomAt(y, zoomFactor(e.deltaY * scale))
+      else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) { renderer.scrollXBy((e.deltaX || e.deltaY) * scale); syncX() }
       else renderer.scrollBy(e.deltaY * scale)
       request()
     }
@@ -232,6 +254,39 @@ export function TrafficView({ trace, charges, store }: Props) {
     }
   }, [renderer, store, charges])
 
+  /** The scroll bar: dragging the thumb scrolls, dragging an end zooms, a press on the
+   * track outside the thumb centers the view there. */
+  const dragBar = (e: React.PointerEvent, mode: 'move' | 'left' | 'right' | 'page') => {
+    if (e.button !== 0 || !bar.current) return
+    e.stopPropagation()
+    e.preventDefault()
+    const track = bar.current.getBoundingClientRect()
+    const v0 = renderer.xView
+    if (mode === 'page') {
+      const span = v0.end - v0.start
+      const at = (e.clientX - track.left) / track.width - span / 2
+      renderer.setXView(at, at + span)
+      syncX()
+      redraw.current()
+      mode = 'move'
+    }
+    const v1 = renderer.xView
+    const x0 = e.clientX
+    const min = 1 / 16
+    const move = (ev: PointerEvent) => {
+      const d = (ev.clientX - x0) / track.width
+      const span = v1.end - v1.start
+      if (mode === 'move') { const s = Math.max(0, Math.min(1 - span, v1.start + d)); renderer.setXView(s, s + span) }
+      else if (mode === 'left') renderer.setXView(Math.max(0, Math.min(v1.end - min, v1.start + d)), v1.end)
+      else renderer.setXView(v1.start, Math.min(1, Math.max(v1.start + min, v1.end + d)))
+      syncX()
+      redraw.current()
+    }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   const setClass = (cls: LinkClass, change: Partial<ClassOptions>) => {
     renderer.classes = { ...renderer.classes, [cls]: { ...renderer.classes[cls], ...change } }
     setPrefs((p) => ({ ...p, classes: renderer.classes }))
@@ -259,11 +314,12 @@ export function TrafficView({ trace, charges, store }: Props) {
           <span className="spacer" />
           {zoom.stops.length > 1 && (
             <input className="traffic-zoom" type="range" min={0} max={zoom.stops.length - 1} step={1} value={zoom.at}
-              aria-label="zoom" title={`cut ${zoom.at + 1} of ${zoom.stops.length}`} list="traffic-zoom-ticks"
+              aria-label="zoom" title={`level ${zoom.at + 1} of ${zoom.stops.length}`}
+              list={zoom.stops.length <= MAX_TICKS ? tickId : undefined}
               onChange={(e) => { renderer.zoomTo(zoom.stops[Number(e.target.value)]); redraw.current() }} />
           )}
-          <datalist id="traffic-zoom-ticks">{zoom.stops.map((_, i) => <option key={i} value={i} />)}</datalist>
-          <button className="button small" onClick={() => { renderer.fit(); redraw.current() }}>Fit</button>
+          {zoom.stops.length <= MAX_TICKS && <datalist id={tickId}>{zoom.stops.map((_, i) => <option key={i} value={i} />)}</datalist>}
+          <button className="button small" onClick={() => { renderer.fit(); renderer.setXView(0, 1); syncX(); redraw.current() }}>Fit</button>
         </div>
         <div className="traffic-body" ref={host}>
           <canvas ref={baseCanvas} />
@@ -276,6 +332,14 @@ export function TrafficView({ trace, charges, store }: Props) {
               top: tip.y > renderer.height - 240 ? undefined : tip.y + 14,
               bottom: tip.y > renderer.height - 240 ? renderer.height - tip.y + 14 : undefined }} />
           )}
+        </div>
+        <div className="traffic-hbar" ref={bar} style={{ marginLeft: plot.left, width: plot.width }}
+          onPointerDown={(e) => dragBar(e, 'page')} onDoubleClick={() => { renderer.setXView(0, 1); syncX(); redraw.current() }}>
+          <div className="traffic-thumb" style={{ left: `${xv.start * 100}%`, width: `${(xv.end - xv.start) * 100}%` }}
+            onPointerDown={(e) => dragBar(e, 'move')}>
+            <span className="traffic-grip left" onPointerDown={(e) => dragBar(e, 'left')} />
+            <span className="traffic-grip right" onPointerDown={(e) => dragBar(e, 'right')} />
+          </div>
         </div>
       </div>
       <Sidebar name="traffic">
