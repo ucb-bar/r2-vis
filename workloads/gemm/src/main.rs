@@ -54,10 +54,6 @@ const C_ROW: u64 = BN * ELEM;
 const PART_SPAN: u64 = (WARP_ROWS - 1) * C_ROW + WARP_COLS * ELEM;
 const PART_MASK: u32 = ((WARP_ROWS - 1) * (C_ROW / GRANULE)) as u32;
 
-/// The GDDR7 as programs address it: the linear range of the device
-/// crossbar's hash link (rtx6000.yaml, `sbus_to_mbus`), which spreads lines
-/// over the 64 channels. nu_soc::root::HBM is the channels' physical range.
-const GDDR7: u64 = 0x8_0000_0000;
 /// r2-sim's kernels program places the tensors one after another on 4 KiB
 /// boundaries at the base of the GDDR7.
 const TENSOR_ALIGN: u64 = 4096;
@@ -82,7 +78,9 @@ fn gemm_cta(_: &Args) {
     // Warp w's part of C: rows (w mod WARPS_M) x WARP_ROWS, columns
     // (w / WARPS_M) x WARP_COLS.
     let part = |w: u64| c + (w % WARPS_M) * WARP_ROWS * C_ROW + (w / WARPS_M) * WARP_COLS * ELEM;
-    let gddr = root::prefix() | GDDR7;
+    // The GDDR7 through the linear range of the hash link, which spreads the
+    // lines over the 64 channels (root::HBM is the channels' physical range).
+    let gddr = root::prefix() | root::HBM_LINEAR;
     // endregion
     for kt in 0..K_TILES {
         // region: Load the k-tile's A and B tiles into its stage buffer
