@@ -23,6 +23,16 @@ export interface AttributionRequest {
   opcodes: string[]
   /** per real resource: the virtual id of its rate class 0, else -1 (views-design 7.2) */
   classBase?: Int32Array
+  /** the attribution scope: only owners inside it count (per gid and per programs row:
+   * 1 inside); none: the whole device */
+  scope?: AttributionScope | null
+}
+
+/** The owners inside the attribution scope (a set of node subtrees): per task gid and per
+ * programs row, 1 if its lane's node (a program: its Neutrino) is inside. */
+export interface AttributionScope {
+  gids: Uint8Array
+  programs: Uint8Array
 }
 
 /** A charge's resource, or for a charge with a rate class its class's virtual resource. */
@@ -182,12 +192,19 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
   const chargeCols = ['resource', 'start', 'end', 'cycles', 'usage', 'class', 'amount', 'gid', 'program']
   // A rate class (a virtual resource) is not in the usage table: its range reads charges.
   const virtual = !!req.classBase && req.resources.some((r) => r >= (req.classBase as Int32Array).length)
+  // Out of the scope: skipped before any other work on the charge.
+  const scope = req.scope ?? null
+  const outside = (gid: number, program: number) => scope !== null &&
+    (gid >= 0 ? scope.gids[gid] !== 1 : program >= 0 ? scope.programs[program] !== 1 : true)
   const charges = async (g: number, take: (i: number, c: Record<string, Column>) => void) => {
     const c = await read('charges', req.charges, g, chargeCols)
     chargeGroups++
     const res = c.resource as Int32Array
     const cls = c.class as Int32Array | undefined
+    const gid = c.gid as Int32Array
+    const prog = (c.program as Int32Array | undefined) ?? null
     for (let i = 0; i < res.length; i++) {
+      if (scope && outside(gid[i], prog ? prog[i] : -1)) continue
       const r = virtual ? classResource(res, cls, req.classBase, i) : res[i]
       if (r >= lo && r <= hi && wanted.has(r)) take(i, c)
     }
@@ -236,6 +253,7 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
         const amt = c.amount as Float64Array
         for (let i = 0; i < res.length; i++) {
           if (res[i] < lo || res[i] > hi || !wanted.has(res[i]) || !inside.has(blk[i])) continue
+          if (scope && outside(gid[i], prog[i])) continue
           add(ownerOf(gid[i], prog[i]), amt[i])
         }
       }
@@ -341,3 +359,4 @@ export async function taskUsage(req: UsageRequest, read: ReadGroup): Promise<Usa
     groups, ms: performance.now() - t0,
   }
 }
+

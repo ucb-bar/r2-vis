@@ -120,6 +120,8 @@ export class TrafficRenderer {
     global: { visible: true, collapse: true }, local: { visible: true, collapse: true }, control: { visible: true, collapse: true },
   }
   hoverKey: string | null = null
+  /** The focus resources: the strips that carry them are outlined. */
+  focusResources: ReadonlySet<number> = new Set()
   /** square-root strip widths by bandwidth (no text), else fixed heights with text */
   scaleByBandwidth = false
   /** read and write channels: one strip per direction (the busier channel) or one per
@@ -1202,6 +1204,14 @@ export class TrafficRenderer {
         else this.stats.noTexts++
       }
     }
+    if (this.focusResources.size) {
+      ctx.strokeStyle = th.select
+      ctx.lineWidth = 2
+      for (const s of this.strips) {
+        if (!this.stripResources(s, true).some((r) => this.focusResources.has(r))) continue
+        ctx.strokeRect(s.a - 2, s.y - Math.max(s.w, 3) / 2 - 2, s.b - s.a + 4, Math.max(s.w, 3) + 4)
+      }
+    }
     const hov = this.strips.filter((s) => s.link.key === this.hoverKey)
     for (const s of hov) {
       ctx.strokeStyle = th.ink
@@ -1350,6 +1360,29 @@ export class TrafficRenderer {
     const c = rgba(this.classColor(cls))
     const mix = (i: number) => Math.round(c[i] + (255 - c[i]) * TINT)
     return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`
+  }
+
+  /** The resources of a strip's direction (a link: its main resource; a group: its
+   * members of that direction); with `ports`, also the attachment ports it passes. */
+  stripResources(s: Strip, ports = false): number[] {
+    const l = s.link
+    if (l.kind === 'cross' || l.kind === 'self') return s.dir === 0 ? l.fwdMembers : l.revMembers
+    const main = s.dir === 0 ? l.fwd : l.rev
+    return [...(main === null ? [] : [main]), ...(ports ? (s.dir === 0 ? l.fwdPorts : l.revPorts) : [])]
+  }
+
+  /** The resources of the strip under (x, y), or null. */
+  resourcesAt(x: number, y: number): number[] | null {
+    if (x < this.plotLeft - 6) return null
+    let best: Strip | null = null
+    let bestD = 5
+    for (const s of this.strips) {
+      if (x < s.a - 8 || x > s.b + (s.kind === 'leg' ? s.w + 20 : 2)) continue
+      const dist = Math.max(0, Math.abs(y - s.y) - s.w / 2)
+      if (dist < bestD) { best = s; bestD = dist }
+    }
+    const res = best ? [...new Set(this.stripResources(best))] : []
+    return res.length ? res : null
   }
 
   /** The link under (x, y), or null. */

@@ -4,6 +4,7 @@
 import type { Trace } from '../data/trace'
 import type { TimelineRenderer } from '../timeline/renderer'
 import { BlockSelection } from './blocks'
+import type { FocusItem } from './focus'
 import {
   closeArea, copyTree, defaultLayout, leaves, mapLeaf, mergeArea, newId, saveLayout, setRatio, splitArea,
   type AreaLeaf, type Layout, type LayoutNode, type SplitDir, type ViewType, type WorkspaceDef,
@@ -34,8 +35,8 @@ export class Workbench {
   private readonly used = new Map<string, number>()
   private clock = 0
   private readonly timelines = new Map<string, TimelineArea>()
-  /** per Source area: requests to show a task's item */
-  private readonly sources = new Map<string, Store<number | null>>()
+  /** per Source area: requests to show a task's item, or an item */
+  private readonly sources = new Map<string, Store<number | FocusItem | null>>()
   private readonly allNodes: BlockSelection
 
   constructor(trace: Trace, store: ViewStore, layout: Layout) {
@@ -137,10 +138,21 @@ export class Workbench {
   }
 
   /** The requests of a Source area (a task whose item it shows). */
-  sourceRequests(id: string): Store<number | null> {
+  sourceRequests(id: string): Store<number | FocusItem | null> {
     let s = this.sources.get(id)
-    if (!s) { s = new Store<number | null>(null); this.sources.set(id, s) }
+    if (!s) { s = new Store<number | FocusItem | null>(null); this.sources.set(id, s) }
     return s
+  }
+
+  /** The focus items changed by a gesture outside the Source view: the most recently used
+   * Source area shows the first item (of the active workspace, else of any; no workspace
+   * is switched to). */
+  followFocus(items: readonly FocusItem[] | null): void {
+    if (!items?.length || this.store.focus.origin === 'source') return
+    const of = (ws: WorkspaceDef[]) => ws.flatMap((w) => leaves(w.root)).filter((l) => l.view === 'source')
+    const here = of([this.active])
+    const area = this.latest(here.length ? here : of(this.layout.get().workspaces))
+    if (area) this.sourceRequests(area.id).set(items[0])
   }
 
   /** Node ids from stored paths: nodes absent from this trace are dropped; if none is

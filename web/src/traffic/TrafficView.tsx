@@ -208,8 +208,7 @@ export function TrafficView({ trace, charges, store }: Props) {
     setRange()
     const onVisibility = () => request()
     document.addEventListener('visibilitychange', onVisibility)
-    const offs = [store.window.subscribe(setRange), store.range.subscribe(setRange),
-      store.cursor.subscribe(setRange), store.smoothing.subscribe(setRange),
+    const offs = [store.window.subscribe(setRange), store.onTime(setRange), store.smoothing.subscribe(setRange),
       charges.subscribe(() => request()), onThemeChange(() => { renderer.theme = readTheme(); request() })]
     const top = canvases[2]
     const pos = (e: MouseEvent) => {
@@ -232,10 +231,34 @@ export function TrafficView({ trace, charges, store }: Props) {
       request(false)
     }
     // A click on a closed group splits it; on an open group's name in the gutter merges it.
+    // A click on a strip selects its resources in the focus with the time shown (kept
+    // fixed: their occupants are derived); shift adds or removes them, alt keeps the other
+    // fixed parts.
     const onClick = (e: MouseEvent) => {
       const { x, y } = pos(e)
-      if (renderer.clickAt(x, y)) request()
+      if (renderer.clickAt(x, y)) { request(); return }
+      const res = renderer.resourcesAt(x, y)
+      if (!res) return
+      const f = store.focus.get()
+      let next = res
+      if (e.shiftKey) {
+        const cur = new Set(f.resources ?? [])
+        const on = res.every((r) => cur.has(r))
+        for (const r of res) { if (on) cur.delete(r); else cur.add(r) }
+        next = [...cur]
+      }
+      const w = store.window.get()
+      store.focus.set({ resources: next, time: f.time ?? { a: w.a, b: w.b } }, { keep: e.altKey, origin: 'instant' })
     }
+    const applyFocus = () => {
+      const r = store.focus.get().resources
+      const next = new Set(r ?? [])
+      if (next.size === renderer.focusResources.size && [...next].every((x) => renderer.focusResources.has(x))) return
+      renderer.focusResources = next
+      request(false)
+    }
+    applyFocus()
+    offs.push(store.focus.subscribe(applyFocus))
     const onLeave = () => { hover = null; renderer.hoverKey = null; setTip(null); request(false) }
     top.addEventListener('wheel', onWheel, { passive: false })
     top.addEventListener('mousemove', onMove)

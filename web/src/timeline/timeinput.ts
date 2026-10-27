@@ -1,9 +1,9 @@
-// Time input shared by the timeline and the Instant scrubber (views-design 6.1, 7): a drag
-// on the plot or the axis selects a range, a click on the plot or the axis sets the cursor
-// there (the two exclude each other), the playhead handle drags (scrubs) the cursor,
-// right-drag zooms to a box, ctrl+wheel or pinch zooms, horizontal or shift+wheel pans, a
-// double-click on the axis fits the time (the home window), Esc clears the range and the
-// cursor.
+// Time input of the timeline (views-design 6.1, 7): a drag on the plot or the axis selects
+// a range, a click on the plot or the axis an instant (the focus time, state/focusctl.ts),
+// the playhead handle drags (scrubs) the instant, right-drag zooms to a box, ctrl+wheel or
+// pinch zooms, horizontal or shift+wheel pans, a double-click on the axis fits the time
+// (the home window) and restores the focus from before its clicks.
+import type { Focus, FocusTime } from '../state/focus'
 import type { ViewStore } from '../state/viewstore'
 import { AXIS, GUTTER, type TimeAxis } from './axis'
 import { zoomFactor } from './viewport'
@@ -17,10 +17,11 @@ export interface TimeInputHost {
   store: ViewStore
   /** Redraw. */
   changed(): void
-  /** The axis selection changed: publish it to the store. */
-  rangeChanged(): void
+  /** A time gesture: an instant (a click, a scrub) or a range (a drag; `done` false while
+   * it runs). `y0`: where it started (above AXIS: on the axis); `alt`: alt was held. */
+  time(t: FocusTime, at: { y0: number; alt: boolean; done: boolean }): void
   /** A left click without a drag on the plot (not the axis); true if the host used it
-   * (else the click sets the cursor). */
+   * (else the click selects an instant). */
   plotClick?(x: number, y: number, e: PointerEvent): boolean
   /** A right click without a drag on the plot. */
   plotRightClick?(x: number, y: number): void
@@ -29,15 +30,17 @@ export interface TimeInputHost {
 interface Drag {
   kind: 'select' | 'axis' | 'zoom' | 'scrub'
   x0: number
+  y0: number
   t0: number
   moved: boolean
+  alt: boolean
 }
 
 export class TimeInput {
   private readonly host: TimeInputHost
   private drag: Drag | null = null
-  /** The cursor and range before the last click on the axis (a double-click restores them). */
-  private beforeClick: { at: number; cursor: ReturnType<ViewStore['cursor']['get']>; range: { a: number; b: number } | null } | null = null
+  /** The focus before the last click on the axis (a double-click restores it). */
+  private beforeClick: { at: number; focus: Focus } | null = null
 
   constructor(host: TimeInputHost) {
     this.host = host
@@ -59,14 +62,16 @@ export class TimeInput {
     if (x < GUTTER) return false
     const axis = this.host.axis
     const t0 = axis.timeAtX(x)
-    if (e.button === 0 && axis.onHandle(x, y)) this.drag = { kind: 'scrub', x0: x, t0, moved: false }
-    else if (e.button === 0) this.drag = { kind: y < AXIS ? 'axis' : 'select', x0: x, t0, moved: false }
-    else if (e.button === 2) this.drag = { kind: 'zoom', x0: x, t0, moved: false }
+    const at = { x0: x, y0: y, t0, moved: false, alt: e.altKey }
+    if (e.button === 0 && axis.onHandle(x, y)) this.drag = { kind: 'scrub', ...at }
+    else if (e.button === 0) this.drag = { kind: y < AXIS ? 'axis' : 'select', ...at }
+    else if (e.button === 2) this.drag = { kind: 'zoom', ...at }
     else return false
     return true
   }
 
-  /** A pointer move during a drag; false if no time drag runs. */
+  /** A pointer move during a drag; false if no time drag runs. A scrub moves the instant
+   * and keeps the other fixed parts of the focus. */
   move(x: number): boolean {
     const d = this.drag
     if (!d) return false
@@ -74,7 +79,7 @@ export class TimeInput {
     const xc = Math.max(GUTTER, Math.min(axis.width, x))
     if (d.kind === 'scrub') {
       d.moved = true
-      this.host.store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(xc))))
+      this.host.time({ t: Math.max(0, Math.min(axis.endTime, axis.timeAtX(xc))) }, { y0: 0, alt: true, done: false })
       this.host.changed()
       return true
     }
@@ -84,7 +89,7 @@ export class TimeInput {
     if (d.kind === 'zoom') axis.zoomBox = r
     else {
       axis.selection = { a: Math.min(r.a, r.b), b: Math.max(r.a, r.b) }
-      this.host.rangeChanged()
+      if (axis.selection.b > axis.selection.a) this.host.time({ ...axis.selection }, { y0: d.y0, alt: d.alt, done: false })
     }
     this.host.changed()
     return true
@@ -96,23 +101,19 @@ export class TimeInput {
     this.drag = null
     if (!d) return false
     const { axis, store } = this.host
+    const instant = () => ({ t: Math.max(0, Math.min(axis.endTime, axis.timeAtX(x))) })
     if (d.kind === 'select' || d.kind === 'axis') {
-      if (!d.moved) {
-        // A click sets the cursor there (it clears the range), unless the host takes a
-        // click on the plot (a task bar toggles its task).
+      if (!d.moved || !axis.selection || axis.selection.b <= axis.selection.a) {
+        // A click selects an instant there, unless the host takes a click on the plot (a
+        // task bar selects its task).
         if (d.kind === 'axis' || !this.host.plotClick?.(x, y, e)) {
-          if (d.kind === 'axis') {
-            this.beforeClick = { at: performance.now(), cursor: store.cursor.get(), range: axis.selection ? { ...axis.selection } : null }
-          }
+          if (d.kind === 'axis') this.beforeClick = { at: performance.now(), focus: store.focus.get() }
           axis.selection = null
-          this.host.rangeChanged()
-          store.pin(Math.max(0, Math.min(axis.endTime, axis.timeAtX(x))))
+          this.host.time(instant(), { y0: d.y0, alt: d.alt, done: true })
         }
-      } else {
-        // A drag sets the range (it clears the cursor).
-        if (axis.selection && axis.selection.b - axis.selection.a <= 0) axis.selection = null
-        this.host.rangeChanged()
-      }
+      } else this.host.time({ ...axis.selection }, { y0: d.y0, alt: d.alt, done: true })
+    } else if (d.kind === 'scrub') {
+      if (d.moved) this.host.time(instant(), { y0: 0, alt: true, done: true })
     } else if (d.kind === 'zoom') {
       if (d.moved && axis.zoomBox) axis.zoomTo(axis.zoomBox)
       else this.host.plotRightClick?.(x, y)
@@ -142,27 +143,10 @@ export class TimeInput {
     const { axis, store } = this.host
     const b = this.beforeClick
     this.beforeClick = null
-    if (b && performance.now() - b.at < DOUBLE_MS) {
-      axis.selection = b.range
-      this.host.rangeChanged()
-      if (!b.range) store.cursor.set(b.cursor)
-    }
+    if (b && performance.now() - b.at < DOUBLE_MS) store.focus.restore(b.focus)
     axis.zoomTo(axis.home)
     this.host.changed()
     return true
   }
 
-  /** Esc: clears the zoom box, the range and the cursor; true if there was either. */
-  escape(): boolean {
-    const { axis, store } = this.host
-    axis.zoomBox = null
-    const had = !!axis.selection || !!store.cursor.get()
-    if (axis.selection) {
-      axis.selection = null
-      this.host.rangeChanged()
-    }
-    if (store.cursor.get()) store.unpin()
-    this.host.changed()
-    return had
-  }
 }

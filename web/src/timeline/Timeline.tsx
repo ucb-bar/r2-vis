@@ -4,7 +4,9 @@ import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
 import type { BlockSelection } from '../state/blocks'
 import type { Store } from '../state/store'
-import { sameRange, selectTask, toggleTask, type ViewStore } from '../state/viewstore'
+import type { FocusTime } from '../state/focus'
+import { scopeMasks, taskBar } from '../state/focusqueries'
+import type { ViewStore } from '../state/viewstore'
 import { clearPrefs, loadPrefs, prefsKey, savePrefs } from '../state/viewprefs'
 import { onThemeChange, readTheme } from '../theme/theme'
 import { BlocksPanel } from '../ui/BlocksPanel'
@@ -13,6 +15,7 @@ import { OTHER } from './colors'
 import { Minimap } from './Minimap'
 import { Tooltip, type TipContent } from '../ui/Tooltip'
 import { taskName } from '../data/labels'
+import { short } from '../ui/format'
 import { linkFor } from '../source/links'
 import { AXIS, GUTTER, MAX_SMOOTH, MODE_NAME, TimelineRenderer, type AttributeTo } from './renderer'
 import { DRAG_PX, TimeInput } from './timeinput'
@@ -80,7 +83,7 @@ const REVEAL_MIN_SPAN = 20_000  // cycles shown at least when a task is revealed
 
 type Drag =
   | { kind: 'resize'; key: string; y0: number; h0: number }
-  | { kind: 'label'; row: number; x0: number; y0: number; moved: boolean; additive: boolean }
+  | { kind: 'label'; row: number; x0: number; y0: number; moved: boolean; additive: boolean; alt: boolean }
   | { kind: 'group'; row: number; button: number; x0: number; y0: number }
 
 /** A context menu: a group header's hidden rows, or a task of an RV program (its source). */
@@ -113,12 +116,12 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
   const [smoothing, setSmoothing] = useState(renderer.smoothing)
   const [showAll, setShowAll] = useState(false)
   const [blocksOpen, setBlocksOpen] = useState(false)
-  const [pinned, setPinned] = useState<number | null>(null)
   const [flightlines, setFlightlines] = useState(loadFlightlines)
   const [attributeTo, setAttributeTo] = useState(loadAttributeTo)
   const [usage, setUsage] = useState(loadUsage)
   const [control, setControl] = useState(loadControl)
   const [mapVersion, setMapVersion] = useState(0)
+  const [scope, setScope] = useState<number[]>([])
   const frame = useRef(0)
   const requestRef = useRef<() => void>(() => {})
 
@@ -162,10 +165,6 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
       mapPending = true
       requestAnimationFrame(() => { mapPending = false; setMapVersion((v) => v + 1); publishWindow() })
     }
-    const publishRange = () => {
-      const r = renderer.selection && renderer.selection.b > renderer.selection.a ? { ...renderer.selection } : null
-      if (!sameRange(r, store.range.get())) store.range.set(r)
-    }
     store.smoothing.set(renderer.smoothing)
     const offSmoothing = store.smoothing.subscribe((v) => {
       if (v !== renderer.smoothing) renderer.setSmoothing(v)
@@ -174,21 +173,40 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
     })
     // The window set by another view of the store (the Instant scrubber).
     const offWindow = store.window.subscribe((w) => { if (renderer.axis.showWindow(w.a, w.b)) request() })
-    const offRange = store.range.subscribe((r) => {
-      if (!sameRange(r, renderer.selection)) { renderer.selection = r ? { ...r } : null; request() }
-    })
-    renderer.selectedTasks = store.tasks.get()
-    const offTasks = store.tasks.subscribe((t) => { renderer.selectedTasks = t; request(); updateTip() })
+    // The focus: its time (the range band or the playhead), tasks (drawn selected; their
+    // nodes added to this timeline's node set) and resources (their rows selected).
+    const applyTime = (t: FocusTime | null) => {
+      renderer.selection = t && 'a' in t ? { a: t.a, b: t.b } : null
+      renderer.pinned = t && 't' in t ? t.t : null
+      request()
+    }
+    const applyFocus = () => {
+      const f = store.focus.get()
+      const tasks = f.tasks ?? []
+      if (renderer.focusTasks !== f.tasks || renderer.usageTasks.size !== (f.fixed.has('tasks') ? tasks.length : 0)) {
+        renderer.focusTasks = f.tasks
+        renderer.selectedTasks = new Set(tasks)
+        // usage (bands, arrows): only for the tasks a gesture set
+        renderer.usageTasks = f.fixed.has('tasks') ? renderer.selectedTasks : new Set()
+        const lane = trace.facts.tasks.cols.lane as Int32Array
+        const add = new Set<number>()
+        for (const t of tasks) {
+          const node = trace.dims.lanes[lane[t]]?.node as number | undefined
+          if (node !== undefined && !blocks.has(node)) add.add(node)
+        }
+        if (add.size) blocks.setAll([...add], true)
+      }
+      renderer.focusResources = new Set(f.resources ?? [])
+      renderer.resourcesFixed = f.fixed.has('resources')
+      request()
+      updateTip()
+    }
     renderer.onAttribution = () => { request(); updateTip() }
     renderer.onUsage = () => request()
     renderer.maxFlightlines = loadFlightlines()
     renderer.attributeTo = loadAttributeTo()
     renderer.showUsage = loadUsage()
     renderer.controlTraffic = loadControl()
-    const offCursor = store.cursor.subscribe((c) => {
-      const p = c?.pinned ? c.t : null
-      if (p !== renderer.pinned) { renderer.pinned = p; setPinned(p); request() }
-    })
     const unsubscribe = blocks.subscribe(() => {
       renderer.rebuild()
       renderer.onPrefs?.()
@@ -223,9 +241,7 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
       renderer.setView({ t0: (a + b) / 2 - (pw * cpp) / 2, cpp })
       const ri = renderer.model.rowOfLane[lane]
       if (ri >= 0) el.scrollTop = Math.max(0, renderer.model.top[ri] - (el.clientHeight - AXIS) / 2)
-      const sel = new Set(store.tasks.get())
-      sel.add(task)
-      store.tasks.set(sel)
+      store.focus.set({ tasks: [task] })
       request()
     }
     const offReveal = reveal.subscribe((task) => {
@@ -264,28 +280,51 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
     const setHover = (x: number, y: number) => {
       renderer.hover = { x, y, row: renderer.rowAtY(y), t: renderer.timeAtX(x) }
     }
+    applyTime(store.time)
+    applyFocus()
+    const offTime = store.onTime(applyTime)
+    const offFocus = store.focus.subscribe(applyFocus)
+    // The attribution scope (global): the flightlines count only owners inside it.
+    const applyScope = (s: ReadonlySet<number>) => {
+      renderer.attributionScope = scopeMasks(trace, s)
+      renderer.scopeKey = [...s].sort((a, b) => a - b).join(',')
+      setScope([...s])
+      request()
+    }
+    applyScope(store.scope.get())
+    const offScope = store.scope.subscribe(applyScope)
 
-    // Time gestures (shared with the Instant scrubber). A click on a task bar selects only
-    // that task, shift (or ctrl, cmd) + click adds or removes it; a click elsewhere on a plot
-    // clears the tasks, selects the row (as a click on its label) and sets the cursor; a
-    // right click on a group header lists its hidden rows.
+    // Focus gestures (state/focusctl.ts; alt keeps the other fixed parts). A click on a task
+    // bar selects that task and the instant there, shift (or ctrl, cmd) + click adds or
+    // removes it; a double click selects the task and its bar's range. A click elsewhere
+    // selects an instant and a drag a range: on a resource row's line together with its
+    // resources (their occupants are then derived), else alone. A right click on a group
+    // header lists its hidden rows.
     const time = new TimeInput({
       axis: renderer.axis, store,
       changed: () => { request(); updateTip() },
-      rangeChanged: () => publishRange(),
+      time: (t, at) => {
+        const i = at.y0 >= AXIS ? renderer.rowAtY(at.y0) : -1
+        const res = i >= 0 ? renderer.rowResources(renderer.model.rows[i]) : null
+        if (res) {
+          renderer.focusKey = renderer.model.rows[i].key
+          store.focus.set({ resources: res, time: t }, { keep: at.alt, origin: 'timeline' })
+        } else store.focus.set({ time: t }, { keep: at.alt, origin: 'timeline' })
+      },
       plotClick: (x, y, e) => {
         setHover(x, y)
         const task = renderer.hoveredTask()
-        const additive = e.shiftKey || e.metaKey || e.ctrlKey
-        if (task >= 0) {
-          if (additive) toggleTask(store, task)
-          else selectTask(store, task)
-          return true
+        if (task < 0) return false
+        let tasks = [task]
+        if (e.shiftKey || e.metaKey || e.ctrlKey) {
+          const cur = new Set(store.focus.get().tasks ?? [])
+          if (cur.has(task)) cur.delete(task)
+          else cur.add(task)
+          tasks = [...cur]
         }
-        if (store.tasks.get().size) store.tasks.set(new Set())
-        const i = renderer.rowAtY(y)
-        if (i >= 0 && renderer.model.rows[i].kind !== 'group') selectRow(i, additive)
-        return false
+        const t = Math.max(0, Math.min(trace.manifest.end_time, renderer.timeAtX(x)))
+        store.focus.set({ tasks, time: { t } }, { keep: e.altKey, origin: 'timeline' })
+        return true
       },
       plotRightClick: (x, y) => {
         setHover(x, y)
@@ -336,7 +375,7 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
           const row = renderer.model.rows[i]
           drag = row.kind === 'group'
             ? { kind: 'group', row: i, button: e.button, x0: x, y0: y }
-            : e.button === 0 ? { kind: 'label', row: i, x0: x, y0: y, moved: false, additive: e.ctrlKey || e.metaKey || e.shiftKey } : null
+            : e.button === 0 ? { kind: 'label', row: i, x0: x, y0: y, moved: false, additive: e.ctrlKey || e.metaKey || e.shiftKey, alt: e.altKey } : null
         }
       } else if (time.down(e, x, y)) {
         el.setPointerCapture(e.pointerId)
@@ -389,7 +428,7 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
           if (target) renderer.moveRow(target.from, target.before)
         } else if (row.kind === 'fabric' && x < 10 + row.depth * 12 + 8) {
           renderer.toggleFabric(row.key)  // the triangle opens or closes a fabric node
-        } else selectRow(d.row, d.additive)
+        } else selectRow(d.row, d.additive, d.alt)
       } else if (d.kind === 'group') {
         const row = renderer.model.rows[d.row]
         if (d.button === 0) renderer.toggle(row.id)
@@ -398,13 +437,28 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
       refresh()
     }
 
-    /** Selects a row (its label or its plot clicked); `additive` adds or removes it. */
-    const selectRow = (i: number, additive: boolean) => {
+    /** A click on a row's label: a resource row selects its resources in the focus, with
+     * the focus time kept (`additive` adds or removes them); another row is selected in
+     * this timeline only (for Delete). */
+    const selectRow = (i: number, additive: boolean, alt: boolean) => {
       const row = renderer.model.rows[i]
+      renderer.focusKey = row.key
+      const res = renderer.rowResources(row)
+      if (res) {
+        const f = store.focus.get()
+        let next = res
+        if (additive) {
+          const cur = new Set(f.resources ?? [])
+          const on = res.every((r) => cur.has(r))
+          for (const r of res) { if (on) cur.delete(r); else cur.add(r) }
+          next = [...cur]
+        }
+        store.focus.set({ resources: next, ...(f.time ? { time: f.time } : {}) }, { keep: alt, origin: 'timeline' })
+        return
+      }
       if (!additive) renderer.selectedRows.clear()
       if (additive && renderer.selectedRows.has(row.key)) renderer.selectedRows.delete(row.key)
       else renderer.selectedRows.add(row.key)
-      renderer.focusKey = row.key
     }
 
     const openMenu = (node: number, x: number, y: number) => {
@@ -414,6 +468,13 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
     const onDouble = (e: MouseEvent) => {
       const { x, y } = pos(e)
       if (time.double(x, y)) return
+      if (x >= GUTTER) {
+        // a task: the task and its bar's range
+        setHover(x, y)
+        const task = renderer.hoveredTask()
+        if (task >= 0) store.focus.set({ tasks: [task], time: taskBar(trace, task) }, { keep: e.altKey, origin: 'timeline' })
+        return
+      }
       if (x >= GUTTER) return
       const i = edgeRow(y)
       if (i < 0) return
@@ -431,13 +492,12 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
       if (e.key === 'Escape') {
-        // Esc clears the task selection first, then the range and the cursor.
-        if (store.tasks.get().size) store.tasks.set(new Set())
-        else time.escape()
+        // Esc (the workspace clears the focus) clears the zoom box and the row selection.
+        renderer.selectedRows.clear()
         renderer.zoomBox = null
         setMenu(null)
         request()
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && renderer.selectedRows.size) {
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && renderer.hasRowsToHide()) {
         e.preventDefault()
         renderer.hideSelected()
         refresh()
@@ -460,9 +520,9 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
       theme()
       unsubscribe()
       offSmoothing()
-      offRange()
-      offCursor()
-      offTasks()
+      offTime()
+      offFocus()
+      offScope()
       offWindow()
       offReveal()
       offCharges()
@@ -533,10 +593,6 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
                 onChange={(e) => store.smoothing.set(Number(e.target.value))} />
               <span className="tool-value">{smoothing === 1 ? 'off' : `${smoothing} px`}</span>
             </label>
-            {pinned !== null && (
-              <span className="chip">pinned at {Math.round(pinned).toLocaleString('en-US')}
-                <button className="chip-x" aria-label="unpin" onClick={() => store.unpin()}>×</button></span>
-            )}
             <div className="tool-row">
               <button className={blocksOpen ? 'button small active' : 'button small'} onClick={() => setBlocksOpen(!blocksOpen)}>Blocks</button>
               <button className="button small" onClick={() => {
@@ -555,6 +611,10 @@ export function Timeline({ trace, charges, pool, store, blocks, reveal, isKeyTar
             </label>
           </Section>
           <Section title="Attribution" view="timeline">
+            {scope.length > 0 && (
+              <span className="chip scope-chip">scope: {scope.map((n) => short(String(trace.dims.nodes[n]?.path ?? n))).join(', ')}
+                <button className="chip-x" aria-label="clear the scope" onClick={() => store.scope.set(new Set())}>×</button></span>
+            )}
             <label className="tool">
               flightlines
               <input type="range" min={1} max={128} value={flightlines}

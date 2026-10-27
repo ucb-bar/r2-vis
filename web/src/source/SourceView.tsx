@@ -3,9 +3,14 @@
 // in source order, with cards for invokes and waits. Source: the plain file. It holds the
 // programs of all loaded maps; each area keeps its program, file, mode, folds and scroll.
 // With a trace open, cards show their tasks and producers, and a task's "Show source"
-// selects its item (source/links.ts). It fills the container it gets.
+// selects its item (source/links.ts). A click on an invoke or wait card puts its item in
+// the focus with the focus time kept (shift: adds or removes it; a double click: the time
+// is the span of the item's task bars); the focus items are highlighted. It fills the
+// container it gets.
 import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { Trace } from '../data/trace'
+import { itemKey, type FocusItem, type FocusTime } from '../state/focus'
+import { spanOf } from '../state/focusqueries'
 import type { Store } from '../state/store'
 import type { ViewStore } from '../state/viewstore'
 import { AreaContext, useAreaState } from '../ui/area'
@@ -23,8 +28,8 @@ interface Props {
   /** the open trace: task counts per item, the status of each program against the run */
   trace?: Trace
   store?: ViewStore
-  /** tasks whose item to show (its pc), routed to this area */
-  request?: Store<number | null>
+  /** a task whose item to show (its pc), or an item, routed to this area */
+  request?: Store<number | FocusItem | null>
 }
 
 type Mode = 'readable' | 'source'
@@ -41,8 +46,10 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   const [shown, setShown] = useAreaState<Shown | null>('source.program', () => null)
   const [files, setFiles] = useAreaState<Record<string, number>>('source.file', () => ({}))
   const [toggledList, setToggledList] = useAreaState<string[]>('source.open', () => [])
+  // per program: the item shown last (scrolled into view)
   const [sel, setSel] = useState<Map<string, string>>(new Map())
-  const [highlight, setHighlight] = useState<{ key: string; id: string } | null>(null)
+  // the focus items (a new render only when they change: a large program renders slowly)
+  const [focus, setFocus] = useState(() => focusItemsOf(store))
   const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
   const [pending, setPending] = useState<number | null>(null)
   const [missing, setMissing] = useState<string | null>(null)
@@ -53,7 +60,6 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   const host = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLInputElement>(null)
-  const me = useRef({})
   const toggled = useMemo(() => new Set(toggledList), [toggledList])
 
   // The programs of all loaded maps, in map order; the one shown.
@@ -103,9 +109,45 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
       if (a.item.kind === 'region' && active(a) === toggled.has(k2)) flip.push(k2)
     }
     if (flip.length) setToggledList((l) => [...l.filter((x) => !flip.includes(x)), ...flip.filter((x) => !l.includes(x))])
-    store?.sourceSelection.set({ map: e.m.name, program: e.p.program, id: node.id, from: me.current })
   }
-  const select = (n: Node | null) => { setNoItem(null); if (entry) show(at, n) }
+  /** An item or tasks into the focus, with the focus time kept (`span`: the time is the
+   * span of the item's task bars); `additive` adds or removes the item (the whole set is
+   * fixed). */
+  const toFocus = (target: { node: Node; mp?: MapProgram } | { tasks: number[] }, additive: boolean, span = false) => {
+    if (!store) return
+    const time = store.focus.get().time
+    const kept: { time?: FocusTime } = time ? { time } : {}
+    if ('tasks' in target) {
+      const cur = new Set(store.focus.get().tasks ?? [])
+      for (const t of target.tasks) cur.add(t)
+      store.focus.set({ tasks: additive ? [...cur] : target.tasks, ...kept }, { origin: 'source' })
+      return
+    }
+    const e = target.mp ? entries.find((x) => x.mi === target.mp?.mi && x.pi === target.mp?.pi) : entry
+    if (!e) return
+    const item: FocusItem = { map: e.m.name, program: e.p.program, id: target.node.id }
+    let items = [item]
+    if (additive) {
+      const cur = store.focus.get().items ?? []
+      const k = itemKey(item)
+      items = cur.some((i) => itemKey(i) === k) ? cur.filter((i) => itemKey(i) !== k) : [...cur, item]
+    }
+    const own = span && e && link ? spanOf(trace as Trace, link.tasksOf({ mi: e.mi, pi: e.pi }, target.node)) : null
+    store.focus.set({ items, ...(own ? { time: own } : kept) }, { origin: 'source' })
+  }
+  /** An item clicked: shown; an invoke or wait card clicked also goes into the focus (a
+   * double click: with the span of its tasks). */
+  const select = (n: Node | null, ev?: React.MouseEvent) => {
+    setNoItem(null)
+    if (entry) show(at, n)
+    if (n && ev && (n.item.kind === 'invoke' || n.item.kind === 'wait')) toFocus({ node: n }, ev.shiftKey, ev.detail >= 2)
+  }
+  // The focus items of the program shown: set by a gesture, or derived.
+  const focusIds = useMemo(() => {
+    const ids = new Set((focus.items ?? []).filter((i) => entry && i.map === entry.m.name && i.program === entry.p.program).map((i) => i.id))
+    const fixed = focus.fixed
+    return { selected: fixed ? ids : new Set<string>(), linked: fixed ? new Set<string>() : ids }
+  }, [focus, entry?.m.name, entry?.p.program])
   /** Shows a line of the file shown: the regions around it open, the line marked. */
   const goLine = (line: number) => {
     if (!index) return
@@ -134,18 +176,38 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
     if (k < 0) k = entries.findIndex((e) => e.p.program === programName)
     if (k >= 0) show(k, null)
   }
+  /** A producer clicked: its card shown and its item in the focus. */
   const onProducer = (pr: Producer) => {
     if (!pr.mp) return
     show(entries.findIndex((e) => e.mi === pr.mp?.mi && e.pi === pr.mp?.pi), pr.node)
+    if (pr.node) toFocus({ node: pr.node, mp: pr.mp }, false)
   }
+
+  useEffect(() => {
+    if (!store) return
+    // the same items (another gesture with the same item, a double click): no new render
+    const same = (x: readonly FocusItem[] | null, y: readonly FocusItem[] | null) =>
+      x === y || (!!x && !!y && x.length === y.length && x.every((it, i) => itemKey(it) === itemKey(y[i])))
+    return store.focus.subscribe(() => setFocus((cur) => {
+      const next = focusItemsOf(store)
+      return next.fixed === cur.fixed && same(next.items, cur.items) ? cur : next
+    }))
+  }, [store])
 
   // ---- requests (Show source), the other areas' selection ---------------------------------------
   useEffect(() => {
     if (!request) return
-    const take = (task: number | null) => { if (task !== null) { setPending(task); request.set(null) } }
+    const take = (r: number | FocusItem | null) => {
+      if (r === null) return
+      request.set(null)
+      if (typeof r === 'number') { setPending(r); return }
+      const k = entries.findIndex((e) => e.m.name === r.map && e.p.program === r.program)
+      const node = k < 0 ? null : programIndex(entries[k].p).byId.get(r.id) ?? null
+      if (node) { setNoItem(null); setMissing(null); show(k, node) }
+    }
     take(request.get())
     return request.subscribe(take)
-  }, [request])
+  }, [request, entries])
   useEffect(() => {
     if (pending === null || !link) return
     const loc = link.locate(pending)
@@ -157,12 +219,6 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
     setNoItem(loc.node || !src ? null : `No item of ${src.name} has pc 0x${src.pc.toString(16)}: the build's dry run did not reach it.`)
     show(entries.findIndex((e) => e.mi === loc.mp.mi && e.pi === loc.mp.pi), loc.node)
   }, [pending, link, entries])
-  useEffect(() => {
-    if (!store) return
-    return store.sourceSelection.subscribe((s) => {
-      if (s && s.from !== me.current) setHighlight({ key: `${s.map}/${s.program}`, id: s.id })
-    })
-  }, [store])
 
   // ---- scroll: the selected item in view; the position kept per area, program and mode ---------
   useEffect(() => {
@@ -262,9 +318,9 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
       {mode === 'readable' ? (
         <div className="source-readable" ref={scroller}>
           <Readable program={program} roots={index.roots} lines={tokens[file] ?? []} file={file} deps={deps}
-            selected={selectedId} highlight={highlight?.key === pkey ? highlight.id : null}
+            selected={focusIds.selected} highlight={focusIds.linked}
             isOpen={isOpen} toggle={toggle} onSelect={select} onProducer={onProducer} links={cardLinks}
-            selectTasks={(rows) => store?.tasks.set(new Set(rows))} goProgram={goProgram} hover={hover} clear={clear}
+            focus={toFocus} goProgram={goProgram} hover={hover} clear={clear}
             goLine={goLine} markLine={markLine?.key === pkey ? markLine.line : null} />
         </div>
       ) : (
@@ -274,6 +330,12 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
       {tip && <Tooltip tip={tip.content} style={tipPlace(tip, host.current)} />}
     </div>
   )
+}
+
+/** The focus items and whether a gesture set them. */
+function focusItemsOf(store: ViewStore | undefined): { items: readonly FocusItem[] | null; fixed: boolean } {
+  const f = store?.focus.get()
+  return { items: f?.items ?? null, fixed: f?.fixed.has('items') ?? false }
 }
 
 const tokenCache = new WeakMap<SourceMap, Token[][][]>()

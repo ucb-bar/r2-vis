@@ -211,10 +211,83 @@ export class SourceLink {
     if (!src) return null
     const inst = this.instance[src.program]
     if (!inst) return { missing: src.name }
-    const program = this.maps[inst.mp.mi].map.programs[inst.mp.pi]
-    const node = programIndex(program).all.find((n) => taskPcs(n).includes(src.pc)) ?? null
-    return { mp: inst.mp, node }
+    return { mp: inst.mp, node: this.nodeAt(inst.mp, src.pc) }
   }
+
+  /** per map program: pc -> the first item with that pc among its task pcs */
+  private readonly pcNodes = new Map<string, Map<number, Node>>()
+
+  private nodeAt(mp: MapProgram, pc: number): Node | null {
+    const k = this.key(mp)
+    let m = this.pcNodes.get(k)
+    if (!m) {
+      m = new Map()
+      for (const n of programIndex(this.maps[mp.mi].map.programs[mp.pi]).all) {
+        for (const p of taskPcs(n)) if (!m.has(p)) m.set(p, n)
+      }
+      this.pcNodes.set(k, m)
+    }
+    return m.get(pc) ?? null
+  }
+
+  /** The distinct items of tasks (their program instance and pc), in task order; tasks
+   * without an item are left out. */
+  itemsOf(tasks: readonly number[]): { mp: MapProgram; node: Node }[] {
+    const c = this.trace.facts.tasks.cols
+    const pc = c.pc as Int32Array | undefined
+    const prog = c.program as Int32Array | undefined
+    if (!pc || !prog) return []
+    const seen = new Set<string>()
+    const out: { mp: MapProgram; node: Node }[] = []
+    for (const t of tasks) {
+      if (pc[t] < 0 || prog[t] < 0) continue
+      const inst = this.instance[prog[t]]
+      if (!inst) continue
+      const key = `${this.key(inst.mp)}:${pc[t]}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const node = this.nodeAt(inst.mp, pc[t])
+      if (node && !out.some((o) => o.node === node)) out.push({ mp: inst.mp, node })
+    }
+    return out
+  }
+}
+
+/** The tasks table row of a gid (the table is sorted by gid), or -1. */
+export function taskRowOfGid(trace: Trace, gid: number): number {
+  const g = trace.facts.tasks.cols.gid as Int32Array
+  let lo = 0
+  let hi = g.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (g[mid] < gid) lo = mid + 1
+    else hi = mid
+  }
+  return lo < g.length && g[lo] === gid ? lo : -1
+}
+
+/** The spawn tasks (task rows) of the program instances of `tasks`, up to the root: an
+ * instance's spawn task runs in the spawning program, whose instance has its own spawn. */
+export function parentSpawns(trace: Trace, tasks: readonly number[]): number[] {
+  const prog = trace.facts.tasks.cols.program as Int32Array | undefined
+  const spawn = trace.facts.programs.cols.spawn as Int32Array | Float64Array | undefined
+  if (!prog || !spawn) return []
+  const instances = new Set<number>()
+  for (const t of tasks) if (prog[t] >= 0) instances.add(prog[t])
+  const seen = new Set<number>()
+  const out: number[] = []
+  for (let i of instances) {
+    while (i >= 0 && !seen.has(i)) {
+      seen.add(i)
+      const g = spawn[i]
+      if (!(g === g && g >= 0)) break
+      const row = taskRowOfGid(trace, g)
+      if (row < 0) break
+      out.push(row)
+      i = prog[row]
+    }
+  }
+  return out
 }
 
 const links = new WeakMap<Trace, { maps: LoadedMap[]; link: SourceLink }>()

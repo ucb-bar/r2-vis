@@ -1,7 +1,7 @@
 // The timeline renderer: one canvas, the visible rows only. Layout: label gutter on the
 // left, time axis on top, rows below (group headers, task lanes, utilization lines).
 // The renderer holds the view state; Timeline.tsx turns input into calls on it.
-import type { Attribution, AttributionRequest, OwnerGroup, Usage, UsageRequest } from '../data/attribution'
+import type { Attribution, AttributionRequest, AttributionScope, OwnerGroup, Usage, UsageRequest } from '../data/attribution'
 import type { ChargeCache, ChargeGroup } from '../data/charges'
 import { isDict } from '../data/columns'
 import { taskLabel, taskName } from '../data/labels'
@@ -66,6 +66,29 @@ interface RowValue {
 
 /** The pool worker of the attribution queries. */
 const ATTRIBUTION_WORKER = 0
+/** Above this many selected tasks, their dependency arrows are not drawn. */
+const MAX_SELECTED_ARROWS = 256
+/** The usage arrows whose share over the task's lifetime is computed (the highest peaks). */
+const ARROW_SHARES = 64
+/** The usage arrow pairs are found in slices of this many ms, checked every ARROW_STEP
+ * charges. */
+const ARROW_SLICE_MS = 8
+const ARROW_STEP = 20000
+
+/** A (task, row) pair of the usage arrows: its peak charge, amount (per unit), resources and
+ * peak lanes held. */
+interface ArrowPair {
+  k: number
+  row: number
+  amount: number
+  byUnit: Map<string, number>
+  res: Set<number>
+  peak: number
+  peakLanes: number
+  lanes: number
+}
+
+interface ArrowPairs { kept: ArrowPair[]; count: number }
 
 /** A usage arrow (views-design 7.1): a selected task to a resource row it charged. */
 export interface UsageArrow {
@@ -133,10 +156,21 @@ export class TimelineRenderer {
   scrollY = 0
   height = 1
   hover: Hover | null = null
-  /** Selected tasks (task rows) of the shared state: arrows stay shown. */
+  /** The focus tasks (task rows): drawn selected, their arrows shown up to
+   * MAX_SELECTED_ARROWS tasks. `focusTasks` is the focus's list (a new list: a new set). */
   selectedTasks: ReadonlySet<number> = new Set()
+  focusTasks: readonly number[] | null = null
+  /** The tasks whose usage is drawn (bands and arrows): the focus tasks a gesture set. */
+  usageTasks: ReadonlySet<number> = new Set()
+  /** The attribution scope (owner masks; null: the whole device) and its key. */
+  attributionScope: AttributionScope | null = null
+  scopeKey = ''
+  /** The focus resources: their rows drawn selected; Delete hides them when fixed. */
+  focusResources: ReadonlySet<number> = new Set()
+  resourcesFixed = false
   /** Row reorder preview: the dragged row and the row index it goes before. */
   reorder: { from: number; before: number } | null = null
+  /** Rows selected in this timeline only (not resource rows): Delete hides them. */
   readonly selectedRows = new Set<string>()
   /** The row the minimap shows (the last row whose label was clicked). */
   focusKey: string | null = null
@@ -158,11 +192,15 @@ export class TimelineRenderer {
   /** Called when a usage query returns (the view redraws). */
   onUsage: (() => void) | null = null
   private usageAsked = ''
+  private usageSet: ReadonlySet<number> | null = null
+  private usageShown = true
   /** the usage arrow labels drawn last (their hover tooltip) */
   private arrowHits: { x0: number; x1: number; y0: number; y1: number; arrow: UsageArrow }[] = []
   /** resource amounts over task lifetimes (usage arrows), per usage */
   private readonly usageTotals = new Map<string, { amount: number; exact: boolean }>()
-  private arrowCache: { usage: NonNullable<TimelineRenderer['usage']>; model: RowModel; control: boolean; arrows: UsageArrow[] } | null = null
+  private arrowJob: { usage: NonNullable<TimelineRenderer['usage']>; model: RowModel; control: boolean;
+    work: Generator<void, ArrowPairs>; done: ArrowPairs | null } | null = null
+  private arrowCache: { usage: NonNullable<TimelineRenderer['usage']>; model: RowModel; control: boolean; set: { arrows: UsageArrow[]; count: number } } | null = null
   private readonly usageCaps: { ceiling: Float64Array }
   /** Called when an attribution query returns (the view redraws). */
   onAttribution: (() => void) | null = null
@@ -343,9 +381,36 @@ export class TimelineRenderer {
     this.rebuild()
   }
 
+  /** The resources of a resource row or a fabric or memory node row (its members); null
+   * for other rows. */
+  rowResources(row: Row): number[] | null {
+    if (row.kind === 'resource') return [row.id]
+    if (row.kind === 'fabric') return [...this.source.fabrics[row.id].members]
+    return null
+  }
+
+  /** A row is selected: in this timeline, or its resources in the focus. */
+  isRowSelected(row: Row): boolean {
+    if (this.selectedRows.has(row.key)) return true
+    if (!this.focusResources.size) return false
+    return this.rowResources(row)?.some((r) => this.focusResources.has(r)) ?? false
+  }
+
+  /** The rows that Delete hides: those selected in this timeline and the rows of fixed
+   * focus resources. */
+  private rowsToHide(): string[] {
+    const out = [...this.selectedRows]
+    if (this.resourcesFixed) for (const r of this.model.rows) if (r.kind !== 'group' && !this.selectedRows.has(r.key) && this.isRowSelected(r)) out.push(r.key)
+    return out
+  }
+
+  hasRowsToHide(): boolean {
+    return this.rowsToHide().length > 0
+  }
+
   hideSelected(): number {
     let n = 0
-    for (const k of this.selectedRows) {
+    for (const k of this.rowsToHide()) {
       this.hidden.add(k)
       n++
     }
@@ -539,8 +604,8 @@ export class TimelineRenderer {
       ctx.font = `${th.fontSizeS}px ${th.fontSans}`
       this.drawPrograms(ctx, row.id, y, row.height)
     } else {
-      if (this.selectedRows.has(row.key)) {
-        ctx.fillStyle = th.accentArea
+      if (this.isRowSelected(row)) {
+        ctx.fillStyle = th.selectArea
         ctx.fillRect(0, y, GUTTER, row.height - 1)
       }
       if (row.key === this.focusKey) {
@@ -911,9 +976,11 @@ export class TimelineRenderer {
         this.outline(consumerOutlines, d.other)
       }
     }
-    // Selected tasks keep their arrows at any width (the edge rule when off screen).
+    // Selected tasks keep their arrows at any width (the edge rule when off screen), up
+    // to MAX_SELECTED_ARROWS tasks; above that only their outlines.
+    const arrows = this.selectedTasks.size <= MAX_SELECTED_ARROWS
     for (const t of this.selectedTasks) {
-      withArrows(t)
+      if (arrows) withArrows(t)
       this.outline(selectedOutlines, t)
     }
     const hovered = this.hoveredTask()
@@ -934,7 +1001,7 @@ export class TimelineRenderer {
     ctx.strokeStyle = th.ink
     ctx.stroke(outlines)
     ctx.lineWidth = 2
-    ctx.strokeStyle = th.accent
+    ctx.strokeStyle = th.select
     ctx.stroke(selectedOutlines)
     batch.draw(ctx, `${th.fontSizeXs}px ${th.fontSans}`, th.surface)
   }
@@ -971,8 +1038,10 @@ export class TimelineRenderer {
     const x0 = this.xOf(iss)
     let x1 = this.xOf(cmp === cmp ? cmp : this.endTime)
     if (this.isNeutrinoTask(task)) x1 = Math.max(x1, x0 + NEUTRINO_TICK)
+    if (x1 < GUTTER || x0 > this.width) return
     const { pad, subH } = this.laneBox(this.model.rows[ri])
     const top = this.rowTop(ri) + pad + this.trace.lanes.taskSub[task] * subH
+    if (top > this.height || top + subH < AXIS) return
     path.rect(x0 - 0.5, top - 0.5, Math.max(1, x1 - x0) + 1, subH + 1)
   }
 
@@ -1092,10 +1161,10 @@ export class TimelineRenderer {
 
   /** The usage the view asks for: the selected tasks (sorted), or null. */
   private usageQuery(): { key: string; req: UsageRequest; tasks: number[] } | null {
-    if (!this.showUsage || this.selectedTasks.size === 0) return null
+    if (!this.showUsage || this.usageTasks.size === 0) return null
     const charges = this.trace.reader.files.get('charges.parquet')
     if (!charges) return null
-    const tasks = [...this.selectedTasks].sort((x, y) => x - y)
+    const tasks = [...this.usageTasks].sort((x, y) => x - y)
     const c = this.trace.facts.tasks.cols
     const num = (col: string, t: number) => { const v = (c[col] as Float64Array | undefined)?.[t]; return v !== undefined && v === v ? v : null }
     const req: UsageRequest = {
@@ -1114,6 +1183,10 @@ export class TimelineRenderer {
 
   /** Starts the usage query when the selection changed (the latest wins). */
   private requestUsage(): void {
+    // the same task set as last asked: nothing to do (a large set is not joined per frame)
+    if (this.usageSet === this.usageTasks && this.usageShown === this.showUsage) return
+    this.usageSet = this.usageTasks
+    this.usageShown = this.showUsage
     const q = this.usageQuery()
     if (!q) { this.usage = null; this.usageAsked = ''; return }
     if (q.key === this.usageAsked) return
@@ -1133,39 +1206,46 @@ export class TimelineRenderer {
     })
   }
 
-  /** Per selected task, the fraction of the row's resource it holds in each of the n pixels
-   * of the view (the average over the pixel; a fabric row: the largest member fraction);
-   * null if the row has none. */
+  /** Per task-kind color slot of the selected tasks, the fraction of the row's resource
+   * they hold in each of the n pixels of the view (the average over the pixel; a fabric
+   * row: the largest member fraction); a slot without tasks on the row is empty; null if
+   * the row has none. */
   usagePixels(row: Row, n: number): Float64Array[] | null {
     const u = this.usage
     if (!u || !this.showUsage || (row.kind !== 'resource' && row.kind !== 'fabric')) return null
     const members = row.kind === 'fabric' ? this.source.fabrics[row.id].members : [row.id]
     const { t0, cpp } = this.view
     const { task, start, end, frac } = u.res
+    const slots = this.theme.series.length + 1
+    const slotOf = (k: number) => Math.min(slots - 1, this.slots[u.tasks[k]] ?? slots - 1)
     let out: Float64Array[] | null = null
-    const tmp = new Float64Array(n)
+    const acc: (Float64Array | null)[] = Array.from({ length: slots }, () => null)
     for (const r of members) {
       const span = u.byRes.get(r)
       if (!span || (!this.controlTraffic && this.isControl(r))) continue
-      out ??= u.tasks.map(() => new Float64Array(n))
-      for (let i = span[0]; i < span[1];) {
-        const k = task[i]
-        tmp.fill(0)
-        for (; i < span[1] && task[i] === k; i++) {
-          const f = frac[i]
-          if (!(f > 0)) continue
-          const x0 = Math.max(0, (start[i] - t0) / cpp)
-          const x1 = Math.min(n, (end[i] - t0) / cpp)
-          if (x1 <= x0) continue
-          const p0 = Math.floor(x0)
-          const p1 = Math.floor(x1)
-          if (p0 === p1) { tmp[p0] += f * (x1 - x0); continue }
-          tmp[p0] += f * (p0 + 1 - x0)
-          for (let p = p0 + 1; p < p1; p++) tmp[p] += f
-          if (p1 < n) tmp[p1] += f * (x1 - p1)
-        }
-        const acc = out[k]
-        for (let p = 0; p < n; p++) if (tmp[p] > acc[p]) acc[p] = tmp[p]
+      out ??= Array.from({ length: slots }, () => new Float64Array(0))
+      acc.forEach((a) => a?.fill(0))
+      for (let i = span[0]; i < span[1]; i++) {
+        const f = frac[i]
+        if (!(f > 0)) continue
+        const x0 = Math.max(0, (start[i] - t0) / cpp)
+        const x1 = Math.min(n, (end[i] - t0) / cpp)
+        if (x1 <= x0) continue
+        const sl = slotOf(task[i])
+        const tmp = (acc[sl] ??= new Float64Array(n))
+        const p0 = Math.floor(x0)
+        const p1 = Math.floor(x1)
+        if (p0 === p1) { tmp[p0] += f * (x1 - x0); continue }
+        tmp[p0] += f * (p0 + 1 - x0)
+        for (let p = p0 + 1; p < p1; p++) tmp[p] += f
+        if (p1 < n) tmp[p1] += f * (x1 - p1)
+      }
+      for (let sl = 0; sl < slots; sl++) {
+        const a = acc[sl]
+        if (!a) continue
+        if (!out[sl].length) out[sl] = new Float64Array(n)
+        const o = out[sl]
+        for (let p = 0; p < n; p++) if (a[p] > o[p]) o[p] = a[p]
       }
     }
     return out
@@ -1187,34 +1267,91 @@ export class TimelineRenderer {
    * at its peak charge there, labelled with the task's peak band height on the row (the
    * largest amount / (ceiling x span) of its charges; a node: over its members). The hover
    * tooltip adds its amount, its share of the row over its lifetime [min(call, invoke),
-   * retire) and the peak lanes held. The largest peaks first. Cached per usage and row
-   * model once exact. */
+   * retire) and the peak lanes held. The pairs with the highest peaks, the largest first
+   * (usageArrowCount: all pairs). Cached per usage and row model once exact. */
   usageArrows(): UsageArrow[] {
-    const u = this.usage
-    if (!u || !this.showUsage) return []
-    const cached = this.arrowCache
-    if (cached && cached.usage === u && cached.model === this.model && cached.control === this.controlTraffic) return cached.arrows
-    const arrows = this.computeUsageArrows(u)
-    if (arrows.every((a) => a.exact)) this.arrowCache = { usage: u, model: this.model, control: this.controlTraffic, arrows }
-    return arrows
+    return this.usageArrowSet().arrows
   }
 
-  private computeUsageArrows(u: NonNullable<typeof this.usage>): UsageArrow[] {
-    const rows = this.resourceRows()
-    const c = this.trace.facts.tasks.cols
-    const { task, resource, start, end, amount } = u.res
-    // per (task, row): the task's amount, its resources, its largest charge
+  /** The number of (task, row) pairs with usage: the arrows drawn are the first of them. */
+  get usageArrowCount(): number {
+    return this.usageArrowSet().count
+  }
+
+  private usageArrowSet(): { arrows: UsageArrow[]; count: number } {
+    const u = this.usage
+    if (!u || !this.showUsage) return { arrows: [], count: 0 }
+    const cached = this.arrowCache
+    if (cached && cached.usage === u && cached.model === this.model && cached.control === this.controlTraffic) return cached.set
+    const pairs = this.arrowPairs(u)
+    if (!pairs) return { arrows: [], count: 0 }
+    const set = { arrows: this.arrowsOf(u, pairs.kept), count: pairs.count }
+    if (set.arrows.every((a) => a.exact)) this.arrowCache = { usage: u, model: this.model, control: this.controlTraffic, set }
+    return set
+  }
+
+  /** The (task, row) pairs of the usage arrows, computed in slices of ARROW_SLICE_MS (a
+   * large selection has a million charges): null until done (the view is asked to draw
+   * again). */
+  private arrowPairs(u: NonNullable<typeof this.usage>): ArrowPairs | null {
+    const job = this.arrowJob
+    if (!job || job.usage !== u || job.model !== this.model || job.control !== this.controlTraffic) {
+      this.arrowJob = { usage: u, model: this.model, control: this.controlTraffic, work: this.findArrowPairs(u), done: null }
+    }
+    const j = this.arrowJob as NonNullable<typeof this.arrowJob>
+    if (j.done) return j.done
+    const until = performance.now() + ARROW_SLICE_MS
+    for (;;) {
+      const step = j.work.next()
+      if (step.done) { j.done = step.value; return j.done }
+      if (performance.now() > until) break
+    }
+    setTimeout(() => { if (this.arrowJob === j) this.onUsage?.() }, 0)
+    return null
+  }
+
+  /** The pairs with the highest peaks (as many as can be drawn, at least ARROW_SHARES) with
+   * their amounts, and the number of pairs: the peak charge per pair (numeric keys), then
+   * the amounts of the pairs kept. Yields every ARROW_STEP charges. */
+  private *findArrowPairs(u: NonNullable<typeof this.usage>): Generator<void, ArrowPairs> {
+    const { task, resource, start, end, amount, frac } = u.res
     const resDims = this.trace.dims.resources
-    const acc = new Map<string, { k: number; row: number; amount: number; byUnit: Map<string, number>; res: Set<number>; peak: number;
-      peakLanes: number; lanes: number }>()
+    const nRows = this.model.rows.length
+    const rowOf = new Int32Array(resDims.length).fill(-1)
+    for (const [r, i] of this.resourceRows()) rowOf[r] = i
+    const control = new Uint8Array(resDims.length)
+    if (!this.controlTraffic) for (let r = 0; r < resDims.length; r++) control[r] = this.isControl(r) ? 1 : 0
+    // a pair: (task, row), or (task, resource) for a resource without a row
+    const width = nRows + resDims.length
+    const keyOf = (i: number) => { const row = rowOf[resource[i]]; return task[i] * width + (row >= 0 ? row : nRows + resource[i]) }
+    const skip = (i: number) => !(amount[i] > 0) || control[resource[i]] === 1
+    const peaks = new Map<number, number>()
     for (let i = 0; i < task.length; i++) {
-      if (!(amount[i] > 0) || (!this.controlTraffic && this.isControl(resource[i]))) continue
-      const row = rows.get(resource[i]) ?? -1
-      const key = `${task[i]}|${row < 0 ? `r${resource[i]}` : row}`
-      let e = acc.get(key)
-      if (!e) acc.set(key, (e = { k: task[i], row, amount: 0, byUnit: new Map(), res: new Set(), peak: i, peakLanes: 0, lanes: 0 }))
+      if (i % ARROW_STEP === 0) yield
+      if (skip(i)) continue
+      const k = keyOf(i)
+      const p = peaks.get(k)
+      if (p === undefined || frac[i] > frac[p]) peaks.set(k, i)
+    }
+    // the pairs with the highest peaks, kept sorted (largest first)
+    const keep = Math.max(this.maxFlightlines, ARROW_SHARES)
+    const best: [number, number][] = []
+    for (const [k, i] of peaks) {
+      if (best.length === keep && frac[i] <= frac[best[keep - 1][1]]) continue
+      let at = best.length
+      while (at > 0 && frac[best[at - 1][1]] < frac[i]) at--
+      best.splice(at, 0, [k, i])
+      if (best.length > keep) best.pop()
+    }
+    yield
+    const acc = new Map<number, ArrowPair>(best.map(([k, i]) => [k, { k: task[i], row: rowOf[resource[i]], amount: 0,
+      byUnit: new Map<string, number>(), res: new Set<number>(), peak: i, peakLanes: 0, lanes: 0 }]))
+    for (let i = 0; i < task.length; i++) {
+      if (i % ARROW_STEP === 0) yield
+      if (skip(i)) continue
+      const e = acc.get(keyOf(i))
+      if (!e) continue
       e.amount += amount[i]
-      if (u.res.frac[i] > u.res.frac[e.peak]) e.peak = i
       const unit = String(resDims[resource[i]]?.unit ?? '')
       e.byUnit.set(unit, (e.byUnit.get(unit) ?? 0) + amount[i])
       e.res.add(resource[i])
@@ -1222,8 +1359,15 @@ export class TimelineRenderer {
       const span = end[i] - start[i]
       if (lanes > 0 && span > 0 && u.res.cycles[i] / span > e.peakLanes) { e.peakLanes = u.res.cycles[i] / span; e.lanes = lanes }
     }
+    return { kept: [...acc.values()], count: peaks.size }
+  }
+
+  /** The arrows of the pairs kept, with their shares of the rows over the task lifetimes. */
+  private arrowsOf(u: NonNullable<typeof this.usage>, kept: ArrowPair[]): UsageArrow[] {
+    const c = this.trace.facts.tasks.cols
+    const { start, end, frac } = u.res
     const out: UsageArrow[] = []
-    for (const e of acc.values()) {
+    for (const e of kept) {
       const t = u.tasks[e.k]
       const num = (col: string) => { const v = (c[col] as Float64Array | undefined)?.[t]; return v !== undefined && v === v ? v : null }
       const invoke = num('invoke') ?? 0
@@ -1239,7 +1383,7 @@ export class TimelineRenderer {
       const name = e.row >= 0 ? this.model.rows[e.row].label : String(this.trace.dims.resources[[...e.res][0]]?.name ?? '')
       // the label: one unit, else bytes only
       const [unit, own] = e.byUnit.size === 1 ? [...e.byUnit][0] : ['B', e.byUnit.get('B') ?? 0]
-      out.push({ task: t, row: e.row, t: (start[e.peak] + end[e.peak]) / 2, peak: Math.min(1, u.res.frac[e.peak]), amount: own, unit,
+      out.push({ task: t, row: e.row, t: (start[e.peak] + end[e.peak]) / 2, peak: Math.min(1, frac[e.peak]), amount: own, unit,
         share: total > 0 ? Math.min(1, e.amount / total) : 0, peakLanes: e.lanes > 0 ? e.peakLanes : null,
         lanes: e.lanes > 0 ? e.lanes : null, exact, name, resources: [...e.res], a, b })
     }
@@ -1337,26 +1481,27 @@ export class TimelineRenderer {
       ctx.fillStyle = th.ink
       ctx.fillText(q.text, q.x + 4, q.y)
     }
-    if (all.length > arrows.length) {
+    const total = this.usageArrowCount
+    if (total > arrows.length) {
       ctx.fillStyle = th.inkSecondary
-      ctx.fillText(`+${all.length - arrows.length}`, GUTTER + 6, top + 8)
+      ctx.fillText(`+${total - arrows.length}`, GUTTER + 6, top + 8)
     }
     ctx.restore()
   }
 
   /** The selected tasks' shading on a series row: per pixel a band from the baseline up to
-   * each task's fraction, stacked in task-kind colors, below the curve (`ys`, row-relative). */
+   * each task kind's fraction, stacked in task-kind colors, below the curve (`ys`,
+   * row-relative). */
   private drawUsage(ctx: CanvasRenderingContext2D, row: Row, y: number, n: number, base: number, h: number): void {
     const px = this.usagePixels(row, n)
     if (!px) return
-    const u = this.usage as NonNullable<typeof this.usage>
     const colors = [...this.theme.series, this.theme.seriesOther]
     const cum = new Float64Array(n)
     ctx.save()
     ctx.globalAlpha = 0.75
-    u.tasks.forEach((t, k) => {
-      ctx.fillStyle = colors[this.slots[t]] ?? this.theme.seriesOther
-      const v = px[k]
+    px.forEach((v, sl) => {
+      if (!v.length) return
+      ctx.fillStyle = colors[sl] ?? this.theme.seriesOther
       for (let p = 0; p < n; p++) {
         if (!(v[p] > 0)) continue
         const curve = this.ys[p] + 1
@@ -1398,11 +1543,12 @@ export class TimelineRenderer {
     const charges = files.get('charges.parquet')
     const tasks = files.get('tasks.parquet')
     if (!charges || !tasks || !resources.length) return null
-    const key = `${row.key}|${t ?? `${r?.a}-${r?.b}`}`
+    const key = `${row.key}|${t ?? `${r?.a}-${r?.b}`}|${this.scopeKey}`
     return { key, req: { usage: files.get('usage.parquet') ?? null, charges, resources, t,
       a: r?.a ?? 0, b: r?.b ?? 0,
       blocks: this.trace.manifest.charge_blocks.map((b) => ({ t0: b.t0, t1: b.t1, maxEnd: b.max_end })),
-      tasks, opcodes: this.trace.dims.opcodes.map((o) => String(o.name)), classBase: this.trace.classBase } }
+      tasks, opcodes: this.trace.dims.opcodes.map((o) => String(o.name)), classBase: this.trace.classBase,
+      scope: this.attributionScope } }
   }
 
   /** Starts the query when the selection, cursor or range changed (the latest wins). */
@@ -1529,7 +1675,7 @@ export class TimelineRenderer {
   /** Flightlines from the selected resource row (at the cursor, or from the middle of its
    * range band) to the owners, the largest shares first, at most maxFlightlines ("+M" for
    * the rest): width by share, a label with the lanes held (instant) or the share (range),
-   * a ring on the owner (selected tasks have accent outlines). */
+   * a ring on the owner (selected tasks have selection outlines). */
   private drawFlightlines(ctx: CanvasRenderingContext2D): void {
     this.requestAttribution()
     const a = this.attribution

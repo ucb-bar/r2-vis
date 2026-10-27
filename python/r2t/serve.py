@@ -50,14 +50,19 @@ class Catalog:
     roots: tuple[Path, ...]
 
     def traces(self) -> dict[str, Path]:
+        """By name: the directory name, or "NAME (PARENT)" for every trace whose directory name
+        another listed trace also has."""
+        listed = [trace for root in self.roots for trace in (
+            [root] if is_trace(root) else sorted(p for p in root.iterdir() if is_trace(p)))]
+        counts: dict[str, int] = {}
+        for trace in listed:
+            counts[trace.name] = counts.get(trace.name, 0) + 1
         found: dict[str, Path] = {}
-        for root in self.roots:
-            inside = [root] if is_trace(root) else sorted(p for p in root.iterdir() if is_trace(p))
-            for trace in inside:
-                name = trace.name
-                while name in found:
-                    name = f"{name}~"
-                found[name] = trace
+        for trace in listed:
+            name = trace.name if counts[trace.name] == 1 else f"{trace.name} ({trace.parent.name})"
+            while name in found:
+                name = f"{name}~"
+            found[name] = trace
         return found
 
     def index(self) -> dict:

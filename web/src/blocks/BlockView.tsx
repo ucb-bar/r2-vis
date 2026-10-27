@@ -18,8 +18,9 @@ interface Props {
 }
 
 /** The block diagram view: wheel (or pinch) zooms around the cursor, drag pans,
- * double-click zooms to a box, the box toggle adds or removes it from the target timeline
- * (the most recently used one, state/workbench.ts). */
+ * double-click zooms to a box. A box's eye adds or removes it from the target timeline
+ * (the most recently used one, state/workbench.ts); its target adds or removes it from the
+ * attribution scope (state/viewstore.ts). The nodes of the focus tasks are outlined. */
 export function BlockView({ trace, store }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -55,6 +56,26 @@ export function BlockView({ trace, store }: Props) {
     ro.observe(el)
     resize()
     const offWindow = store.window.subscribe((w) => { renderer.setWindow(w); request() })
+    // The attribution scope: the target icons.
+    renderer.scope = store.scope.get()
+    const offScope = store.scope.subscribe((s) => { renderer.scope = s; request() })
+    // The nodes of the focus tasks are outlined.
+    let tasks: readonly number[] | null = null
+    const applyFocus = () => {
+      const f = store.focus.get()
+      if (f.tasks === tasks) return
+      tasks = f.tasks
+      const lane = trace.facts.tasks.cols.lane as Int32Array
+      const nodes = new Set<number>()
+      for (const t of tasks ?? []) {
+        const n = trace.dims.lanes[lane[t]]?.node as number | undefined
+        if (n !== undefined) nodes.add(n)
+      }
+      renderer.focusNodes = nodes
+      request()
+    }
+    applyFocus()
+    const offFocus = store.focus.subscribe(applyFocus)
     const offTheme = onThemeChange(() => { renderer.theme = readTheme(); request() })
     const pos = (e: MouseEvent) => {
       const r = cv.getBoundingClientRect()
@@ -93,6 +114,10 @@ export function BlockView({ trace, store }: Props) {
       if (node !== renderer.hoverNode) { renderer.hoverNode = node; request() }
       const toggle = renderer.toggleAt(x, y)
       cv.style.cursor = toggle !== null ? 'pointer' : 'grab'
+      if (toggle) {
+        setTip({ x, y, content: { title: toggle.kind === 'timeline' ? 'In the timeline' : 'Attribution scope', sections: [] } })
+        return
+      }
       // A box drawn with its strips shows its values already.
       if (box && !renderer.showsStrips(box)) {
         const avgs = renderer.metrics.averages(box.node, renderer.window.a, renderer.window.b)
@@ -108,7 +133,13 @@ export function BlockView({ trace, store }: Props) {
       if (!d || d.moved) return
       const { x, y } = pos(e)
       const toggle = renderer.toggleAt(x, y)
-      if (toggle !== null) store.blocks.setChecked(toggle, !store.blocks.has(toggle))
+      if (toggle?.kind === 'timeline') store.blocks.setChecked(toggle.node, !store.blocks.has(toggle.node))
+      else if (toggle?.kind === 'scope') {
+        const next = new Set(store.scope.get())
+        if (next.has(toggle.node)) next.delete(toggle.node)
+        else next.add(toggle.node)
+        store.scope.set(next)
+      }
     }
     const onDouble = (e: MouseEvent) => {
       const { x, y } = pos(e)
@@ -126,6 +157,8 @@ export function BlockView({ trace, store }: Props) {
     return () => {
       ro.disconnect()
       offWindow()
+      offFocus()
+      offScope()
       offTheme()
       cv.removeEventListener('wheel', onWheel)
       cv.removeEventListener('pointerdown', onDown)

@@ -18,6 +18,9 @@ const STRIP_LABEL_PX = 112   // label on the left, the window average right-alig
 const STRIP_MAX_PX = 40
 const TOGGLE_PX = 12
 
+/** The icons of a box: in the timeline (eye), attribution scope (target). */
+export type BoxToggle = 'timeline' | 'scope'
+
 export interface Camera {
   s: number      // CSS px per world unit
   ox: number
@@ -49,9 +52,14 @@ export class BlockRenderer {
   window: TimeRange
   theme: Theme
   hoverNode: number | null = null
+  /** The nodes of the focus tasks: outlined. */
+  focusNodes: ReadonlySet<number> = new Set()
   readonly stats = { drawMs: [] as number[] }
   /** Toggle rectangles of the last frame (CSS px): node -> [x, y, size]. */
-  readonly toggles = new Map<number, [number, number, number]>()
+  /** the icons drawn last: per node, "in the timeline" (eye) and "attribution scope" (target) */
+  readonly toggles: { node: number; kind: BoxToggle; x: number; y: number }[] = []
+  /** the attribution scope (state/viewstore.ts): its nodes' target icons are on */
+  scope: ReadonlySet<number> = new Set()
   private readonly cache = new Map<string, { ok: boolean; v: Float64Array }>()
   private readonly stripCache = new Map<number, StripKind[]>()
   private readonly avgCache = new Map<string, number>()
@@ -106,9 +114,10 @@ export class BlockRenderer {
     return boxAt(this.root, (x - this.cam.ox) / this.cam.s, (y - this.cam.oy) / this.cam.s)
   }
 
-  toggleAt(x: number, y: number): number | null {
-    for (const [node, [tx, ty, size]] of this.toggles) {
-      if (x >= tx - 3 && x <= tx + size + 3 && y >= ty - 3 && y <= ty + size + 3) return node
+  /** The icon under (x, y): its node and kind, or null. */
+  toggleAt(x: number, y: number): { node: number; kind: BoxToggle } | null {
+    for (const t of this.toggles) {
+      if (x >= t.x - 2 && x <= t.x + TOGGLE_PX + 2 && y >= t.y - 3 && y <= t.y + TOGGLE_PX + 3) return { node: t.node, kind: t.kind }
     }
     return null
   }
@@ -119,7 +128,7 @@ export class BlockRenderer {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.fillStyle = th.page
     ctx.fillRect(0, 0, this.width, this.height)
-    this.toggles.clear()
+    this.toggles.length = 0
     this.drawBox(ctx, this.root)
     this.stats.drawMs.push(performance.now() - t0)
     if (this.stats.drawMs.length > 2000) this.stats.drawMs.splice(0, 1000)
@@ -149,12 +158,14 @@ export class BlockRenderer {
       const u = this.average(b.node)
       ctx.fillStyle = u === u ? th.seq[Math.min(th.seq.length - 1, Math.floor(u * th.seq.length))] : th.grid
       ctx.fillRect(r.x, r.y, r.w, r.h)
-      if (hovered) this.outline(ctx, r, th.ink, 1.5)
+      if (this.focusNodes.has(b.node)) this.outline(ctx, r, th.select, 2.5)
+      else if (hovered) this.outline(ctx, r, th.ink, 1.5)
       return
     }
     ctx.fillStyle = th.surface
     ctx.fillRect(r.x, r.y, r.w, r.h)
-    this.outline(ctx, r, hovered ? th.ink : th.axis, hovered ? 1.5 : 1)
+    if (this.focusNodes.has(b.node)) this.outline(ctx, r, th.select, 2.5)
+    else this.outline(ctx, r, hovered ? th.ink : th.axis, hovered ? 1.5 : 1)
     ctx.font = `600 ${th.fontSizeS}px ${th.fontSans}`
     ctx.textBaseline = 'middle'
     if (r.w < NAME_W_PX || r.h < NAME_H_PX) {
@@ -163,13 +174,13 @@ export class BlockRenderer {
       ctx.textAlign = 'center'
       clipText(ctx, b.name, r.x + r.w / 2, r.y + r.h / 2, r.w - 8)
       ctx.textAlign = 'left'
-      if (r.w > 48 && r.h > 30) this.toggle(ctx, b.node, r.x + r.w - TOGGLE_PX - 5, r.y + 5)
+      if (r.w > 64 && r.h > 30) this.icons(ctx, b.node, r.x + r.w - TOGGLE_PX - 5, r.y + 5)
       return
     }
     // Largest level: header, strips, children.
     ctx.fillStyle = th.ink
     clipText(ctx, b.path, r.x + 8, r.y + HEADER_PX / 2 + 1, r.w - 40)
-    this.toggle(ctx, b.node, r.x + r.w - TOGGLE_PX - 6, r.y + (HEADER_PX - TOGGLE_PX) / 2 + 1)
+    this.icons(ctx, b.node, r.x + r.w - TOGGLE_PX - 6, r.y + (HEADER_PX - TOGGLE_PX) / 2 + 1)
     const band = b.band * this.cam.s
     const stripsTop = r.y + HEADER_PX
     const strips = this.stripsOf(b.node)
@@ -188,24 +199,48 @@ export class BlockRenderer {
     ctx.strokeRect(Math.round(r.x) + 0.5, Math.round(r.y) + 0.5, Math.round(r.w) - 1, Math.round(r.h) - 1)
   }
 
-  private toggle(ctx: CanvasRenderingContext2D, node: number, x: number, y: number): void {
+  /** A box's icons, right to left from x: "in the timeline" (an eye, struck through when
+   * off) and "attribution scope" (a target). */
+  private icons(ctx: CanvasRenderingContext2D, node: number, x: number, y: number): void {
     const th = this.theme
-    const on = this.blocks.has(node)
-    ctx.fillStyle = on ? th.accent : th.surface
-    ctx.fillRect(x, y, TOGGLE_PX, TOGGLE_PX)
-    ctx.strokeStyle = on ? th.accent : th.inkMuted
-    ctx.lineWidth = 1
-    ctx.strokeRect(x + 0.5, y + 0.5, TOGGLE_PX - 1, TOGGLE_PX - 1)
-    if (on) {
-      ctx.strokeStyle = th.accentInk
-      ctx.lineWidth = 1.5
+    const s = TOGGLE_PX
+    const cx = x + s / 2
+    const cy = y + s / 2
+    // the eye
+    const seen = this.blocks.has(node)
+    ctx.strokeStyle = seen ? th.accent : th.inkMuted
+    ctx.fillStyle = seen ? th.accent : th.inkMuted
+    ctx.lineWidth = 1.3
+    ctx.beginPath()
+    ctx.moveTo(x, cy)
+    ctx.quadraticCurveTo(cx, y - 1, x + s, cy)
+    ctx.quadraticCurveTo(cx, y + s + 1, x, cy)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.arc(cx, cy, 2.2, 0, 2 * Math.PI)
+    if (seen) ctx.fill()
+    else ctx.stroke()
+    if (!seen) {
       ctx.beginPath()
-      ctx.moveTo(x + 3, y + 6.5)
-      ctx.lineTo(x + 5.5, y + 9)
-      ctx.lineTo(x + 9.5, y + 3.5)
+      ctx.moveTo(x + 1, y + s - 1)
+      ctx.lineTo(x + s - 1, y + 1)
       ctx.stroke()
     }
-    this.toggles.set(node, [x, y, TOGGLE_PX])
+    this.toggles.push({ node, kind: 'timeline', x, y })
+    // the target, left of the eye
+    const tx = x - s - 6
+    const scoped = this.scope.has(node)
+    ctx.strokeStyle = scoped ? th.accent : th.inkMuted
+    ctx.fillStyle = scoped ? th.accent : th.inkMuted
+    ctx.lineWidth = 1.2
+    ctx.beginPath()
+    ctx.arc(tx + s / 2, cy, s / 2 - 0.5, 0, 2 * Math.PI)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.arc(tx + s / 2, cy, s / 4, 0, 2 * Math.PI)
+    if (scoped) ctx.fill()
+    else ctx.stroke()
+    this.toggles.push({ node, kind: 'scope', x: tx, y })
   }
 
   /** Strips of a box: programs, tensor, vector, then the traffic classes at the node. */

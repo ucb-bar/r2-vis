@@ -24,13 +24,11 @@ export function InstantView({ trace, charges, store, pool }: Props) {
   useEffect(() => {
     let frame = 0
     const bump = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTick((t) => t + 1) }) }
-    const offs = [store.window.subscribe(bump), store.range.subscribe(bump), store.cursor.subscribe(bump),
-      store.smoothing.subscribe(bump)]
+    const offs = [store.window.subscribe(bump), store.onTime(bump), store.smoothing.subscribe(bump)]
     return () => { offs.forEach((off) => off()); if (frame) cancelAnimationFrame(frame) }
   }, [store])
   const active = store.activeRange()
-  const cursor = store.cursor.get()
-  const what = active.kind === 'cursor' ? `t = ${cycles(cursor?.t ?? active.a)}` : span(active.a, active.b)
+  const what = active.kind === 'cursor' ? `t = ${cycles(store.active().a)}` : span(active.a, active.b)
   return (
     <div className="instant">
       <div className="instant-head">

@@ -95,7 +95,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "id": "memory id",
         "path": "dotted path of the memory",
         "node": "node id that owns the memory",
-        "type": "scratch (SMEM), nu_scratch (a Neutrino's data scratch, raw 1.10), dram, "
+        "type": "scratch (SMEM), tmem (an SM's tensor memory), nu_scratch (a Neutrino's data "
+                "scratch, raw 1.10), dram, "
                 "cache or sync",
         "port": "resource id of the memory port; NULL if none",
         "bw_bytes": "port bytes per cycle; NULL if none",

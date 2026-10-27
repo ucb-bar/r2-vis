@@ -144,7 +144,7 @@ export class TimeAxis {
       ctx.font = `600 ${th.fontSizeXs}px ${th.fontSans}`
       const w = ctx.measureText(text).width + 10
       const cx = Math.max(GUTTER + w / 2, Math.min(this.width - w / 2, (xa + xb) / 2))
-      ctx.fillStyle = th.accent
+      ctx.fillStyle = th.select
       ctx.fillRect(Math.max(GUTTER, xa), AXIS - 3, Math.max(1, Math.min(this.width, xb) - Math.max(GUTTER, xa)), 3)
       ctx.fillStyle = th.surfaceRaised
       ctx.fillRect(cx - w / 2, 3, w, AXIS - 8)
@@ -156,7 +156,7 @@ export class TimeAxis {
     // The playhead: a handle on the axis over the pinned time.
     if (this.pinned !== null) {
       const x = Math.round(this.xOf(this.pinned))
-      ctx.fillStyle = th.accent
+      ctx.fillStyle = th.select
       ctx.fillRect(x - 1, 0, 2, AXIS)
       ctx.beginPath()
       ctx.moveTo(x - HANDLE_W / 2, 1)
@@ -176,17 +176,17 @@ export class TimeAxis {
     ctx.beginPath()
     ctx.rect(GUTTER, top, this.plotWidth, bottom - top)
     ctx.clip()
-    this.band(ctx, this.selection, th.accentArea, th.accent, top, bottom)
+    this.band(ctx, this.selection, th.selectArea, th.select, top, bottom)
     this.band(ctx, this.zoomBox, th.hover, th.accent, top, bottom)
     ctx.restore()
   }
 
-  /** The pinned time (a 2 px accent line) and the hover cursor (1 px) over [top, bottom). */
+  /** The pinned time (a 2 px selection line) and the hover cursor (1 px) over [top, bottom). */
   drawCursor(ctx: CanvasRenderingContext2D, th: Theme, top: number, bottom: number, hoverX: number | null): void {
     if (this.pinned !== null) {
       const x = Math.round(this.xOf(this.pinned))
       if (x >= GUTTER && x <= this.width) {
-        ctx.fillStyle = th.accent
+        ctx.fillStyle = th.select
         ctx.fillRect(x - 1, top, 2, bottom - top)
       }
     }

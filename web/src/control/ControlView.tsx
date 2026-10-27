@@ -72,7 +72,7 @@ export function ControlView({ trace, store, pool }: Props) {
   const [metricKey, setMetricKey] = useState('worst:all')
   const [stat, setStat] = useState<Statistic>('at')
   const [selected, setSelected] = useState<number | null>(null)
-  const [time, setTime] = useState<{ t: number; pinned: boolean } | null>(store.cursor.get())
+  const [time, setTime] = useState<{ t: number } | null>(instantOf(store))
   const [range, setRange] = useState(() => rangeOf(store, trace))
   const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null)
   const state = useRef({ metric: METRICS[0].metric, stat: 'at' as Statistic, selected: null as number | null, t: 0, range })
@@ -93,15 +93,15 @@ export function ControlView({ trace, store, pool }: Props) {
     prepareControl(trace, pool)
     controlOf(trace).load?.then(() => { if (alive) setReady(true) })
     let frame = 0
-    let next = store.cursor.get()
+    let next = instantOf(store)
     const offs = [
-      // The cursor (an instant), else the range's start (views-design 7).
-      store.cursor.subscribe((c) => {
-        next = c
+      // The focus instant, else the range's start (views-design 7).
+      store.onTime(() => {
+        next = instantOf(store)
+        setRange(rangeOf(store, trace))
         if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTime(next) })
       }),
-      store.range.subscribe(() => setRange(rangeOf(store, trace))),
-      store.window.subscribe(() => { if (!store.range.get()) setRange(rangeOf(store, trace)) }),
+      store.window.subscribe(() => { if (!store.time) setRange(rangeOf(store, trace)) }),
     ]
     return () => { alive = false; offs.forEach((off) => off()); if (frame) cancelAnimationFrame(frame); tree.stop() }
   }, [store, trace, data, index, tree, pool])
@@ -303,9 +303,16 @@ export function ControlView({ trace, store, pool }: Props) {
   )
 }
 
-/** The range for averages and peaks: the selection, else the window; clipped to the run. */
+/** The focus instant, or null. */
+function instantOf(store: ViewStore): { t: number } | null {
+  const t = store.time
+  return t && 't' in t ? { t: t.t } : null
+}
+
+/** The range for averages and peaks: the focus range, else the window; clipped to the run. */
 function rangeOf(store: ViewStore, trace: Trace): { a: number; b: number } {
-  const r = store.range.get() ?? store.window.get()
+  const t = store.time
+  const r = t && 'a' in t ? t : store.window.get()
   const end = trace.manifest.end_time
   const a = Math.max(0, Math.min(r.a, end - 1))
   return { a, b: Math.max(a + 1, Math.min(r.b, end)) }

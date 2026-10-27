@@ -286,8 +286,8 @@ html, body { overscroll-behavior: none; }
   border: var(--border-width) solid var(--color-border); border-radius: var(--radius-m); background: var(--color-surface-raised);
 }
 .rd-card:hover, .rd-wait-row:hover { border-color: var(--color-ink-muted); }
-.rd-card.selected, .rd-wait-row.selected, .rd-raw.selected { border-color: var(--color-accent); box-shadow: 0 0 0 1px var(--color-accent); }
-.rd-card.linked, .rd-wait-row.linked { background: var(--color-accent-area); }
+.rd-card.selected, .rd-wait-row.selected, .rd-raw.selected { border-color: var(--color-select); box-shadow: 0 0 0 1px var(--color-select); }
+.rd-card.linked, .rd-wait-row.linked { background: var(--color-select-area); }
 .rd-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
 .rd-card-head .spacer, .rd-wait-row .spacer { flex: 1; }
 .rd-fields { margin-top: var(--space-2); display: grid; grid-template-columns: auto auto 1fr; column-gap: var(--space-2); font-family: var(--font-mono); }
@@ -348,7 +348,7 @@ html, body { overscroll-behavior: none; }
 .src-trip-table td { padding: 0 var(--space-4) 0 0; }
 .src-line { display: flex; white-space: pre; line-height: 1.5; cursor: pointer; }
 .src-line:hover { background: var(--color-hover); }
-.src-line.selected { background: var(--color-accent-area); }
+.src-line.selected { background: var(--color-select-area); }
 .src-mark { flex: 0 0 4px; margin-right: var(--space-2); }
 .src-ln { flex: 0 0 auto; min-width: 3.5em; padding-right: var(--space-3); text-align: right; color: var(--color-ink-muted); user-select: none; }
 .tok-comment { color: var(--color-ink-muted); }
@@ -464,4 +464,9 @@ html, body { overscroll-behavior: none; }
 .rd-call-marker:hover { color: var(--color-accent); }
 .rd-code-line.marked { background: var(--color-accent-area); }
 .src-args-from { font-size: var(--font-size-xs); }
-.rd-code-line.selected { background: var(--color-accent-area); box-shadow: inset 3px 0 0 var(--color-accent); }
+.rd-code-line.selected { background: var(--color-select-area); box-shadow: inset 3px 0 0 var(--color-select); }
+.focus-bar { position: relative; display: flex; align-items: center; gap: var(--space-2); margin-left: var(--space-5); min-width: 0; }
+.focus-chip { cursor: default; background: var(--color-select-area); border: var(--border-width) solid var(--color-select); }
+.focus-chip.derived { background: none; color: var(--color-ink-secondary); border-color: var(--color-border); }
+.focus-chip.pending { color: var(--color-ink-muted); }
+.tooltip.tip-under { top: calc(100% + 6px); z-index: 6; }

@@ -16,6 +16,9 @@ export interface Theme {
   accent: string
   accentInk: string
   accentArea: string
+  /** the selection (the focus): outlines and lines, and area shading */
+  select: string
+  selectArea: string
   series: string[]
   seriesOther: string
   seq: string[]
@@ -49,6 +52,8 @@ export function readTheme(el: Element = document.documentElement): Theme {
     accent: v('--color-accent'),
     accentInk: v('--color-accent-ink'),
     accentArea: v('--color-accent-area'),
+    select: v('--color-select'),
+    selectArea: v('--color-select-area'),
     series: Array.from({ length: 8 }, (_, i) => v(`--series-${i + 1}`)),
     seriesOther: v('--series-other'),
     seq: Array.from({ length: 7 }, (_, i) => v(`--seq-${i}`)),

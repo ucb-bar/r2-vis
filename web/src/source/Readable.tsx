@@ -7,7 +7,7 @@
 import type { ReactNode } from 'react'
 import { SOURCE_OP_SLOT } from '../timeline/colors'
 import { count } from '../ui/format'
-import type { Producer } from './links'
+import type { MapProgram, Producer } from './links'
 import { address, code, ranTrips, tokenSpans, tripsButton, tripTable, unknownValue, type Hover } from './parts'
 import type { Token } from './rust'
 import {
@@ -33,16 +33,19 @@ export interface ReadableProps {
   lines: Token[][]
   file: number
   deps: DepIndex
-  selected: string | null
-  /** the item selected in another Source area showing this program */
-  highlight: string | null
+  /** the focus items of this program: set by a gesture (selected), derived (highlight) */
+  selected: ReadonlySet<string>
+  highlight: ReadonlySet<string>
   isOpen: (key: string, dflt: boolean) => boolean
   toggle: (key: string, dflt: boolean) => void
-  onSelect: (n: Node) => void
+  /** an item clicked (with the event: an invoke or wait card) or shown by a link */
+  onSelect: (n: Node, e?: React.MouseEvent) => void
   /** a producer's card (in this program or another) */
   onProducer: (p: Producer) => void
   links: CardLinks | null
-  selectTasks: (rows: number[]) => void
+  /** an item into the focus (`mp`: of another program), or tasks without an item;
+   * `additive` adds or removes it */
+  focus: (target: { node: Node; mp?: MapProgram } | { tasks: number[] }, additive: boolean) => void
   goProgram: (name: string) => void
   /** shows a line of the file (its regions opened) and marks it */
   goLine: (line: number) => void
@@ -104,7 +107,7 @@ export function Readable(p: ReadableProps) {
           → {c.node.item.name ?? 'closure'} · {callsLabel(c.calls)}
         </button>
       ))}
-    </>, ['rd-code-line', p.markLine === l ? 'marked' : '', selected && p.selected === selected.id ? 'selected' : ''].join(' ').trim(),
+    </>, ['rd-code-line', p.markLine === l ? 'marked' : '', selected && p.selected.has(selected.id) ? 'selected' : ''].join(' ').trim(),
     0, selected ? { 'data-id': selected.id } as never : undefined)
 
   // ---- values ------------------------------------------------------------------------------
@@ -151,12 +154,13 @@ export function Readable(p: ReadableProps) {
 
   // ---- producers ---------------------------------------------------------------------------
   const tasksLabel = (n: number) => `${count(n)} ${n === 1 ? 'task' : 'tasks'}`
-  const producerButton = (key: string, label: ReactNode, onSelect: () => void, tasks: number[] | null) => (
+  const producerButton = (key: string, label: ReactNode, onSelect: () => void, tasks: number[] | null,
+    item: { node: Node; mp?: MapProgram } | null) => (
     <button key={key} className="link rd-producer" onClick={(e) => {
       e.stopPropagation()
-      if (e.shiftKey && tasks) p.selectTasks(tasks)
+      if (e.shiftKey && (item || tasks)) p.focus(item ?? { tasks: tasks as number[] }, true)
       else onSelect()
-    }} onMouseEnter={(e) => tasks && hover(e, { title: 'producer', sections: [{ kind: 'note', text: 'click: its card · shift+click: its tasks' }] })}
+    }} onMouseEnter={(e) => tasks && hover(e, { title: 'producer', sections: [{ kind: 'note', text: 'click: its card · shift+click: add it to the selection' }] })}
       onMouseLeave={clear}>
       {label}{tasks ? <span className="rd-count"> · {tasksLabel(tasks.length)}</span> : null}
     </button>
@@ -176,7 +180,7 @@ export function Readable(p: ReadableProps) {
     } else if (same(keyIdx, link.idx)) suffix = inRow ? '' : ' · same trip'
     else suffix = inRow ? ` · ${trip(link.idx)}` : ` · ${trip(keyIdx)} → ${trip(link.idx)}`
     return producerButton(`s${link.node.id}`, <>{nodeLabel(link.node)}{suffix}</>,
-      () => p.onSelect(link.node), p.links ? p.links.tasks(link.node) : null)
+      () => { p.onSelect(link.node); p.focus({ node: link.node }, false) }, p.links ? p.links.tasks(link.node) : null, { node: link.node })
   }
   /** The static link of a key on its line. A per-trip key: "same trip" when every trip's
    * producer is in the same trip, else the first trip that differs (the trip table lists all). */
@@ -193,7 +197,7 @@ export function Readable(p: ReadableProps) {
     if (!fromTrace.length) return firstStatic(f)
     return fromTrace.map((pr, j) => producerButton(`p${j}`,
       pr.node ? nodeLabel(pr.node) : <>← {pr.program}{pr.pc !== null ? ` pc 0x${pr.pc.toString(16)}` : ''}</>,
-      () => p.onProducer(pr), pr.tasks))
+      () => p.onProducer(pr), pr.tasks, pr.node && pr.mp ? { node: pr.node, mp: pr.mp } : null))
   }
 
   // ---- items -------------------------------------------------------------------------------
@@ -210,7 +214,7 @@ export function Readable(p: ReadableProps) {
     const tasks = p.links.tasks(n)
     if (!tasks.length) return n.item.kind === 'invoke' && n.item.pc !== null ? <span className="src-times src-tasks">0 tasks</span> : null
     return (
-      <button className="link src-tasks" onClick={(e) => { e.stopPropagation(); p.selectTasks(tasks) }}>{tasksLabel(tasks.length)}</button>
+      <button className="link src-tasks" onClick={(e) => { e.stopPropagation(); p.focus({ node: n }, e.shiftKey) }}>{tasksLabel(tasks.length)}</button>
     )
   }
   const perTrip = (v: Trips<string> | undefined): ReactNode => {
@@ -226,7 +230,7 @@ export function Readable(p: ReadableProps) {
         strokeLinejoin="round" aria-hidden="true"><path d="M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5" /></svg>
     </button>
   )
-  const cls = (n: Node, base: string) => [base, p.selected === n.id ? 'selected' : '', p.highlight === n.id ? 'linked' : ''].join(' ').trim()
+  const cls = (n: Node, base: string) => [base, p.selected.has(n.id) ? 'selected' : '', p.highlight.has(n.id) ? 'linked' : ''].join(' ').trim()
   /** A name = value line of a card, and its trip table when open. */
   const fieldLines = (out: ReactNode[], name: string, f: Field | null, key: string, body: ReactNode, opts: { isKey?: boolean; strip?: boolean; dim?: boolean } = {}) => {
     out.push(
@@ -246,7 +250,7 @@ export function Readable(p: ReadableProps) {
     const indent = indentOf(a)
     if (raw) {
       row(`c${n.id}h`, null, <span className="rd-raw-head">{sourceToggle(n, true)}<span className="src-op" style={{ background: opColor(it.op) }}>{it.op}</span></span>, cls(n, 'rd-raw'), indent,
-        { 'data-id': n.id, onClick: () => p.onSelect(n) } as never)
+        { 'data-id': n.id, onClick: (e: React.MouseEvent) => p.onSelect(n, e) } as never)
       for (let l = a; l <= b; l++) codeLine(l)
       return
     }
@@ -312,7 +316,7 @@ export function Readable(p: ReadableProps) {
       if (open) for (const [k, f] of childArgs) fieldLines(fields, k, f, `${n.id}|child.${k}`, value(f, `t:${n.id}|child.${k}`))
     }
     row(`c${n.id}`, a, (
-      <div className={cls(n, 'rd-card')} data-id={n.id} onClick={() => p.onSelect(n)}>
+      <div className={cls(n, 'rd-card')} data-id={n.id} onClick={(e) => p.onSelect(n, e)}>
         <div className="rd-card-head">
           <span className="src-op" style={{ background: opColor(it.op) }}>{it.op}</span>
           {it.pe !== null && it.pe !== undefined && <span className="src-pe">{perTrip(it.pe)}</span>}
@@ -335,7 +339,7 @@ export function Readable(p: ReadableProps) {
     const indent = indentOf(a)
     if (raw) {
       row(`w${n.id}h`, null, <span className="rd-raw-head">{sourceToggle(n, true)}<span className="rd-wait">wait</span></span>, cls(n, 'rd-raw'), indent,
-        { 'data-id': n.id, onClick: () => p.onSelect(n) } as never)
+        { 'data-id': n.id, onClick: (e: React.MouseEvent) => p.onSelect(n, e) } as never)
       for (let l = a; l <= b; l++) codeLine(l)
       return
     }
@@ -345,7 +349,7 @@ export function Readable(p: ReadableProps) {
     const fence = k && firstValue(k.value) === 'fence'
     const table = k && isPerTrip(k.value) && isOpen(`t:${n.id}|key`, false)
     row(`w${n.id}`, a, (
-      <div className={cls(n, 'rd-wait-row')} data-id={n.id} onClick={() => p.onSelect(n)}>
+      <div className={cls(n, 'rd-wait-row')} data-id={n.id} onClick={(e) => p.onSelect(n, e)}>
         <span className="rd-wait">wait</span>
         {k && (fence ? <span className="src-fence">fence</span> : value(k, `t:${n.id}|key`))}
         {k && !fence && firstStatic(k)}
