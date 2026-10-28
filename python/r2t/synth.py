@@ -1013,7 +1013,7 @@ def make_manifest(topo: Topology, params: dict) -> dict:
     return {
         "format": "r2raw",
         "version": list(raw.RAW_VERSION),
-        "run": {"config": "configs/2p.yaml", "program": "synthetic", "params": params,
+        "run": {"config": "configs/2p-smem.yaml", "program": "synthetic", "params": params,
                 "overrides": [], "sim_commit": "synthetic", "clock_ghz": 1.0, "granule": 512,
                 "created": CREATED},
         "filters": {"nodes": None, "records": None, "types": None, "window": None,
@@ -1177,9 +1177,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--acc", action="store_true",
                     help="add a child node acc0 of another kind to each gpc")
     ap.add_argument("--rw", action="store_true",
-                    help="separate write channels and SMEM write ports (2p.yaml, raw 1.5)")
+                    help="separate write channels and SMEM write ports (2p-smem.yaml, raw 1.5)")
     ap.add_argument("--banks", type=int, default=0,
-                    help="HBM as this many banks behind a hash link (2p-hbm-sliced.yaml)")
+                    help="HBM as this many banks behind a hash link (former 2p-hbm-sliced.yaml)")
     ap.add_argument("--suite", action="store_true",
                     help="write tiny, small, medium, partial, crashed, small-zstd into OUT")
     args = ap.parse_args(argv)

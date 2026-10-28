@@ -1,6 +1,7 @@
-"""The topology of r2-sim configs/2p.yaml as manifest tables (trace-raw.md Section 3.1).
+"""The topology of r2-sim configs/2p-smem.yaml (2p.yaml before 2026-10-27) as manifest
+tables (trace-raw.md Section 3.1).
 
-The tables follow r2-sim's raw 1.2 dump of configs/2p.yaml entry for entry:
+The tables follow r2-sim's raw 1.2 dump of that config entry for entry:
 
 * nodes, buses and PEs depth-first over the node tree;
 * attachments per node in creation order (Neutrino, data link, control link,
@@ -14,11 +15,11 @@ The tables follow r2-sim's raw 1.2 dump of configs/2p.yaml entry for entry:
 
 Variants of later configs (2026-10-09):
 
-* `rw` (configs/2p.yaml, raw 1.5): separate write channels at the read
+* `rw` (configs/2p-smem.yaml, raw 1.5): separate write channels at the read
   rate on the rated data buses (sbus, clsbus) and data links (`<port>.in.wr` after the
   port's in/out, `<link>.ab.wr`, `.ba.wr` after the link's ab/ba), and an SMEM write port
   (`smem.wport` after `smem.port`); HBM of 4 GiB.
-* `banks` (configs/2p-hbm-sliced.yaml, raw 1.4): offset_bits 34;
+* `banks` (the former configs/2p-hbm-sliced.yaml, raw 1.4): offset_bits 34;
   per gpc an unlimited `hbmbus`, the link `clsbus_to_hbmbus` with an address hash from
   the linear HBM [0, 4 GiB) onto N banks `hbm.b<i>` at [8 GiB, 12 GiB), each with a port
   and a write port of 512 / N B/cycle on the hbmbus. The unlimited link's resources are
@@ -36,14 +37,14 @@ SMS_PER_GPC = 4
 GPC_LINK_BW, GPC_LINK_LATENCY = 256, 20
 SM_LINK_BW, SM_LINK_LATENCY = 128, 10
 SYNC_RANGE = (0x1F0000000, 0x1F1000000)
-HBM_RANGE = (0x0, 0xF0000000)         # the earlier 2p.yaml (lanesB/l1)
-HBM_RANGE_4G = (0x0, 0x100000000)      # 2p.yaml and gpc-hbm-sliced.yaml since 2026-10-09
+HBM_RANGE = (0x0, 0xF0000000)         # 2p.yaml before 2026-10-09 (lanesB/l1)
+HBM_RANGE_4G = (0x0, 0x100000000)      # 2p-smem.yaml, and 2p-hbm-sliced.yaml (removed)
 BANKED_RANGE = (0x200000000, 0x300000000)
 HBM_BW, HBM_LATENCY = 512.0, 200
 GRANULE = 512                          # global.neutrino_granule: the hash interleave
 SMEM_RANGE = (0x0, 0x100000)
 BEAT_BYTES = 64             # r2-sim default beat of ports, links and memory ports
-# Neutrino table capacities (2p.yaml, gpc.yaml, sm.yaml): gpcs have 1024 versions.
+# Neutrino table capacities (2p-smem.yaml, gpc-smem.yaml, sm-smem.yaml): gpcs have 1024 versions.
 NEUTRINO = {"scoreboard": 128, "pending": 256, "execution": 256, "versions": 256,
             "inbound_refs": 128, "inbound_invokes": 64, "outbound_deps": 128,
             "outbound_invokes": 32}
@@ -56,8 +57,8 @@ def link_name(from_bus: str, to_bus: str) -> str:
 
 
 def own_base(gpc: int | None, sm: int | None, sm_bits: int = 3, offset_bits: int = 33) -> int:
-    """Base of a node's own address space (2p.yaml: offset_bits 33, fields gpc:2, sm:3; a
-    larger variant widens the sm field; 2p-hbm-sliced.yaml: offset_bits 34)."""
+    """Base of a node's own address space (2p-smem.yaml: offset_bits 33, fields gpc:2, sm:3; a
+    larger variant widens the sm field; the former 2p-hbm-sliced.yaml: offset_bits 34)."""
     base = 0
     if gpc is not None:
         base |= (gpc + 1) << (offset_bits + sm_bits)
