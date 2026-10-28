@@ -9,7 +9,8 @@ import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
 import { buildOccupancy } from './occupancy'
 import { sharedLabels } from './labels'
-import { attribute, resetAttribution, taskUsage, type AttributionRequest, type UsageRequest } from './attribution'
+import { attribute, resetAttribution, taskUsage, type AttributionRequest, type ReadGroup, type UsageRequest } from './attribution'
+import { CACHED_TABLES, GroupCache } from './groupcache'
 
 export interface DecodeRequest {
   op: 'decode'
@@ -33,6 +34,9 @@ export type ComputeRequest =
   | { op: 'attribute'; id: number; req: AttributionRequest }
   | { op: 'taskUsage'; id: number; req: UsageRequest }
   | { op: 'sharedLabels'; id: number; args: Parameters<typeof sharedLabels> }
+  /** the group cache's counters; `limit` (bytes) replaces its cap (0: no cache), for
+   * measurements */
+  | { op: 'groupCache'; id: number; limit?: number }
 
 export interface WorkerReply {
   id: number
@@ -43,6 +47,15 @@ export interface WorkerReply {
 }
 
 const footers = new Map<string, Promise<FileMetaData>>()
+/** The decoded charge and usage groups of the attribution queries (data/groupcache.ts). */
+const groups = new GroupCache()
+
+/** Reads columns of a row group for the attribution queries: charges and usage through the
+ * group cache. */
+const readGroup: ReadGroup = async (name, file, group, columns) => {
+  const load = async (cols: string[]) => (await decode({ op: 'decode', id: 0, file, name, group, columns: cols })).cols
+  return CACHED_TABLES.has(name) ? groups.get(name, group, columns, load) : load(columns)
+}
 
 function footer(name: string, file: TraceFile): Promise<FileMetaData> {
   let f = footers.get(name)
@@ -82,6 +95,7 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
     footers.clear()
     resetWhole()
     resetAttribution()
+    groups.clear()
     return
   }
   const t0 = performance.now()
@@ -101,8 +115,7 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
     } else if (req.op === 'occupancy') {
       result = buildOccupancy(...req.args)
     } else if (req.op === 'attribute') {
-      result = await attribute(req.req,
-        async (name, file, group, columns) => (await decode({ op: 'decode', id: 0, file, name, group, columns })).cols,
+      result = await attribute(req.req, readGroup,
         async (name, file, column) => (await footer(name, file)).row_groups.map((rg) => {
           const st = rg.columns.find((c) => c.meta_data?.path_in_schema[0] === column)?.meta_data?.statistics
           const num = (v: unknown) => (typeof v === 'bigint' ? Number(v) : typeof v === 'number' ? v : NaN)
@@ -114,8 +127,10 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
     } else if (req.op === 'sharedLabels') {
       result = sharedLabels(...req.args)
     } else if (req.op === 'taskUsage') {
-      result = await taskUsage(req.req,
-        async (name, file, group, columns) => (await decode({ op: 'decode', id: 0, file, name, group, columns })).cols)
+      result = await taskUsage(req.req, readGroup)
+    } else if (req.op === 'groupCache') {
+      if (req.limit !== undefined) groups.setLimit(req.limit)
+      result = groups.stats()
     } else {
       result = buildDepsByProducer(...req.args)
     }

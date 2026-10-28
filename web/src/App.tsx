@@ -117,6 +117,8 @@ export function App() {
       setFailed(null)
       setServed({ base: parsed.base, traces })
       if (parsed.trace === null) {
+        // the trace (if any) is closed: the workers forget it (footers, decoded groups)
+        pool().reset()
         setFragment(parsed.base)
         setState({ kind: 'idle' })
         return

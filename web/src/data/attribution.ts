@@ -192,7 +192,7 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
   const chargeCols = ['resource', 'start', 'end', 'cycles', 'usage', 'class', 'amount', 'gid', 'program']
   // A rate class (a virtual resource) is not in the usage table: its range reads charges.
   const virtual = !!req.classBase && req.resources.some((r) => r >= (req.classBase as Int32Array).length)
-  // Out of the scope: skipped before any other work on the charge.
+  // Out of the scope: skipped after the resource test, before any other work on the charge.
   const scope = req.scope ?? null
   const outside = (gid: number, program: number) => scope !== null &&
     (gid >= 0 ? scope.gids[gid] !== 1 : program >= 0 ? scope.programs[program] !== 1 : true)
@@ -204,9 +204,10 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
     const gid = c.gid as Int32Array
     const prog = (c.program as Int32Array | undefined) ?? null
     for (let i = 0; i < res.length; i++) {
-      if (scope && outside(gid[i], prog ? prog[i] : -1)) continue
       const r = virtual ? classResource(res, cls, req.classBase, i) : res[i]
-      if (r >= lo && r <= hi && wanted.has(r)) take(i, c)
+      if (r < lo || r > hi || !wanted.has(r)) continue
+      if (scope && outside(gid[i], prog ? prog[i] : -1)) continue
+      take(i, c)
     }
   }
   const gidOf = (c: Record<string, Column>) => c.gid as Int32Array
