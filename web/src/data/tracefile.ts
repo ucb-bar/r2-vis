@@ -67,12 +67,21 @@ async function fetchRange(f: TraceFile & { kind: 'url' }, lo: number, hi: number
   return buf
 }
 
-/** The whole file as text. */
+/** The whole file as text; gzip data is unpacked (blobText). */
 export async function readText(f: TraceFile): Promise<string> {
-  if (f.kind === 'local') return f.blob.text()
+  if (f.kind === 'local') return blobText(f.blob)
   const res = await get(f.url)
   if (!res.ok) throw new Error(`${f.name}: HTTP ${res.status}`)
-  return res.text()
+  return blobText(await res.blob())
+}
+
+/** The text of a blob. Gzip data (a source map NAME.json.gz, format 1.11) is unpacked: known
+ * by its first bytes, not by the name, so that bytes a server already unpacked (with
+ * Content-Encoding) are not unpacked twice. */
+export async function blobText(b: Blob): Promise<string> {
+  const head = new Uint8Array(await b.slice(0, 2).arrayBuffer())
+  if (head[0] !== 0x1f || head[1] !== 0x8b) return b.text()
+  return new Response(b.stream().pipeThrough(new DecompressionStream('gzip'))).text()
 }
 
 // ---- r2t-serve ---------------------------------------------------------------------------------

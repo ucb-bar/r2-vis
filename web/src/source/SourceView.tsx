@@ -252,7 +252,7 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   const picker = (
     <>
       <button className="button small" onClick={() => input.current?.click()}>Open source map…</button>
-      <input ref={input} type="file" accept=".json,application/json" hidden
+      <input ref={input} type="file" accept=".json,.gz,application/json,application/gzip" hidden
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onOpen(f); e.target.value = '' }} />
     </>
   )

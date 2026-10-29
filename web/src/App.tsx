@@ -12,9 +12,9 @@ import { addServer, loadServers, removeServer, serverLabel } from './data/server
 import { LoadReport } from './ui/LoadReport'
 import { Workspace } from './ui/Workspace'
 import { ThemeToggle } from './ui/ThemeToggle'
-import { parseSourceMap } from './source/srcmap'
+import { mapName, parseSourceMap } from './source/srcmap'
 import type { LoadedMap } from './source/links'
-import { fetchIndex, parseServerUrl, readText, resetWhole, servedFiles, traceUrl, type ServedTrace } from './data/tracefile'
+import { blobText, fetchIndex, parseServerUrl, readText, resetWhole, servedFiles, traceUrl, type ServedTrace } from './data/tracefile'
 import { bytes } from './ui/format'
 import { SourceView } from './source/SourceView'
 
@@ -48,10 +48,11 @@ export function App() {
    * old one. */
   const openSourceMap = async (file: File) => {
     try {
-      const map = parseSourceMap(await file.text(), file.name)
+      const map = parseSourceMap(await blobText(file), file.name)
+      const name = mapName(file.name)
       setSrc((s) => {
-        const at = s.maps.findIndex((m) => m.name === file.name && !m.inTrace)
-        const maps = at < 0 ? [...s.maps, { name: file.name, map }] : s.maps.map((m, k) => (k === at ? { name: file.name, map } : m))
+        const at = s.maps.findIndex((m) => m.name === name && !m.inTrace)
+        const maps = at < 0 ? [...s.maps, { name, map }] : s.maps.map((m, k) => (k === at ? { name, map } : m))
         return { maps, error: null }
       })
     } catch (err) {
@@ -87,7 +88,7 @@ export function App() {
     }
   }
 
-  /** The source maps in the trace (manifest `sources`, format 1.10), as if opened by the
+  /** The source maps in the trace (manifest `sources`, format 1.10; gzip from 1.11), as if opened by the
    * user, marked "in trace": they replace those of the previous trace; maps the user
    * opened stay. A map that does not read is reported, the trace still opens. */
   const loadTraceMaps = async (tf: TraceFiles, trace: Trace) => {
@@ -97,7 +98,7 @@ export function App() {
       const f = tf.files.get(s.file)
       try {
         if (!f) throw new Error(`${s.file}: listed in manifest.json, not in the trace`)
-        maps.push({ name: s.file.slice(s.file.lastIndexOf('/') + 1), map: parseSourceMap(await readText(f), s.file), inTrace: true })
+        maps.push({ name: mapName(s.file), map: parseSourceMap(await readText(f), s.file), inTrace: true })
       } catch (err) {
         errors.push(String((err as Error).message ?? err))
       }

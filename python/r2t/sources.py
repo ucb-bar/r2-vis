@@ -1,4 +1,5 @@
-"""Source maps that go into a processed trace (format 1.10): `OUT/sources/NAME.json`.
+"""Source maps that go into a processed trace: `OUT/sources/NAME.json.gz` (format 1.11; gzip of
+the map's bytes as read; `NAME.json` in format 1.10).
 
 A source map (r2-toolchain docs/source-map.md, version 1) belongs to a run when one of its
 programs has the image of a program that ran: equal `image.sha256` and the manifest's
@@ -9,8 +10,8 @@ out/srcmap.json, the ELFs in out/ and the raw images in out/images/).
 
 from __future__ import annotations
 
+import gzip
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -52,7 +53,7 @@ def name_of(path: Path, taken: set[str]) -> str:
 
 
 def copy_maps(images: list[dict], given: list[Path], out: Path) -> list[dict]:
-    """Copies the maps that belong to the run into OUT/sources; returns the manifest entries.
+    """Writes the maps that belong to the run into OUT/sources (gzip); returns the manifest entries.
     A given map that matches no image of the run is reported and left out."""
     hashes = {x["sha256"] for x in images if x.get("sha256")}
     given_set = {p.resolve() for p in given}
@@ -68,7 +69,8 @@ def copy_maps(images: list[dict], given: list[Path], out: Path) -> list[dict]:
         name = name_of(path, taken)
         taken.add(name)
         (out / SOURCES_DIR).mkdir(exist_ok=True)
-        shutil.copyfile(path, out / SOURCES_DIR / f"{name}.json")
-        entries.append({"file": f"{SOURCES_DIR}/{name}.json", "from": str(path),
+        # mtime 0: the same map gives the same bytes
+        (out / SOURCES_DIR / f"{name}.json.gz").write_bytes(gzip.compress(path.read_bytes(), mtime=0))
+        entries.append({"file": f"{SOURCES_DIR}/{name}.json.gz", "from": str(path),
                         "programs": list(programs)})
     return entries

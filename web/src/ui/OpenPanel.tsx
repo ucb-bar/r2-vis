@@ -1,4 +1,5 @@
 import { useRef, useState, type ReactNode } from 'react'
+import { isMapFile } from '../source/srcmap'
 
 interface Props {
   onFiles: (list: FileList) => void
@@ -33,10 +34,10 @@ export function OpenPanel({ onFiles, onDrop, onSourceMap, onUrl, compact, recent
     </>
   )
   if (compact) return picker
-  // A dropped .json file is a source map; anything else is a trace folder.
+  // A dropped .json or .json.gz file is a source map; anything else is a trace folder.
   const drop = (dt: DataTransfer) => {
     const f = dt.files.length === 1 ? dt.files[0] : null
-    if (f && onSourceMap && f.name.toLowerCase().endsWith('.json')) onSourceMap(f)
+    if (f && onSourceMap && isMapFile(f.name)) onSourceMap(f)
     else onDrop(dt)
   }
   return (

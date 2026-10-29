@@ -75,6 +75,17 @@ export interface SourceMap {
   programs: Program[]
 }
 
+/** The name of a source map file without its gzip suffix (NAME.json.gz, format 1.11), so that
+ * a map keeps its name in both forms. */
+export function mapName(file: string): string {
+  return file.slice(file.lastIndexOf('/') + 1).replace(/\.gz$/i, '')
+}
+
+/** A source map file: NAME.json, or NAME.json.gz. */
+export function isMapFile(file: string): boolean {
+  return /\.json(\.gz)?$/i.test(file)
+}
+
 /** Reads a source map; only version 1 of the format. */
 export function parseSourceMap(text: string, name: string): SourceMap {
   let m: Partial<SourceMap>

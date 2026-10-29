@@ -9,11 +9,11 @@ export interface TraceFiles {
   url?: string
 }
 
-/** Subdirectories of a trace whose files are read (format 1.10: the source maps). */
+/** Subdirectories of a trace whose files are read (format 1.10: the source maps; gzip from 1.11). */
 const SUBDIRS = ['sources']
 
 /** From <input type="file" webkitdirectory>: the files next to manifest.json, and those of
- * its subdirectories in SUBDIRS (named "sources/NAME.json"). */
+ * its subdirectories in SUBDIRS (named "sources/NAME.json.gz"). */
 export function fromFileList(list: FileList): TraceFiles {
   const all = Array.from(list)
   const manifest = all.find((f) => baseName(pathOf(f)) === 'manifest.json')

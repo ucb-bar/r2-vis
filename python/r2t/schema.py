@@ -246,7 +246,8 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
     }),
     "images": ("RV images that programs ran (raw 1.10), deduplicated by sha256, in order of "
                "first use. A source map belongs to an image when its image.bytes and "
-               "image.sha256 are equal.", {
+               "image.sha256 are equal. The maps of the run are in sources/NAME.json.gz "
+               "(gzip; format 1.11, sources/NAME.json before), listed in manifest.sources.", {
         "id": "image id (programs.image)",
         "file": "the file of an --image entry, as given; NULL for an image that an IMEM "
                 "copy placed",
