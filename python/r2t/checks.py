@@ -1,4 +1,4 @@
-"""The checks of trace-raw.md Section 8 (v1.10), plus a few format checks. Vectorized."""
+"""The checks of trace-raw.md Section 8 (v1.11), plus a few format checks. Vectorized."""
 
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ def run(dump: RawDump, gids: np.ndarray, ch: Charges, stats: dict | None) -> lis
         errors += check_dst_granules(dump)
     if tuple(m.get("version", (1, 0))) >= (1, 10):
         errors += check_images(dump)
+    if tuple(m.get("version", (1, 0))) >= (1, 11):
+        errors += check_call_paths(dump)
     errors += check_write_channels(m, slots)
     if not dump.partial:
         errors += check_program_owners(ch)
@@ -92,13 +94,8 @@ def check_images(dump: RawDump) -> list[str]:
         elif names[i] not in images[k].get("programs", []):
             errors.append(f"programs: {names[i]} on node {int(progs['nu'][i])} runs image {k}, "
                           f"which has no record named {names[i]}")
-    tasks = dump.records["tasks"]
-    tasks = tasks[np.argsort(tasks["gid"], kind="stable")]
+    tasks, has_image, k, size = task_images(dump)
     pc, pc_null = optional_field(tasks, "pc")
-    owner = task_programs(tasks, dump.records["programs"])
-    found = ~np.asarray(owner.is_null())
-    row = np.asarray(owner.fill_null(0)).astype(np.int64)
-    has_image = found & ~image_null[row] if len(progs) else np.zeros(len(tasks), bool)
     bad = ~pc_null & ~has_image
     if bad.any():
         errors.append(f"tasks: {int(bad.sum())} tasks with a pc whose program has no image, "
@@ -107,15 +104,70 @@ def check_images(dump: RawDump) -> list[str]:
     if bad.any():
         errors.append(f"tasks: {int(bad.sum())} tasks of an RV program without a pc, first gid "
                       f"{int(tasks['gid'][np.flatnonzero(bad)[0]])}")
-    size = np.array([x["bytes"] for x in images] + [0], dtype=np.int64)
-    k = np.where(has_image, np.minimum(image[row], len(images)), len(images)) if len(progs) \
-        else np.full(len(tasks), len(images))
-    bad = ~pc_null & has_image & (pc.astype(np.int64) >= size[k])
+    bad = ~pc_null & has_image & (pc.astype(np.int64) >= size)
     if bad.any():
         i = int(np.flatnonzero(bad)[0])
         errors.append(f"tasks: {int(bad.sum())} pcs outside their image, first gid "
                       f"{int(tasks['gid'][i])}: pc {int(pc[i]):#x}, image {int(k[i])} of "
-                      f"{int(size[k[i]])} B")
+                      f"{int(size[i])} B")
+    return errors
+
+
+def task_images(dump: RawDump) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The tasks in gid order, and per task: its program has an image, that image's index
+    (len(images) when none) and its bytes (0 when none)."""
+    images = dump.manifest.get("images") or []
+    progs = dump.records["programs"]
+    progs = progs[np.lexsort((progs["start"], progs["nu"]))]
+    image, image_null = optional_field(progs, "image")
+    tasks = dump.records["tasks"]
+    tasks = tasks[np.argsort(tasks["gid"], kind="stable")]
+    owner = task_programs(tasks, dump.records["programs"])
+    found = ~np.asarray(owner.is_null())
+    row = np.asarray(owner.fill_null(0)).astype(np.int64)
+    if not len(progs):
+        return tasks, np.zeros(len(tasks), bool), np.full(len(tasks), len(images)), np.zeros(len(tasks), np.int64)
+    has_image = found & ~image_null[row]
+    k = np.where(has_image, np.minimum(image[row], len(images)), len(images))
+    size = np.array([x["bytes"] for x in images] + [0], dtype=np.int64)
+    return tasks, has_image, k, size[k]
+
+
+def check_call_paths(dump: RawDump) -> list[str]:
+    """Raw 1.11: call_paths is a list of non-empty lists of offsets; a task with a
+    call_path has a pc, its call_path is an index of call_paths, and every offset of that
+    path is inside the image of the task's program."""
+    paths = dump.manifest.get("call_paths") or []
+    errors = []
+    bad_paths = [i for i, x in enumerate(paths) if not isinstance(x, list) or not x
+                 or not all(isinstance(v, int) and v >= 0 for v in x)]
+    if bad_paths:
+        errors.append(f"manifest.call_paths: {len(bad_paths)} paths are not non-empty lists of "
+                      f"offsets, first {bad_paths[0]}: {paths[bad_paths[0]]!r}")
+    tasks, has_image, _, size = task_images(dump)
+    path, path_null = optional_field(tasks, "call_path")
+    pc_null = optional_field(tasks, "pc")[1]
+    gid = tasks["gid"]
+    bad = ~path_null & pc_null
+    if bad.any():
+        errors.append(f"tasks: {int(bad.sum())} tasks with a call_path and no pc, first gid "
+                      f"{int(gid[np.flatnonzero(bad)[0]])}")
+    bad = ~path_null & (path.astype(np.int64) >= len(paths))
+    if bad.any():
+        i = int(np.flatnonzero(bad)[0])
+        errors.append(f"tasks: {int(bad.sum())} call_paths are not an index of manifest."
+                      f"call_paths ({len(paths)} paths), first gid {int(gid[i])}: {int(path[i])}")
+    # the largest offset of each path against the image of each task that uses it
+    widest = np.array([max(x) if isinstance(x, list) and x and i not in bad_paths else -1
+                       for i, x in enumerate(paths)] + [-1], dtype=np.int64)
+    used = ~path_null & (path.astype(np.int64) < len(paths))
+    top = widest[np.where(used, path, len(paths)).astype(np.int64)]
+    bad = used & has_image & (top >= size)
+    if bad.any():
+        i = int(np.flatnonzero(bad)[0])
+        errors.append(f"tasks: {int(bad.sum())} call paths with an offset outside the image of "
+                      f"the task's program, first gid {int(gid[i])}: path {int(path[i])} "
+                      f"{paths[int(path[i])]}, image of {int(size[i])} B")
     return errors
 
 

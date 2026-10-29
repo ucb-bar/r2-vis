@@ -26,7 +26,7 @@ from r2t import checks, dims, facts, schema, sources, timeline
 from r2t.rawdump import FormatError, RawDump, load, nullable
 from r2t.views import views_sql
 
-FORMAT_VERSION = (1, 11)
+FORMAT_VERSION = (1, 12)
 # Row groups of trace-format 4.2; bins (not specified there) in groups of 524288 rows, so
 # that a reader can decode them in parallel.
 ROW_GROUPS = {"tasks": 131072, "chunks": 524288, "deps": 524288, "bins": 524288,
@@ -122,6 +122,7 @@ def convert(raw_dir: Path, out: Path, stats: dict | None,
     tables["tasks"] = tasks_tab.append_column(
         "program", facts.task_programs(rec["tasks"], rec["programs"]))
     tables["images"] = dims.images_table(m)
+    tables["call_paths"] = dims.call_paths_table(m)
     tables["marks"] = facts.marks_table(rec["marks"], dump.strings)
     tables["phases"] = facts.phases_table(dump.summary)
     tables["entries"] = facts.entries_table(rec["entries"])

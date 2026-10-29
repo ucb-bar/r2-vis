@@ -79,6 +79,8 @@ def tasks_table(rec: np.ndarray, label_schema: dict, lane_of_node: np.ndarray,
     cols["dst_mask"] = pa.array(dst_mask(rec), type=pa.uint32())
     pc, pc_null = optional_field(rec, "pc")
     cols["pc"] = masked(pc, pc_null, pa.int32())
+    path, path_null = optional_field(rec, "call_path")
+    cols["call_path"] = masked(path, path_null, pa.int32())
     for name in TASK_TIMES:
         values, null = nullable(rec, name)
         cols[name] = masked(values, null, pa.int64())

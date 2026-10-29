@@ -224,6 +224,19 @@ def images_table(m: dict) -> pa.Table:
     })
 
 
+def call_paths_table(m: dict) -> pa.Table:
+    """The call paths of the tasks (raw 1.11 `call_paths`; empty before), one row per call:
+    tasks.call_path names `path`; `level` 0 is the outermost call (frame 2); `pc` is the
+    IMEM offset of the call instruction in the image of the task's program."""
+    rows = [(k, level, pc) for k, path in enumerate(m.get("call_paths") or [])
+            for level, pc in enumerate(path)]
+    return table({
+        "path": ([x[0] for x in rows], pa.int32()),
+        "level": ([x[1] for x in rows], pa.int32()),
+        "pc": ([x[2] for x in rows], pa.int32()),
+    })
+
+
 def rate_classes_table(m: dict) -> pa.Table:
     """The rate classes of compute resources with per-type rates (raw 1.7 `rates`): per
     resource and class index, the name and the rate in units per core cycle."""

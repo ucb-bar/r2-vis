@@ -201,6 +201,10 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "pc": "IMEM offset of the nu.* instruction that made the task, in the coordinates of "
               "the program's source map (raw 1.10); NULL for a task of a program that is not "
               "an RV image",
+        "call_path": "the calls that led from the program function to the task "
+                     "(call_paths.path, raw 1.11); with pc, it names the source map item when a "
+                     "function is called from more than one line; NULL for a task made in the "
+                     "program function (frame 1), a non-RV task, or a dump before raw 1.11",
         "program": "the program that made the task (programs.id): the program on src_nu "
                    "with start <= call < end; with pc, it names the source map item",
         "call": "cycle the program issued the invoke call (before c_invoke and any stall)",
@@ -255,6 +259,15 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "bytes": "IMEM bytes of the image",
         "sha256": "hex SHA-256 of those bytes",
         "programs": "comma-separated names of the program records in the image",
+    }),
+    "call_paths": ("Call paths of the tasks (format 1.12, raw 1.11): one row per call. A task's "
+                   "call_path lists the call instructions that led from its program function "
+                   "to it, outermost first; with pc, it names the source map item when a "
+                   "function is called from more than one line. Empty before.", {
+        "path": "call path id (tasks.call_path)",
+        "level": "0 for the outermost call (it pushed frame 2), then 1, 2, ...",
+        "pc": "IMEM offset of the call instruction (jal, jalr or c.jalr) in the image of the "
+              "task's program, in the coordinates of tasks.pc",
     }),
     "usage": ("Attribution (format 1.5): the charges summed per resource, charge block and "
               "owner, sorted by (resource, block, gid, program), so that a resource's rows "
