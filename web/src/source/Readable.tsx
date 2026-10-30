@@ -7,7 +7,7 @@
 import type { ReactNode } from 'react'
 import { SOURCE_OP_SLOT } from '../timeline/colors'
 import { count } from '../ui/format'
-import type { MapProgram, Producer } from './links'
+import type { MapProgram, Producer, TaskGroup } from './links'
 import { address, code, ranTrips, tokenSpans, tripsButton, tripTable, unknownValue, type Hover } from './parts'
 import type { Token } from './rust'
 import {
@@ -25,6 +25,11 @@ export const opColor = (op: string | undefined) => {
 export interface CardLinks {
   tasks: (n: Node) => number[]
   producers: (n: Node, k: number) => Producer[]
+  /** the item's tasks by call line and by the statement that spawned their program start */
+  groups: (n: Node) => { byCall: TaskGroup[]; byStart: TaskGroup[] }
+  /** a call item: the tasks that came through it, and the helper or closure it calls */
+  viaCall: (n: Node) => number[]
+  callee: (n: Node) => Node | null
 }
 
 export interface ReadableProps {
@@ -99,10 +104,10 @@ export function Readable(p: ReadableProps) {
   /** "27 calls: 1, 5, 9, … 105": the first few calls and the last. */
   const callIndices = (calls: number[]) => (calls.length > 4 ? `${calls.slice(0, 3).join(', ')}, … ${calls[calls.length - 1]}` : calls.join(', '))
   const callsLabel = (calls: number[]) => `${count(calls.length)} ${calls.length === 1 ? 'call' : 'calls'}`
-  const codeLine = (l: number, badges?: ReactNode, selected?: Node) =>
+  const codeLine = (l: number, badges?: ReactNode, selected?: Node, calls?: ReactNode) =>
     row(`l${l}`, l, <>
       <code className="rd-src">{tokenSpans(text(l) ?? [])}</code>{badges}
-      {callers.get(l)?.map((c) => (
+      {calls ?? callers.get(l)?.map((c) => (
         <button key={c.node.id} className="link rd-call-marker" onClick={(e) => { e.stopPropagation(); p.onSelect(c.node) }}>
           → {c.node.item.name ?? 'closure'} · {callsLabel(c.calls)}
         </button>
@@ -208,6 +213,31 @@ export function Readable(p: ReadableProps) {
     if (it.uncertain) out.push(<span key="c" className="badge warn">uncertain</span>)
     if ((it.kind === 'invoke' || it.kind === 'wait') && it.pc === null) out.push(<span key="n" className="badge muted">not reached</span>)
     return out
+  }
+  /** The groups of an item's tasks (by call line, by the statement that spawned their
+   * program start), one row each when there is more than one group: a click puts a group's
+   * tasks into the focus. */
+  const groupRows = (n: Node): ReactNode => {
+    if (!p.links) return null
+    const { byCall, byStart } = p.links.groups(n)
+    // the region around a group's line, inline only where the groups' regions differ
+    const groupRow = (name: string, groups: TaskGroup[]) => {
+      if (!groups.length) return null
+      const labels = new Set(groups.map((g) => g.label))
+      return (
+        <div className="rd-groups" key={name}>
+          <span className="rd-groups-name">{name}</span>
+          {groups.map((g) => (
+            <button key={g.key} className="link rd-group" title={g.label ?? undefined}
+              onClick={(e) => { e.stopPropagation(); p.focus({ tasks: g.tasks }, e.shiftKey) }}>
+              {g.lines.length ? `line ${g.lines.join(' → ')}` : 'line ?'}{labels.size > 1 && g.label ? ` · ${g.label}` : ''}: {count(g.tasks.length)}
+            </button>
+          ))}
+        </div>
+      )
+    }
+    const rows = [groupRow('by call', byCall), groupRow('by start', byStart)].filter(Boolean)
+    return rows.length ? <div className="rd-group-rows">{rows}</div> : null
   }
   const taskCount = (n: Node): ReactNode => {
     if (!p.links) return null
@@ -327,6 +357,7 @@ export function Readable(p: ReadableProps) {
           <span className="spacer" />
           {sourceToggle(n, false)}
         </div>
+        {groupRows(n)}
         {fields.length > 0 && <div className="rd-fields">{fields}</div>}
       </div>
     ), '', indent)
@@ -358,8 +389,30 @@ export function Readable(p: ReadableProps) {
         <span className="spacer" />
         {sourceToggle(n, false)}
         {table && <div className="rd-field-table">{tableOf(k, true)}</div>}
+        {groupRows(n)}
       </div>
     ), '', indent)
+  }
+
+  /** Call statements of a helper or an out-of-line closure (version 2): their lines as code,
+   * the first with one marker per call item: what it calls (a link to it) and the tasks that
+   * came through it (a click puts them into the focus). */
+  const callRow = (group: Node[]) => {
+    const [a] = group[0].item.lines
+    const end = Math.max(...group.map((g) => g.item.lines[1]))
+    const markers = group.map((c) => {
+      const target = p.links?.callee(c) ?? null
+      const via = p.links?.viaCall(c) ?? []
+      const name = c.item.function ?? target?.item.name ?? 'closure'
+      return (
+        <span key={c.id} className="rd-call-marker" data-id={c.id}>
+          <button className="link" onClick={(e) => { e.stopPropagation(); if (target) p.onSelect(target) }}>→ {name}</button>
+          {c.item.tail && <span className="badge muted">tail</span>}
+          {via.length > 0 && <button className="link src-tasks" onClick={(e) => { e.stopPropagation(); p.focus({ tasks: via }, e.shiftKey) }}>{tasksLabel(via.length)}</button>}
+        </span>
+      )
+    })
+    for (let l = a; l <= end; l++) codeLine(l, undefined, undefined, l === a ? markers : undefined)
   }
 
   /** The lines a..b of a container: its children in place of their lines, other lines as code. */
@@ -372,7 +425,8 @@ export function Readable(p: ReadableProps) {
       let j = i + 1
       while (j < kids.length && kids[j].item.lines[0] <= end) { group.push(kids[j]); end = Math.max(end, kids[j].item.lines[1]); j++ }
       for (; l < group[0].item.lines[0] && l <= b; l++) codeLine(l)
-      group.forEach(item)
+      if (group.every((g) => g.item.kind === 'call')) callRow(group)
+      else group.forEach(item)
       l = Math.max(l, end + 1)
       i = j
     }

@@ -80,7 +80,8 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   const status = link && mp ? link.statusOf(mp) : null
   const linked = status === 'match' || status === 'unverified'
   const cardLinks = useMemo<CardLinks | null>(() => (link && mp && linked
-    ? { tasks: (n) => link.tasksOf(mp, n), producers: (n, k) => link.producersOf(mp, n, k) } : null), [link, mp?.mi, mp?.pi, linked])
+    ? { tasks: (n) => link.tasksOf(mp, n), producers: (n, k) => link.producersOf(mp, n, k), groups: (n) => link.groupsOf(mp, n),
+        viaCall: (n) => link.tasksViaCall(n), callee: (n) => link.callee(mp, n) } : null), [link, mp?.mi, mp?.pi, linked])
 
   const hover = (e: React.MouseEvent, content: TipContent | null) => {
     const r = host.current?.getBoundingClientRect()

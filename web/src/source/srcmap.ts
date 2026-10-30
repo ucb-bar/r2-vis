@@ -1,5 +1,5 @@
-// The source map of a kernel crate (r2-toolchain docs/source-map.md, version 1): its
-// programs as item trees, the per-trip values of items inside loops and closures, and the
+// The source map of a kernel crate (r2-toolchain docs/source-map.md, versions 1 and 2): its
+// programs as item trees (version 2: the program function, then its helpers), the per-trip values of items inside loops and closures, and the
 // links from dependency and wait keys to the invokes whose destination holds them.
 
 /** A per-trip value: a plain value, one list per loop or closure level (null: a trip in
@@ -24,8 +24,13 @@ export interface Descriptor {
   args: Record<string, Field>
 }
 
-/** region: a `// region: <text>` … `// endregion` block of the source (summary = text). */
-export type ItemKind = 'function' | 'loop' | 'closure' | 'scalar' | 'invoke' | 'wait' | 'region'
+/** region: a `// region: <text>` … `// endregion` block of the source (summary = text).
+ * Version 2: call, a statement that calls a helper or an out-of-line closure; branch, an
+ * `if` or `match` that holds a loop or a closure. */
+export type ItemKind = 'function' | 'loop' | 'closure' | 'scalar' | 'invoke' | 'wait' | 'region' | 'call' | 'branch'
+
+/** Version 2: the call instructions of one call statement of a helper or closure. */
+export interface CallSite { file: number; line: number; pcs: string[]; tail?: boolean }
 
 export interface Item {
   kind: ItemKind
@@ -52,6 +57,19 @@ export interface Item {
   /** a closure: per call, the line of the statement that made it (null: not known) */
   call_lines?: (number | null)[]
   key?: Field
+  /** version 2, a call: the helper it calls (by name), or the lines of the closure */
+  function?: string
+  closure?: [number, number]
+  /** version 2: the call instructions of a call item, or of an invoke or wait that a
+   * function outside the crate makes; hex strings */
+  call_pcs?: string[]
+  /** version 2: a tail call (it pushes no frame) */
+  tail?: boolean
+  /** version 2, an item of a closure inlined at some of its calls: per call statement, the
+   * pcs of the copy inlined there */
+  static_pcs_by_call?: { file: number; line: number; pcs: string[] }[]
+  /** version 2, a helper or an out-of-line closure: the call instructions that call it */
+  call_sites?: CallSite[]
 }
 
 export interface Program {
@@ -68,7 +86,7 @@ export interface Program {
 
 export interface SourceMap {
   format: 'r2-srcmap'
-  version: 1
+  version: 1 | 2
   config: string
   granule?: number
   files: { path: string; text: string }[]
@@ -86,7 +104,10 @@ export function isMapFile(file: string): boolean {
   return /\.json(\.gz)?$/i.test(file)
 }
 
-/** Reads a source map; only version 1 of the format. */
+/** The versions of the format this viewer reads. */
+export const MAP_VERSIONS = [1, 2]
+
+/** Reads a source map of version 1 or 2. */
 export function parseSourceMap(text: string, name: string): SourceMap {
   let m: Partial<SourceMap>
   try {
@@ -95,7 +116,7 @@ export function parseSourceMap(text: string, name: string): SourceMap {
     throw new Error(`${name}: not JSON (${(err as Error).message})`)
   }
   if (m.format !== 'r2-srcmap') throw new Error(`${name}: not a source map (format ${JSON.stringify(m.format)})`)
-  if (m.version !== 1) throw new Error(`${name}: source map version ${JSON.stringify(m.version)}; this viewer reads version 1`)
+  if (!MAP_VERSIONS.includes(m.version as number)) throw new Error(`${name}: source map version ${JSON.stringify(m.version)}; this viewer reads versions ${MAP_VERSIONS.join(' and ')}`)
   if (!Array.isArray(m.files) || !Array.isArray(m.programs)) throw new Error(`${name}: source map without files or programs`)
   return m as SourceMap
 }
@@ -233,6 +254,24 @@ export function seenTrips(level: Node): number | null {
   return best
 }
 
+/** The trips in which an item ran in the dry run, in run order (the trip index per loop and
+ * closure level around it): the entries that are not null of its first per-trip value with
+ * an index for every level. An item outside loops and closures ran once. Null when no value
+ * has that shape, or when a list is longer than its level's known trips or calls (an item
+ * that ran more than once per trip: a loop inside a statement item). */
+export function ranTrips(n: Node): number[][] | null {
+  const depth = n.levels.length
+  if (!depth) return [[]]
+  const sizes = n.levels.map((l) => (l.item.kind === 'closure' ? l.item.calls : l.item.trips))
+  for (const v of valuesOf(n.item)) {
+    const e = tripEntries(v)
+    if (!e.length || !e.every((x) => x.idx.length === depth)) continue
+    if (e.some((x) => x.idx.some((k, i) => sizes[i] !== undefined && k >= (sizes[i] as number)))) return null
+    return e.filter((x) => x.value !== null).map((x) => x.idx)
+  }
+  return null
+}
+
 function valuesOf(item: Item): Trips<unknown>[] {
   const out: Trips<unknown>[] = [item.pc, item.pe, item.child]
   const fields = item.descriptor ? [item.descriptor.dst, ...item.descriptor.deps, ...Object.values(item.descriptor.args)] : []
@@ -350,4 +389,32 @@ export class DepIndex {
     const i = (key - r.base) / this.granule
     return (i & ~r.mask) === 0n
   }
+}
+
+// ---- pcs ---------------------------------------------------------------------------------------
+
+/** The pcs of an item (a plain value or per trip), as numbers. */
+export function itemPcs(n: Node): number[] {
+  const out: number[] = []
+  for (const e of tripEntries<string>(n.item.pc)) {
+    const v = e.value === null ? NaN : Number(e.value)
+    if (Number.isFinite(v)) out.push(v)
+  }
+  return out
+}
+
+/** The pcs that a trace's tasks of an item can have: its static_pcs (every instruction the
+ * debug info places at it, reached in the dry run or not), else the dry run's pcs. */
+export function taskPcs(n: Node): number[] {
+  const s = n.item.static_pcs
+  return s ? s.map(Number).filter(Number.isFinite) : itemPcs(n)
+}
+
+const indexes = new WeakMap<Program, ReturnType<typeof indexProgram>>()
+
+/** The item tree of a program, built once per program. */
+export function programIndex(p: Program): ReturnType<typeof indexProgram> {
+  let ix = indexes.get(p)
+  if (!ix) { ix = indexProgram(p); indexes.set(p, ix) }
+  return ix
 }

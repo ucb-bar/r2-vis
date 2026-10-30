@@ -159,6 +159,8 @@ def convert(raw_dir: Path, out: Path, stats: dict | None,
                    for name in [*tables, "charges"]},
         "sources": sources.copy_maps(m.get("images") or [], list(srcmaps), out),
     }
+    sources.unplaced(manifest["sources"], out, tables["tasks"], tables["programs"],
+                     m.get("images") or [], m.get("call_paths") or [])
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     (out / "views.sql").write_text(views_sql(m.get("label", {}), end_time, width, origin))
     return manifest, errors
@@ -194,6 +196,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not args.quiet:
         report(args.out, manifest, time.perf_counter() - t0)
+    for e in manifest["sources"]:
+        for name, n in e.get("unplaced", {}).items():
+            print(f"note: {e['file']}: {name}: {n['call_path']} tasks with a call path that "
+                  f"names no call of the map, {n['pc']} with a pc in no item of the function "
+                  f"it reaches; {n['no_item']} of them at no item by pc alone", file=sys.stderr)
     for e in errors:
         print(f"check failed: {e}", file=sys.stderr)
     return 1 if errors else 0
