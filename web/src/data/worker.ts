@@ -9,7 +9,7 @@ import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
 import { buildOccupancy } from './occupancy'
 import { sharedLabels } from './labels'
-import { attribute, resetAttribution, taskUsage, type AttributionRequest, type ReadGroup, type UsageRequest } from './attribution'
+import { attribute, resetAttribution, setTaskKinds, taskUsage, type AttributionRequest, type ReadGroup, type TaskKinds, type UsageRequest } from './attribution'
 import { CACHED_TABLES, GroupCache } from './groupcache'
 
 export interface DecodeRequest {
@@ -37,6 +37,8 @@ export type ComputeRequest =
   /** the group cache's counters; `limit` (bytes) replaces its cap (0: no cache), for
    * measurements */
   | { op: 'groupCache'; id: number; limit?: number }
+  /** the task kinds of the trace (for the attribution worker; key: fileKey of tasks.parquet) */
+  | { op: 'taskKinds'; id: number; key: string; kinds: TaskKinds }
 
 export interface WorkerReply {
   id: number
@@ -128,6 +130,9 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
       result = sharedLabels(...req.args)
     } else if (req.op === 'taskUsage') {
       result = await taskUsage(req.req, readGroup)
+    } else if (req.op === 'taskKinds') {
+      setTaskKinds(req.key, req.kinds)
+      result = null
     } else if (req.op === 'groupCache') {
       if (req.limit !== undefined) groups.setLimit(req.limit)
       result = groups.stats()

@@ -6,6 +6,7 @@ import { indexLabels } from './data/labels'
 import { ChargeCache } from './data/charges'
 import { ViewStore } from './state/viewstore'
 import { homeRange } from './timeline/rows'
+import { shareTaskKinds } from './state/focusqueries'
 import { OpenPanel } from './ui/OpenPanel'
 import { ServerMenu } from './ui/ServerMenu'
 import { addServer, loadServers, removeServer, serverLabel } from './data/servers'
@@ -78,6 +79,7 @@ export function App() {
       const trace = await loadTrace(tf, pool(), (done, total) =>
         setState({ kind: 'loading', name: tf.name, done, total }))
       void indexLabels(trace, pool())   // which task labels are shared (task names), in a worker
+      shareTaskKinds(trace, pool())     // the attribution worker's task kinds, from these columns
       await loadTraceMaps(tf, trace)
       const charges = new ChargeCache(trace)
       const store = new ViewStore(trace.dims.nodes.map((n) => n.id as number), trace.manifest.end_time, homeRange(trace))

@@ -82,9 +82,39 @@ export type GroupRanges = (name: string, file: TraceFile, column: string) => Pro
 const ownerOf = (gid: number, program: number) => (gid >= 0 ? gid : program >= 0 ? -2 - program : -1)
 
 /** Per task row (sorted by gid): the gid, the lane and the kind (an index into kinds). */
-interface TaskKinds { gid: Int32Array; lane: Int32Array; kind: Int32Array; kinds: string[] }
+export interface TaskKinds { gid: Int32Array; lane: Int32Array; kind: Int32Array; kinds: string[] }
 
 let taskKinds: { key: string; value: Promise<TaskKinds> } | null = null
+
+/** The task kinds that the main thread sends at load (it has the columns): no read of
+ * tasks.parquet in the worker. `key`: fileKey of tasks.parquet. */
+export function setTaskKinds(key: string, value: TaskKinds): void {
+  taskKinds = { key, value: Promise.resolve(value) }
+}
+
+/** The task kinds from decoded columns of tasks (all rows, in gid order): the label field
+ * kind, else the opcode name (the names that readTaskKinds gives). */
+export function taskKindsOf(gid: Int32Array, lane: Int32Array, opcode: Int32Array, kind: Column | undefined, opcodes: string[]): TaskKinds {
+  const out: TaskKinds = { gid, lane, kind: new Int32Array(gid.length), kinds: [] }
+  const index = new Map<string, number>()
+  const kindOf = (name: string) => {
+    let k = index.get(name)
+    if (k === undefined) {
+      k = out.kinds.length
+      out.kinds.push(name)
+      index.set(name, k)
+    }
+    return k
+  }
+  const dict = kind && isDict(kind) ? kind : null
+  const dictKind = dict ? dict.dict.map(kindOf) : []
+  const opKind = opcodes.map(kindOf)
+  for (let i = 0; i < gid.length; i++) {
+    const k = dict ? dict.codes[i] : -1
+    out.kind[i] = k >= 0 ? dictKind[k] : opKind[opcode[i]] ?? kindOf(`opcode ${opcode[i]}`)
+  }
+  return out
+}
 
 /** Forgets the task kinds (a new trace is opened). */
 export function resetAttribution(): void {
@@ -93,10 +123,11 @@ export function resetAttribution(): void {
 
 /** The task kinds of tasks.parquet, read once per trace: the label field kind, else the
  * opcode name. */
-function readTaskKinds(req: AttributionRequest, read: ReadGroup, groups: number): Promise<TaskKinds> {
+function readTaskKinds(req: AttributionRequest, read: ReadGroup, groupsOf: () => Promise<number>): Promise<TaskKinds> {
   const key = fileKey(req.tasks)
   if (taskKinds?.key === key) return taskKinds.value
   const value = (async () => {
+    const groups = await groupsOf()
     const parts: Record<string, Column>[] = []
     for (let g = 0; g < groups; g++) parts.push(await read('tasks', req.tasks, g, ['gid', 'lane', 'kind', 'opcode']))
     const rows = parts.reduce((n, c) => n + (c.gid as Int32Array).length, 0)
@@ -274,8 +305,8 @@ export async function attribute(req: AttributionRequest, read: ReadGroup, ranges
   }
   const entries = [...acc.entries()].filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1])
   const tg = performance.now()
-  const taskGroups = (await ranges('tasks', req.tasks, 'gid')).length
-  const groups = groupOwners(entries, await readTaskKinds(req, read, taskGroups))
+  // the row groups of tasks.parquet (its footer): only when the kinds were not sent
+  const groups = groupOwners(entries, await readTaskKinds(req, read, async () => (await ranges('tasks', req.tasks, 'gid')).length))
   const groupMs = performance.now() - tg
   return {
     owners: Int32Array.from(entries, ([k]) => k),

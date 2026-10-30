@@ -2,9 +2,10 @@
 // tasks through the source links, and the occupants of resources in a worker (forward
 // attribution, in the attribution scope). Also the span of task bars (a double click) and
 // the scope's owner masks.
-import type { Attribution, AttributionRequest, AttributionScope } from '../data/attribution'
+import { taskKindsOf, type Attribution, type AttributionRequest, type AttributionScope } from '../data/attribution'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
+import { fileKey } from '../data/tracefile'
 import { linkFor, parentSpawns, programIndex, taskRowOfGid, type LoadedMap } from '../source/links'
 import { itemKey, type FocusItem, type FocusQueries, type FocusTime } from './focus'
 
@@ -61,6 +62,18 @@ export function scopeMasks(trace: Trace, scope: ReadonlySet<number>): Attributio
   const masks = { gids, programs }
   scopes.set(trace, { scope, masks })
   return masks
+}
+
+/** Sends the task kinds (gid, lane, kind per task row, from the columns the main thread
+ * loaded) to the attribution worker, so that its first query does not read tasks.parquet.
+ * Copies: the main thread keeps its own columns. */
+export function shareTaskKinds(trace: Trace, pool: WorkerPool): void {
+  const tasks = trace.reader.files.get('tasks.parquet')
+  const c = trace.facts.tasks.cols
+  if (!tasks || !c.gid || !c.lane || !c.opcode) return
+  const kinds = taskKindsOf((c.gid as Int32Array).slice(), (c.lane as Int32Array).slice(), c.opcode as Int32Array, c.kind,
+    trace.dims.opcodes.map((o) => String(o.name)))
+  void pool.compute({ op: 'taskKinds', key: fileKey(tasks), kinds }, [kinds.gid.buffer, kinds.lane.buffer, kinds.kind.buffer], ATTRIBUTION_WORKER)
 }
 
 const blocksOf = (trace: Trace) => trace.manifest.charge_blocks.map((b) => ({ t0: b.t0, t1: b.t1, maxEnd: b.max_end }))
