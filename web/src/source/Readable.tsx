@@ -30,6 +30,38 @@ export interface CardLinks {
   /** a call item: the tasks that came through it, and the helper or closure it calls */
   viaCall: (n: Node) => number[]
   callee: (n: Node) => Node | null
+  /** the region around a line (its marker text), and the calls made in inlined functions by
+   * the line of the call in the innermost one */
+  region: (line: number) => string | null
+  inlinedCalls: Map<number, Node[]>
+}
+
+/** "1 task", "12k tasks". */
+const tasksLabel = (n: number) => `${count(n)} ${n === 1 ? 'task' : 'tasks'}`
+
+/** The most characters of a region's text in a call marker. */
+const MARKER_REGION_CHARS = 40
+
+/** A call item's marker: what it calls (a link to it); for a call made in inlined functions,
+ * the innermost one, the line of the call there and its region; the tasks that came through
+ * it (a click puts them into the focus). */
+export function CallMarker({ call, links, onSelect, focus }: { call: Node; links: CardLinks | null; onSelect: (n: Node) => void;
+  focus: (target: { tasks: number[] }, additive: boolean) => void }) {
+  const target = links?.callee(call) ?? null
+  const via = links?.viaCall(call) ?? []
+  const name = call.item.function ?? target?.item.name ?? 'closure'
+  const f = call.item.inlined?.[call.item.inlined.length - 1]
+  const region = f ? links?.region(f.line) ?? null : null
+  const short = region && region.length > MARKER_REGION_CHARS ? `${region.slice(0, MARKER_REGION_CHARS - 1)}…` : region
+  return (
+    <span className="rd-call-marker" data-id={call.id} title={region ?? undefined}>
+      <button className="link" onClick={(e) => { e.stopPropagation(); if (target) onSelect(target) }}>
+        → {name}{f ? ` · ${f.function} ${f.line}` : ''}{short ? ` (${short})` : ''}
+      </button>
+      {call.item.tail && <span className="badge muted">tail</span>}
+      {via.length > 0 && <button className="link src-tasks" onClick={(e) => { e.stopPropagation(); focus({ tasks: via }, e.shiftKey) }}>{tasksLabel(via.length)}</button>}
+    </span>
+  )
 }
 
 export interface ReadableProps {
@@ -104,9 +136,12 @@ export function Readable(p: ReadableProps) {
   /** "27 calls: 1, 5, 9, … 105": the first few calls and the last. */
   const callIndices = (calls: number[]) => (calls.length > 4 ? `${calls.slice(0, 3).join(', ')}, … ${calls[calls.length - 1]}` : calls.join(', '))
   const callsLabel = (calls: number[]) => `${count(calls.length)} ${calls.length === 1 ? 'call' : 'calls'}`
+  // the calls made at a line of an inlined function (its source shows the call there)
+  const inlinedAt = (l: number) => p.links?.inlinedCalls.get(l)?.filter((c) => c.item.inlined?.[c.item.inlined.length - 1]?.file === file)
+    .map((c) => <CallMarker key={`i${c.id}`} call={c} links={p.links} onSelect={p.onSelect} focus={p.focus} />)
   const codeLine = (l: number, badges?: ReactNode, selected?: Node, calls?: ReactNode) =>
     row(`l${l}`, l, <>
-      <code className="rd-src">{tokenSpans(text(l) ?? [])}</code>{badges}
+      <code className="rd-src">{tokenSpans(text(l) ?? [])}</code>{badges}{inlinedAt(l)}
       {calls ?? callers.get(l)?.map((c) => (
         <button key={c.node.id} className="link rd-call-marker" onClick={(e) => { e.stopPropagation(); p.onSelect(c.node) }}>
           → {c.node.item.name ?? 'closure'} · {callsLabel(c.calls)}
@@ -158,7 +193,6 @@ export function Readable(p: ReadableProps) {
   }
 
   // ---- producers ---------------------------------------------------------------------------
-  const tasksLabel = (n: number) => `${count(n)} ${n === 1 ? 'task' : 'tasks'}`
   const producerButton = (key: string, label: ReactNode, onSelect: () => void, tasks: number[] | null,
     item: { node: Node; mp?: MapProgram } | null) => (
     <button key={key} className="link rd-producer" onClick={(e) => {
@@ -220,17 +254,24 @@ export function Readable(p: ReadableProps) {
   const groupRows = (n: Node): ReactNode => {
     if (!p.links) return null
     const { byCall, byStart } = p.links.groups(n)
-    // the region around a group's line, inline only where the groups' regions differ
+    // a group: its line and that line's source text; the region around it in the tooltip, and
+    // also shown when the groups' source texts are all the same and each group has a region
+    // of its own (the calls of one statement, made in an inlined function)
     const groupRow = (name: string, groups: TaskGroup[]) => {
       if (!groups.length) return null
-      const labels = new Set(groups.map((g) => g.label))
+      const regions = new Set(groups.map((g) => g.label))
+      const sameSource = new Set(groups.map((g) => g.source)).size === 1 && regions.size === groups.length && !regions.has(null)
+      const short = (r: string) => (r.length > MARKER_REGION_CHARS ? `${r.slice(0, MARKER_REGION_CHARS - 1)}…` : r)
       return (
         <div className="rd-groups" key={name}>
           <span className="rd-groups-name">{name}</span>
           {groups.map((g) => (
             <button key={g.key} className="link rd-group" title={g.label ?? undefined}
               onClick={(e) => { e.stopPropagation(); p.focus({ tasks: g.tasks }, e.shiftKey) }}>
-              {g.lines.length ? `line ${g.lines.join(' → ')}` : 'line ?'}{labels.size > 1 && g.label ? ` · ${g.label}` : ''}: {count(g.tasks.length)}
+              {g.lines.length ? `line ${g.lines.join(' → ')}` : 'line ?'}
+              {g.source && <code className="rd-group-src">{g.source}</code>}
+              {sameSource && g.label && <span className="rd-group-region"> ({short(g.label)})</span>}
+              <span className="rd-group-n">{count(g.tasks.length)}</span>
             </button>
           ))}
         </div>
@@ -271,6 +312,11 @@ export function Readable(p: ReadableProps) {
     if (f && isPerTrip(f.value) && isOpen(`t:${key}`, false)) out.push(<div key={`${key}-t`} className="rd-field-table">{tableOf(f, !!opts.isKey, opts.strip)}</div>)
   }
 
+  /** The op of an invoke, colored; an op the build does not know (an instruction group the
+   * dry run never reached): a neutral chip. */
+  const opChip = (op: string | null | undefined): ReactNode => (op
+    ? <span className="src-op" style={{ background: opColor(op) }}>{op}</span>
+    : <span className="badge muted">op unknown</span>)
   const card = (n: Node) => {
     const it = n.item
     levels = n.levels
@@ -279,7 +325,7 @@ export function Readable(p: ReadableProps) {
     const raw = isOpen(`c:${n.id}`, false)
     const indent = indentOf(a)
     if (raw) {
-      row(`c${n.id}h`, null, <span className="rd-raw-head">{sourceToggle(n, true)}<span className="src-op" style={{ background: opColor(it.op) }}>{it.op}</span></span>, cls(n, 'rd-raw'), indent,
+      row(`c${n.id}h`, null, <span className="rd-raw-head">{sourceToggle(n, true)}{opChip(it.op)}</span>, cls(n, 'rd-raw'), indent,
         { 'data-id': n.id, onClick: (e: React.MouseEvent) => p.onSelect(n, e) } as never)
       for (let l = a; l <= b; l++) codeLine(l)
       return
@@ -295,7 +341,9 @@ export function Readable(p: ReadableProps) {
         fieldLines(fields, 'version', null, `${n.id}|version`,
           known ? <>{isPerTrip(v) ? perTrip(v as unknown as Trips<string>) : String(v)}</> : <span className="src-unknown">?</span>)
       }
-      fieldLines(fields, 'dst', dst, `${n.id}|dst`, value(dst, `t:${n.id}|dst`, true), { strip: true })
+      // an item that the dry run never reached and whose build knows nothing of it (version 2:
+      // op null): no dst row
+      if (dst.expr !== null || dst.value !== null) fieldLines(fields, 'dst', dst, `${n.id}|dst`, value(dst, `t:${n.id}|dst`, true), { strip: true })
       // The mask (per trip in a loop): shown when it is not all ones.
       const masks = tripEntries<string>(dst.mask as Trips<string> | undefined).map((e) => e.value).filter((m) => m !== null)
       if (masks.some((m) => !/^0x[fF]+$/.test(m))) {
@@ -348,7 +396,7 @@ export function Readable(p: ReadableProps) {
     row(`c${n.id}`, a, (
       <div className={cls(n, 'rd-card')} data-id={n.id} onClick={(e) => p.onSelect(n, e)}>
         <div className="rd-card-head">
-          <span className="src-op" style={{ background: opColor(it.op) }}>{it.op}</span>
+          {opChip(it.op)}
           {it.pe !== null && it.pe !== undefined && <span className="src-pe">{perTrip(it.pe)}</span>}
           {badges(n)}
           {taskCount(n)}
@@ -400,18 +448,7 @@ export function Readable(p: ReadableProps) {
   const callRow = (group: Node[]) => {
     const [a] = group[0].item.lines
     const end = Math.max(...group.map((g) => g.item.lines[1]))
-    const markers = group.map((c) => {
-      const target = p.links?.callee(c) ?? null
-      const via = p.links?.viaCall(c) ?? []
-      const name = c.item.function ?? target?.item.name ?? 'closure'
-      return (
-        <span key={c.id} className="rd-call-marker" data-id={c.id}>
-          <button className="link" onClick={(e) => { e.stopPropagation(); if (target) p.onSelect(target) }}>→ {name}</button>
-          {c.item.tail && <span className="badge muted">tail</span>}
-          {via.length > 0 && <button className="link src-tasks" onClick={(e) => { e.stopPropagation(); p.focus({ tasks: via }, e.shiftKey) }}>{tasksLabel(via.length)}</button>}
-        </span>
-      )
-    })
+    const markers = group.map((c) => <CallMarker key={c.id} call={c} links={p.links} onSelect={p.onSelect} focus={p.focus} />)
     for (let l = a; l <= end; l++) codeLine(l, undefined, undefined, l === a ? markers : undefined)
   }
 

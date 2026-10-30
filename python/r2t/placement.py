@@ -102,6 +102,7 @@ class ProgramMap:
                 return Placement(self.by_pc_only(pc), (), "path")
             at, item = hit
             calls.append(item["lines"][0])
+            calls.extend(int(f["line"]) for f in item.get("inlined") or [])
             if item["kind"] in ("invoke", "wait"):
                 return Placement(at, tuple(calls))   # a call out of the crate: the path ends
             nxt = self._callee(item)

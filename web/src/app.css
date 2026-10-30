@@ -467,6 +467,9 @@ html, body { overscroll-behavior: none; }
 .rd-groups { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-4); row-gap: 1px; }
 .rd-groups-name { color: var(--color-ink-muted); }
 .rd-group { font-variant-numeric: tabular-nums; text-align: left; }
+.rd-group-src { margin-left: var(--space-2); font-family: var(--font-mono); color: var(--color-ink-secondary); }
+.rd-group-n { margin-left: var(--space-2); }
+.rd-group-region { color: var(--color-ink-secondary); }
 .rd-wait-row .rd-group-rows { flex-basis: 100%; }
 .rd-code-line.marked { background: var(--color-accent-area); }
 .src-args-from { font-size: var(--font-size-xs); }

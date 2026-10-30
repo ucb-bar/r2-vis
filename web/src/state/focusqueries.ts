@@ -3,14 +3,13 @@
 // attribution, in the attribution scope). Also the span of task bars (a double click) and
 // the scope's owner masks.
 import { taskKindsOf, type Attribution, type AttributionRequest, type AttributionScope } from '../data/attribution'
-import type { WorkerPool } from '../data/pool'
+import { ATTRIBUTION_WORKER, type WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
 import { fileKey } from '../data/tracefile'
 import { linkFor, parentSpawns, programIndex, taskRowOfGid, type LoadedMap } from '../source/links'
 import { itemKey, type FocusItem, type FocusQueries, type FocusTime } from './focus'
 
-/** The worker that runs the charge queries (its task-kind cache is read once per trace). */
-export const ATTRIBUTION_WORKER = 0
+export { ATTRIBUTION_WORKER }
 
 /** A task's bar in the timeline: issue (else invoke) to complete (else the end of the run). */
 export function taskBar(trace: Trace, t: number): { a: number; b: number } {

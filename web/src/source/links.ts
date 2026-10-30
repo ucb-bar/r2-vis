@@ -44,8 +44,13 @@ function programName(trace: Trace, row: number): string {
 export interface TaskPlace { mp: MapProgram; node: Node | null; calls: readonly number[]; via: readonly Node[] }
 
 /** Tasks of an item grouped by where they came from: a call line (or chain of them), or the
- * statement that spawned their program start; `label` is the region around that line. */
-export interface TaskGroup { key: string; lines: readonly number[]; label: string | null; tasks: number[] }
+ * statement that spawned their program start; `source` is the source text of the innermost
+ * line, trimmed, and `label` the region around it (the file's region markers, also inside
+ * inlined functions). */
+export interface TaskGroup { key: string; lines: readonly number[]; source: string | null; label: string | null; tasks: number[] }
+
+/** The most characters of a group's source text. */
+const SOURCE_CHARS = 60
 
 /** A producer of a dependency: where it is in the source and its tasks. */
 export interface Producer {
@@ -304,18 +309,58 @@ export class SourceLink {
     return placer.callee(call)
   }
 
-  /** The summary of the innermost region around a line of a map program (its first file),
-   * or null. */
+  /** The source text of a line of a map program (its first file), trimmed and cut to
+   * SOURCE_CHARS; null when the map has no text for it. */
+  lineText(mp: MapProgram, line: number): string | null {
+    const m = this.maps[mp.mi].map
+    const file = programIndex(m.programs[mp.pi]).roots[0]?.item.file
+    const text = file === undefined ? undefined : m.files[file]?.text
+    if (!text) return null
+    let lines = this.fileLines.get(text)
+    if (!lines) { lines = text.split('\n'); this.fileLines.set(text, lines) }
+    const raw = (lines[line - 1] ?? '').trim().replace(/\s+/g, ' ')
+    if (!raw) return null
+    return raw.length > SOURCE_CHARS ? `${raw.slice(0, SOURCE_CHARS - 1)}…` : raw
+  }
+
+  private readonly fileLines = new Map<string, string[]>()
+
+  /** The text of the innermost `// region:` marker around a line of a map program's first
+   * file (the markers in the text: an inlined function has no items), or null. */
   regionAt(mp: MapProgram, line: number): string | null {
-    const ix = programIndex(this.maps[mp.mi].map.programs[mp.pi])
-    const file = ix.roots[0]?.item.file
-    let best: Node | null = null
-    for (const n of ix.all) {
-      const [a, b] = n.item.lines
-      if (n.item.kind !== 'region' || !n.item.summary || n.item.file !== file || line < a || line > b) continue
-      if (!best || n.depth > best.depth) best = n
+    const m = this.maps[mp.mi].map
+    const file = programIndex(m.programs[mp.pi]).roots[0]?.item.file
+    const text = file === undefined ? undefined : m.files[file]?.text
+    if (!text) return null
+    let regions = this.fileRegions.get(text)
+    if (!regions) {
+      // per line: the innermost region open there (a stack of markers)
+      regions = []
+      const open: string[] = []
+      for (const raw of text.split('\n')) {
+        const s = raw.trim()
+        const start = /^\/\/\s*region\b:?\s*(.*)$/.exec(s)
+        if (start) open.push(start[1].trim())
+        regions.push(open.length ? open[open.length - 1] || null : null)
+        if (/^\/\/\s*endregion\b/.test(s)) open.pop()
+      }
+      this.fileRegions.set(text, regions)
     }
-    return best?.item.summary ?? null
+    return regions[line - 1] ?? null
+  }
+
+  private readonly fileRegions = new Map<string, (string | null)[]>()
+
+  /** The call items of a map program made in inlined functions, by the line of the call in
+   * the innermost of them (where its source shows the call). */
+  inlinedCalls(mp: MapProgram): Map<number, Node[]> {
+    const out = new Map<number, Node[]>()
+    for (const n of programIndex(this.maps[mp.mi].map.programs[mp.pi]).all) {
+      const f = n.item.inlined?.[n.item.inlined.length - 1]
+      if (n.item.kind !== 'call' || !f) continue
+      out.set(f.line, [...(out.get(f.line) ?? []), n])
+    }
+    return out
   }
 
   private readonly callGroups = new Map<Node, TaskGroup[]>()
@@ -335,9 +380,15 @@ export class SourceLink {
   private groupsByCall(mp: MapProgram, n: Node): TaskGroup[] {
     const groups = [...this.tasksByCall(mp, n)].map(([key, tasks]) => {
       const lines = key ? key.split('/').map(Number) : []
-      return { key, lines, label: lines.length ? this.regionAt(mp, lines[0]) : null, tasks }
+      const last = lines[lines.length - 1]
+      return { key, lines, source: lines.length ? this.lineText(mp, last) : null, label: lines.length ? this.regionAt(mp, last) : null, tasks }
     })
-    return groups.length > 1 ? groups.sort((x, y) => (x.lines[0] ?? 0) - (y.lines[0] ?? 0)) : []
+    // in the order of their lines (outermost first)
+    const order = (x: TaskGroup, y: TaskGroup) => {
+      for (let i = 0; i < Math.max(x.lines.length, y.lines.length); i++) if ((x.lines[i] ?? 0) !== (y.lines[i] ?? 0)) return (x.lines[i] ?? 0) - (y.lines[i] ?? 0)
+      return 0
+    }
+    return groups.length > 1 ? groups.sort(order) : []
   }
 
   /** The lines of the statement that spawned a program start: its spawn task's call lines,
@@ -362,7 +413,8 @@ export class SourceLink {
       const key = s ? s.lines.join('/') : ''
       let g = out.get(key)
       if (!g) {
-        g = { key, lines: s?.lines ?? [], label: s ? this.regionAt(s.mp, s.lines[0]) : null, tasks: [] }
+        const last = s ? s.lines[s.lines.length - 1] : 0
+        g = { key, lines: s?.lines ?? [], source: s ? this.lineText(s.mp, last) : null, label: s ? this.regionAt(s.mp, last) : null, tasks: [] }
         out.set(key, g)
       }
       g.tasks.push(t)

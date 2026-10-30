@@ -9,7 +9,7 @@ import { decodeWithHyparquet } from './parquet/fallback'
 import { buildDepsByProducer, buildLaneIndex, buildLevels } from './derive'
 import { buildOccupancy } from './occupancy'
 import { sharedLabels } from './labels'
-import { attribute, resetAttribution, setTaskKinds, taskUsage, type AttributionRequest, type ReadGroup, type TaskKinds, type UsageRequest } from './attribution'
+import { attribute, resetAttribution, setTaskKinds, taskUsage, type AttributionRequest, type TaskKinds, type UsageRequest } from './attribution'
 import { CACHED_TABLES, GroupCache } from './groupcache'
 
 export interface DecodeRequest {
@@ -24,7 +24,19 @@ export interface DecodeRequest {
   /** charges only: per real resource, the virtual id of its rate class 0 (-1: none); the
    * charges with a class are copied onto their class's virtual resource (views-design 7.2) */
   classBase?: Int32Array
+  /** read the group through this worker's group cache (all its columns; the reply is a copy) */
+  shared?: boolean
+  /** reply { cols, raw }: also a copy of the group as decoded (to seed another worker's cache) */
+  raw?: boolean
 }
+
+/** Control requests (WorkerPool.ask): answered at once with { id, ctl: true, result }.
+ * claim: the group cache claims a group for a view's decode on another worker ('yours'),
+ * or holds or decodes it already ('held'); seed: that decode's columns; release: it failed. */
+export type ControlRequest =
+  | { op: 'claim'; name: string; group: number }
+  | { op: 'seed'; name: string; group: number; cols: Record<string, Column> }
+  | { op: 'release'; name: string; group: number }
 
 export type ComputeRequest =
   | { op: 'levels'; id: number; args: Parameters<typeof buildLevels> }
@@ -42,6 +54,8 @@ export type ComputeRequest =
 
 export interface WorkerReply {
   id: number
+  /** the answer to a control request (not a job) */
+  ctl?: boolean
   result?: unknown
   ms?: number
   fallback?: boolean
@@ -52,11 +66,20 @@ const footers = new Map<string, Promise<FileMetaData>>()
 /** The decoded charge and usage groups of the attribution queries (data/groupcache.ts). */
 const groups = new GroupCache()
 
-/** Reads columns of a row group for the attribution queries: charges and usage through the
- * group cache. */
-const readGroup: ReadGroup = async (name, file, group, columns) => {
-  const load = async (cols: string[]) => (await decode({ op: 'decode', id: 0, file, name, group, columns: cols })).cols
-  return CACHED_TABLES.has(name) ? groups.get(name, group, columns, load) : load(columns)
+/** Reads columns of a row group for the attribution queries and the views' charge groups:
+ * charges and usage through the group cache. A charge group is decoded whole (the views ask
+ * for all its columns), so that the queries and the views share one decode. */
+const readGroup = async (name: string, file: TraceFile, group: number, columns: string[] | null): Promise<Record<string, Column>> => {
+  const load = async (cols: string[] | null) => (await decode({ op: 'decode', id: 0, file, name, group, columns: cols })).cols
+  if (!CACHED_TABLES.has(name)) return load(columns)
+  return groups.get(name, group, name === 'charges' ? null : columns, load)
+}
+
+/** A copy of decoded columns (the cache keeps its own; the reply's buffers are transferred). */
+function copyColumns(cols: Record<string, Column>): Record<string, Column> {
+  const out: Record<string, Column> = {}
+  for (const [k, c] of Object.entries(cols)) out[k] = isDict(c) ? { ...c, codes: c.codes.slice() } : c.slice()
+  return out
 }
 
 function footer(name: string, file: TraceFile): Promise<FileMetaData> {
@@ -91,8 +114,16 @@ function buffers(value: unknown, out: ArrayBuffer[] = []): ArrayBuffer[] {
   return out
 }
 
-self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: 'reset' }>) => {
+self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | (ControlRequest & { id: number }) | { op: 'reset' }>) => {
   const req = e.data
+  if (req.op === 'claim' || req.op === 'seed' || req.op === 'release') {
+    let result: unknown = null
+    if (req.op === 'claim') result = groups.claim(req.name, req.group) ? 'yours' : 'held'
+    else if (req.op === 'seed') groups.seed(req.name, req.group, req.cols)
+    else groups.release(req.name, req.group)
+    self.postMessage({ id: req.id, ctl: true, result } satisfies WorkerReply)
+    return
+  }
   if (req.op === 'reset') {
     footers.clear()
     resetWhole()
@@ -105,10 +136,13 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | ComputeRequest | { op: '
     let result: unknown
     let fallback = false
     if (req.op === 'decode') {
-      const d = await decode(req)
+      const d = req.shared && CACHED_TABLES.has(req.name)
+        ? { cols: copyColumns(await readGroup(req.name, req.file, req.group, null)), fallback: false }
+        : await decode(req)
+      const raw = req.raw ? copyColumns(d.cols) : null
       if (req.classBase) d.cols = withClassCharges(d.cols, req.classBase)
       if (req.indexResources) Object.assign(d.cols, indexCharges(d.cols, req.indexResources))
-      result = d.cols
+      result = raw ? { cols: d.cols, raw } : d.cols
       fallback = d.fallback
     } else if (req.op === 'levels') {
       result = buildLevels(...req.args)

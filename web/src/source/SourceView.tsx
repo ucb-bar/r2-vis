@@ -7,7 +7,7 @@
 // the focus with the focus time kept (shift: adds or removes it; a double click: the time
 // is the span of the item's task bars); the focus items are highlighted. It fills the
 // container it gets.
-import { useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Trace } from '../data/trace'
 import { itemKey, type FocusItem, type FocusTime } from '../state/focus'
 import { spanOf } from '../state/focusqueries'
@@ -17,7 +17,7 @@ import { AreaContext, useAreaState } from '../ui/area'
 import { Tooltip, tipPlace, type TipContent } from '../ui/Tooltip'
 import { itemPcs, linkFor, programIndex, taskSource, type LoadedMap, type MapProgram, type Producer } from './links'
 import { tokenSpans } from './parts'
-import { opColor, Readable, regionKey, type CardLinks } from './Readable'
+import { CallMarker, opColor, Readable, regionKey, type CardLinks } from './Readable'
 import { tokenizeRust, type Token } from './rust'
 import { DepIndex, innermostAt, type Node, type SourceMap } from './srcmap'
 
@@ -81,7 +81,8 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
   const linked = status === 'match' || status === 'unverified'
   const cardLinks = useMemo<CardLinks | null>(() => (link && mp && linked
     ? { tasks: (n) => link.tasksOf(mp, n), producers: (n, k) => link.producersOf(mp, n, k), groups: (n) => link.groupsOf(mp, n),
-        viaCall: (n) => link.tasksViaCall(n), callee: (n) => link.callee(mp, n) } : null), [link, mp?.mi, mp?.pi, linked])
+        viaCall: (n) => link.tasksViaCall(n), callee: (n) => link.callee(mp, n), region: (l) => link.regionAt(mp, l),
+        inlinedCalls: link.inlinedCalls(mp) } : null), [link, mp?.mi, mp?.pi, linked])
 
   const hover = (e: React.MouseEvent, content: TipContent | null) => {
     const r = host.current?.getBoundingClientRect()
@@ -326,6 +327,8 @@ export function SourceView({ maps, error, onOpen, trace, store, request }: Props
         </div>
       ) : (
         <SourcePane scroller={scroller} tokens={tokens} index={index.all} file={file} selected={selected}
+          extra={(l) => cardLinks?.inlinedCalls.get(l)?.filter((c) => c.item.inlined?.[c.item.inlined.length - 1]?.file === file)
+            .map((c) => <CallMarker key={c.id} call={c} links={cardLinks} onSelect={(n) => select(n)} focus={toFocus} />)}
           onLine={(line) => select(innermostAt(index.all, file, line))} />
       )}
       {tip && <Tooltip tip={tip.content} style={tipPlace(tip, host.current)} />}
@@ -349,6 +352,8 @@ function tokensOf(map: SourceMap): Token[][][] {
 }
 
 interface PaneProps {
+  /** per line: what to show after it (the calls made there in inlined functions) */
+  extra?: (line: number) => ReactNode
   scroller: React.RefObject<HTMLDivElement | null>
   tokens: Token[][][]
   index: Node[]
@@ -359,7 +364,7 @@ interface PaneProps {
 
 /** The plain file (Source mode): line numbers, syntax colors, a mark per invoke line (by
  * op), the selected item's lines highlighted and scrolled into view. */
-function SourcePane({ scroller, tokens, index, file, selected, onLine }: PaneProps) {
+function SourcePane({ scroller, tokens, index, file, selected, onLine, extra }: PaneProps) {
   const lines = tokens[file] ?? []
   // per line: the op of the first invoke that covers it
   const marks = useMemo(() => {
@@ -389,7 +394,7 @@ function SourcePane({ scroller, tokens, index, file, selected, onLine }: PanePro
             <div key={k} data-line={line} className={inSel ? 'src-line selected' : 'src-line'} onClick={() => onLine(line)}>
               <span className="src-mark" style={op !== undefined ? { background: opColor(op) } : undefined} />
               <span className="src-ln">{line}</span>
-              <code>{tokenSpans(toks)}</code>
+              <code>{tokenSpans(toks)}</code>{extra?.(line)}
             </div>
           )
         })}

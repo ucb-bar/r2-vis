@@ -3,7 +3,7 @@
 import { concatParts, type Column, type Table } from './columns'
 import { readFooter } from './parquet/footer'
 import type { FileMetaData } from 'hyparquet'
-import type { WorkerPool } from './pool'
+import { ATTRIBUTION_WORKER, type WorkerPool } from './pool'
 import type { TraceFile } from './tracefile'
 
 export interface RowGroupInfo {
@@ -56,8 +56,23 @@ export class TraceReader {
    * worker (columns __from, __to, __maxSpan). */
   async readChargeGroup(group: number, nResources: number, classBase?: Int32Array): Promise<Record<string, Column>> {
     const info = await this.rowGroups('charges')
-    return this.pool.decode({ name: 'charges', file: this.file('charges'), group, columns: null,
-      bytes: info[group].bytes, indexResources: nResources, classBase })
+    const job = { name: 'charges', file: this.file('charges'), group, columns: null, bytes: info[group].bytes,
+      indexResources: nResources, classBase }
+    // One fetch per group for the views and the attribution queries. When the attribution
+    // worker's group cache holds the group (or decodes it), read it there; else claim it,
+    // decode it on any worker (in parallel with the others) and seed that cache with a copy.
+    // While claimed, a query that asks for the group waits for the seed instead of fetching.
+    if (await this.pool.ask(ATTRIBUTION_WORKER, { op: 'claim', name: 'charges', group }) === 'held') {
+      return this.pool.decode({ ...job, shared: ATTRIBUTION_WORKER })
+    }
+    try {
+      const { cols, raw } = await this.pool.decode({ ...job, raw: true }) as unknown as { cols: Record<string, Column>; raw: Record<string, Column> }
+      void this.pool.ask(ATTRIBUTION_WORKER, { op: 'seed', name: 'charges', group, cols: raw }, buffersOf(raw))
+      return cols
+    } catch (err) {
+      void this.pool.ask(ATTRIBUTION_WORKER, { op: 'release', name: 'charges', group })
+      throw err
+    }
   }
 
   /** Columns (all if null) of the given row groups (all if omitted), concatenated. */
@@ -73,4 +88,9 @@ export class TraceReader {
       })))
     return concatParts(parts)
   }
+}
+
+/** The buffers of decoded columns (to transfer them). */
+function buffersOf(cols: Record<string, Column>): ArrayBuffer[] {
+  return Object.values(cols).map((c) => ('codes' in c && !ArrayBuffer.isView(c) ? c.codes.buffer : (c as ArrayBufferView).buffer) as ArrayBuffer)
 }

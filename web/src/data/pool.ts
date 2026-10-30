@@ -1,8 +1,13 @@
 // A pool of workers (worker.ts). Requests go to the next free worker; larger requests are
 // sent first. A pinned request waits for its own worker (a worker that keeps a cache).
 import type { Column } from './parquet/decode'
-import type { ComputeRequest, DecodeRequest, WorkerReply } from './worker'
+import type { ComputeRequest, ControlRequest, DecodeRequest, WorkerReply } from './worker'
 import type { TraceFile } from './tracefile'
+
+/** The worker that runs the attribution queries and keeps the decoded charge and usage
+ * groups (data/groupcache.ts). A charge group of the views is decoded on any worker and then
+ * given to it (seeded), or read through it when it holds the group: one fetch per group. */
+export const ATTRIBUTION_WORKER = 0
 
 export interface DecodeJob {
   name: string
@@ -12,6 +17,11 @@ export interface DecodeJob {
   bytes: number
   indexResources?: number
   classBase?: Int32Array
+  /** decode on this worker (an index), through its group cache */
+  shared?: number
+  /** also reply with a copy of the group as decoded (before the charges index), to seed
+   * the attribution worker's cache */
+  raw?: boolean
 }
 
 export interface PoolStats {
@@ -30,13 +40,20 @@ export class WorkerPool {
   private readonly idle: Worker[]
   private readonly queue: Queued[] = []
   private readonly pending = new Map<number, Queued>()
+  /** control requests (sent at once, not queued: they do not occupy the worker) */
+  private readonly asked = new Map<number, (r: unknown) => void>()
   private nextId = 0
   readonly stats: PoolStats = { workerMs: 0, fallbackUnits: 0 }
 
   constructor(size: number) {
     this.workers = Array.from({ length: size }, () => {
       const w = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
-      w.onmessage = (e: MessageEvent<WorkerReply>) => this.done(w, e.data)
+      w.onmessage = (e: MessageEvent<WorkerReply>) => {
+        if (e.data.ctl) {
+          this.asked.get(e.data.id)?.(e.data.result)
+          this.asked.delete(e.data.id)
+        } else this.done(w, e.data)
+      }
       return w
     })
     this.idle = [...this.workers]
@@ -48,14 +65,25 @@ export class WorkerPool {
 
   decode(job: DecodeJob): Promise<Record<string, Column>> {
     const msg: Message = { op: 'decode', file: job.file, name: job.name, group: job.group, columns: job.columns,
-      indexResources: job.indexResources, classBase: job.classBase }
-    return this.submit(msg, job.bytes, []) as Promise<Record<string, Column>>
+      indexResources: job.indexResources, classBase: job.classBase, shared: job.shared !== undefined, raw: job.raw }
+    const pin = job.shared === undefined ? null : this.workers[job.shared % this.workers.length]
+    return this.submit(msg, job.bytes, [], pin) as Promise<Record<string, Column>>
   }
 
   /** A compute request; `pin` (a worker index) sends it to that worker only. */
   compute<T>(msg: WithoutId<ComputeRequest>, transfer: Transferable[] = [], pin: number | null = null): Promise<T> {
     const worker = pin === null ? null : this.workers[pin % this.workers.length]
     return this.submit(msg, Infinity, transfer, worker) as Promise<T>
+  }
+
+  /** A control request to one worker, sent at once (not queued behind its jobs; the worker
+   * answers between the awaits of a running job). */
+  ask(worker: number, msg: ControlRequest, transfer: Transferable[] = []): Promise<unknown> {
+    const id = this.nextId++
+    return new Promise((resolve) => {
+      this.asked.set(id, resolve)
+      this.workers[worker % this.workers.length].postMessage({ ...msg, id }, transfer)
+    })
   }
 
   /** Forgets cached footers (a new trace is opened). */

@@ -6,7 +6,7 @@ import type { ChargeCache, ChargeGroup } from '../data/charges'
 import { isDict } from '../data/columns'
 import { taskLabel, taskName } from '../data/labels'
 import { programSpans, type ProgramSpan } from '../data/programs'
-import type { WorkerPool } from '../data/pool'
+import { ATTRIBUTION_WORKER, type WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
 import { MAX_SUBROWS } from '../data/derive'
 import { amount as formatAmount, count, cycles, num, pct, rate, relative, short, splitPath } from '../ui/format'
@@ -80,7 +80,6 @@ interface RowValue {
 }
 
 /** The pool worker of the attribution queries. */
-const ATTRIBUTION_WORKER = 0
 /** Above this many selected tasks, their dependency arrows are not drawn. */
 const MAX_SELECTED_ARROWS = 256
 /** The usage arrows whose share over the task's lifetime is computed (the highest peaks). */

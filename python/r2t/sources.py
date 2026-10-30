@@ -36,17 +36,17 @@ def candidates(images: list[dict], given: list[Path]) -> list[Path]:
     return list(dict.fromkeys(found))
 
 
-def matching(path: Path, hashes: set[str]) -> tuple[str, ...]:
-    """The programs of the map whose image ran; empty if the file is not a map of a version
-    this converter reads."""
+def matching(data: bytes, hashes: set[str]) -> tuple[tuple[str, ...], set[str]]:
+    """The programs of the map whose image ran, and those images (sha256); empty if the bytes
+    are not a map of a version this converter reads."""
     try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return ()
-    if data.get("format") != "r2-srcmap" or data.get("version") not in MAP_VERSIONS:
-        return ()
-    return tuple(p["program"] for p in data.get("programs", [])
-                 if p.get("image", {}).get("sha256") in hashes)
+        m = json.loads(data)
+    except ValueError:
+        return (), set()
+    if m.get("format") != "r2-srcmap" or m.get("version") not in MAP_VERSIONS:
+        return (), set()
+    ran = [p for p in m.get("programs", []) if p.get("image", {}).get("sha256") in hashes]
+    return tuple(p["program"] for p in ran), {p["image"]["sha256"] for p in ran}
 
 
 def name_of(path: Path, taken: set[str]) -> str:
@@ -61,26 +61,41 @@ def name_of(path: Path, taken: set[str]) -> str:
 
 def copy_maps(images: list[dict], given: list[Path], out: Path) -> list[dict]:
     """Writes the maps that belong to the run into OUT/sources (gzip); returns the manifest entries.
-    A given map that matches no image of the run is reported and left out."""
+    The candidates are taken in order (the given maps first): a map is written only when it
+    covers an image of the run that no map written before covers, so a given map hides the
+    maps found next to the images for the same images, and two builds of one map are not both
+    written (a line names each map left out). A given map that matches no image of the run is
+    reported and left out."""
     hashes = {x["sha256"] for x in images if x.get("sha256")}
     given_set = {p.resolve() for p in given}
     entries: list[dict] = []
     taken: set[str] = set()
+    covered: dict[str, str] = {}   # image sha256 -> the file in the trace that covers it
     for path in candidates(images, given):
-        programs = matching(path, hashes)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            data = b""
+        programs, shas = matching(data, hashes)
         if not programs:
             if path in given_set:
                 print(f"warning: {path}: no program of this map ran in the trace "
                       "(image sha256 differs, or not a source map of version 1 or 2)",
                       file=sys.stderr)
             continue
+        if shas <= covered.keys():
+            by = sorted({covered[s] for s in shas})
+            print(f"skipped {path}: its images are covered by {', '.join(by)}", file=sys.stderr)
+            continue
         name = name_of(path, taken)
         taken.add(name)
+        file = f"{SOURCES_DIR}/{name}.json.gz"
         (out / SOURCES_DIR).mkdir(exist_ok=True)
         # mtime 0: the same map gives the same bytes
-        (out / SOURCES_DIR / f"{name}.json.gz").write_bytes(gzip.compress(path.read_bytes(), mtime=0))
-        entries.append({"file": f"{SOURCES_DIR}/{name}.json.gz", "from": str(path),
-                        "programs": list(programs)})
+        (out / file).write_bytes(gzip.compress(data, mtime=0))
+        for s in shas:
+            covered.setdefault(s, file)
+        entries.append({"file": file, "from": str(path), "programs": list(programs)})
     return entries
 
 

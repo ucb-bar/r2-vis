@@ -14,7 +14,8 @@
 // A task that neither places is at the first item whose pcs hold its pc (pc alone).
 import { programIndex, ranTrips, taskPcs, type Node, type Program } from './srcmap'
 
-/** A placed task: its item, the lines of the call statements around it (outermost first),
+/** A placed task: its item, the lines of the call statements around it (outermost first; a
+ * call made in inlined functions adds the line of the call in each of them),
  * the call items it came through (`via`), and why the call path did not place it ('path': an element names no call of the map;
  * 'pc': no item of the function the path reaches holds the pc; the item then comes from the
  * pc alone). */
@@ -102,7 +103,7 @@ export class ProgramPlacer {
     for (const e of path ?? []) {
       const call = scope.byCallPc.get(e)
       if (!call) return alone('path')
-      calls.push(call.item.lines[0])
+      calls.push(call.item.lines[0], ...(call.item.inlined ?? []).map((f) => f.line))
       if (call.item.kind === 'invoke' || call.item.kind === 'wait') return { node: call, calls, via, miss: null }
       via.push(call)
       const next = this.callee(call)

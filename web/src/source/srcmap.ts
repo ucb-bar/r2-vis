@@ -65,6 +65,9 @@ export interface Item {
   call_pcs?: string[]
   /** version 2: a tail call (it pushes no frame) */
   tail?: boolean
+  /** version 2, a call inside functions that the compiler inlined into the statement: per
+   * inlined function, outermost first, the line of the call in it */
+  inlined?: { function: string; file: number; line: number }[]
   /** version 2, an item of a closure inlined at some of its calls: per call statement, the
    * pcs of the copy inlined there */
   static_pcs_by_call?: { file: number; line: number; pcs: string[] }[]
