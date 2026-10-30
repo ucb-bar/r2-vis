@@ -6,7 +6,7 @@ import type { Attribution, AttributionRequest, AttributionScope } from '../data/
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
 import { linkFor, parentSpawns, programIndex, taskRowOfGid, type LoadedMap } from '../source/links'
-import type { FocusItem, FocusQueries, FocusTime } from './focus'
+import { itemKey, type FocusItem, type FocusQueries, type FocusTime } from './focus'
 
 /** The worker that runs the charge queries (its task-kind cache is read once per trace). */
 export const ATTRIBUTION_WORKER = 0
@@ -69,18 +69,35 @@ const blocksOf = (trace: Trace) => trace.manifest.charge_blocks.map((b) => ({ t0
 export function focusQueries(trace: Trace, maps: LoadedMap[], pool: WorkerPool, scope: () => ReadonlySet<number>): FocusQueries {
   const link = linkFor(trace, maps)
   const files = trace.reader.files
+  /** the tasks of the item lists asked so far (a list is new each time: its items' keys) */
+  const ofItems = new Map<string, number[]>()
+  const itemTasks = (it: FocusItem): number[] => {
+    const mi = maps.findIndex((m) => m.name === it.map)
+    const pi = mi < 0 ? -1 : maps[mi].map.programs.findIndex((p) => p.program === it.program)
+    if (pi < 0) return []
+    const node = programIndex(maps[mi].map.programs[pi]).byId.get(it.id)
+    return node ? link.tasksOf({ mi, pi }, node) : []
+  }
   return {
     tasksOfItems(items: readonly FocusItem[]): number[] {
-      const out = new Set<number>()
-      for (const it of items) {
-        const mi = maps.findIndex((m) => m.name === it.map)
-        const pi = mi < 0 ? -1 : maps[mi].map.programs.findIndex((p) => p.program === it.program)
-        if (pi < 0) continue
-        const node = programIndex(maps[mi].map.programs[pi]).byId.get(it.id)
-        if (node) for (const t of link.tasksOf({ mi, pi }, node)) out.add(t)
+      const key = items.map(itemKey).join('\u0001')
+      const hit = ofItems.get(key)
+      if (hit) return hit
+      let out: number[]
+      if (items.length === 1) {
+        // one item: its tasks (distinct; sorted unless the item has several pcs) and the
+        // spawns of their programs (tasks of other programs), merged in order
+        const own = itemTasks(items[0])
+        const sorted = own.every((t, k) => k === 0 || own[k - 1] < t) ? own : [...own].sort((x, y) => x - y)
+        out = mergeSorted(sorted, parentSpawns(trace, own).sort((x, y) => x - y))
+      } else {
+        const all = new Set<number>()
+        for (const it of items) for (const t of itemTasks(it)) all.add(t)
+        for (const t of parentSpawns(trace, [...all])) all.add(t)
+        out = [...all].sort((x, y) => x - y)
       }
-      for (const t of parentSpawns(trace, [...out])) out.add(t)
-      return [...out].sort((x, y) => x - y)
+      ofItems.set(key, out)
+      return out
     },
     itemsOf(tasks: readonly number[]): FocusItem[] {
       return link.itemsOf(tasks).map(({ mp, node }) => ({ map: maps[mp.mi].name, program: maps[mp.mi].map.programs[mp.pi].program, id: node.id }))
@@ -103,4 +120,17 @@ export function focusQueries(trace: Trace, maps: LoadedMap[], pool: WorkerPool, 
       return out.sort((x, y) => x - y)
     },
   }
+}
+
+/** Two ascending lists as one, without repeats. */
+function mergeSorted(a: readonly number[], b: readonly number[]): number[] {
+  if (!b.length) return a as number[]
+  const out: number[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length || j < b.length) {
+    const x = j >= b.length || (i < a.length && a[i] <= b[j]) ? a[i++] : b[j++]
+    if (out[out.length - 1] !== x) out.push(x)
+  }
+  return out
 }

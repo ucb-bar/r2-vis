@@ -165,10 +165,15 @@ export function expandAffine(a: Affine): (string | number)[] {
   })
 }
 
+const entriesOf = new WeakMap<object, { idx: number[]; value: unknown }[]>()
+
 /** The trips of a per-trip value: the trip index per level and the value (null: the item
- * did not run in that trip); a plain value is one entry with no index. */
+ * did not run in that trip); a plain value is one entry with no index. A list or affine
+ * value's entries are built once and shared (callers do not change them). */
 export function tripEntries<T>(v: Trips<T> | undefined): { idx: number[]; value: T | null }[] {
   if (v === undefined) return []
+  const hit = v !== null && typeof v === 'object' ? entriesOf.get(v) : undefined
+  if (hit) return hit as { idx: number[]; value: T | null }[]
   const out: { idx: number[]; value: T | null }[] = []
   const walk = (x: Trips<T>, idx: number[]) => {
     if (isAffine(x)) {
@@ -178,6 +183,7 @@ export function tripEntries<T>(v: Trips<T> | undefined): { idx: number[]; value:
     } else out.push({ idx, value: x as T | null })
   }
   walk(v, [])
+  if (v !== null && typeof v === 'object') entriesOf.set(v, out)
   return out
 }
 

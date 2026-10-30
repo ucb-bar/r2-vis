@@ -60,8 +60,17 @@ export function unknownValue(v: string | null | undefined): boolean {
 /** The trips in which an item ran: the entries of a per-trip value that are not null
  * (a trip of a loop in which the item did not run, a branch not taken, is null). */
 export function ranTrips(v: Trips<unknown>): number {
-  return tripEntries(v).filter((e) => e.value !== null).length
+  if (v === null || typeof v !== 'object') return tripEntries(v).filter((e) => e.value !== null).length
+  let n = ranOf.get(v)
+  if (n === undefined) {
+    n = tripEntries(v).filter((e) => e.value !== null).length
+    ranOf.set(v, n)
+  }
+  return n
 }
+
+/** ranTrips per per-trip value (a card renders again at each focus change) */
+const ranOf = new WeakMap<object, number>()
 
 /** "× n": the trips of a per-trip value that ran (a toggle for its trip table). */
 export function tripsButton(v: Trips<unknown>, onClick: () => void): ReactNode {

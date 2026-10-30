@@ -8,6 +8,7 @@ import { taskLabel, taskName } from '../data/labels'
 import { programSpans, type ProgramSpan } from '../data/programs'
 import type { WorkerPool } from '../data/pool'
 import type { Trace } from '../data/trace'
+import { MAX_SUBROWS } from '../data/derive'
 import { amount as formatAmount, count, cycles, num, pct, rate, relative, short, splitPath } from '../ui/format'
 import { TIP_ITEMS, tipList, type TipContent, type TipItem, type TipRow, type TipSection } from '../ui/Tooltip'
 import type { BlockSelection } from '../state/blocks'
@@ -30,6 +31,20 @@ export const DEP_MIN_PX = 4
 export const MAX_ARROWS = 5000
 /** Minimum width (px) of a task on a Neutrino lane (join, spawn: not wide but important). */
 export const NEUTRINO_TICK = 3
+/** Selection outlines: a task narrower than this (px) shares one outline with the selected
+ * tasks of its sub-row that it touches (within 1 px); wider tasks keep their own. */
+export const MERGE_BELOW_PX = 2
+
+/** The selected tasks by (lane, sub-row), in issue order: group g = lane * MAX_SUBROWS + sub
+ * holds positions [start[g], start[g + 1]); per position the task's issue, its outline end
+ * (complete, or the end of the run) and the largest end so far in its group. */
+interface SelectionGroups {
+  of: ReadonlySet<number>
+  start: Int32Array
+  issue: Float64Array
+  end: Float64Array
+  maxEnd: Float64Array
+}
 
 export interface ResourceInfo {
   name: string
@@ -229,6 +244,7 @@ export class TimelineRenderer {
   private dpr = 1
   private depNote = false
   private readonly programsOf: Map<number, ProgramSpan[]>
+  private grouped: SelectionGroups | null = null
   /** Called after a change of the persisted view state, and after a view change. */
   onPrefs: (() => void) | null = null
 
@@ -978,11 +994,8 @@ export class TimelineRenderer {
     }
     // Selected tasks keep their arrows at any width (the edge rule when off screen), up
     // to MAX_SELECTED_ARROWS tasks; above that only their outlines.
-    const arrows = this.selectedTasks.size <= MAX_SELECTED_ARROWS
-    for (const t of this.selectedTasks) {
-      if (arrows) withArrows(t)
-      this.outline(selectedOutlines, t)
-    }
+    if (this.selectedTasks.size <= MAX_SELECTED_ARROWS) for (const t of this.selectedTasks) withArrows(t)
+    this.selectionOutlines(selectedOutlines)
     const hovered = this.hoveredTask()
     if (hovered >= 0 && !this.selectedTasks.has(hovered) && this.arrowsFor(hovered)) {
       withArrows(hovered)
@@ -1043,6 +1056,97 @@ export class TimelineRenderer {
     const top = this.rowTop(ri) + pad + this.trace.lanes.taskSub[task] * subH
     if (top > this.height || top + subH < AXIS) return
     path.rect(x0 - 0.5, top - 0.5, Math.max(1, x1 - x0) + 1, subH + 1)
+  }
+
+  /** The selected tasks grouped by (lane, sub-row) in issue order, built when the selection
+   * changes (one walk of the lane index). */
+  private selectionGroups(): SelectionGroups {
+    if (this.grouped?.of === this.selectedTasks) return this.grouped
+    const L = this.trace.lanes
+    const lanes = L.start.length - 1
+    const picked = new Uint8Array(this.trace.facts.tasks.rows)
+    for (const t of this.selectedTasks) picked[t] = 1
+    const start = new Int32Array(lanes * MAX_SUBROWS + 1)
+    for (let lane = 0; lane < lanes; lane++) {
+      for (let p = L.start[lane]; p < L.start[lane + 1]; p++) if (picked[L.order[p]]) start[lane * MAX_SUBROWS + L.sub[p] + 1]++
+    }
+    for (let g = 0; g < lanes * MAX_SUBROWS; g++) start[g + 1] += start[g]
+    const n = start[lanes * MAX_SUBROWS]
+    const issue = new Float64Array(n)
+    const end = new Float64Array(n)
+    const maxEnd = new Float64Array(n)
+    const at = start.slice(0, lanes * MAX_SUBROWS)
+    for (let lane = 0; lane < lanes; lane++) {
+      for (let p = L.start[lane]; p < L.start[lane + 1]; p++) {
+        if (!picked[L.order[p]]) continue
+        const k = at[lane * MAX_SUBROWS + L.sub[p]]++
+        issue[k] = L.issue[p]
+        const c = L.complete[p]
+        end[k] = c === c ? c : this.endTime
+      }
+    }
+    for (let g = 0; g < lanes * MAX_SUBROWS; g++) {
+      let m = -Infinity
+      for (let k = start[g]; k < start[g + 1]; k++) maxEnd[k] = m = Math.max(m, end[k])
+    }
+    this.grouped = { of: this.selectedTasks, start, issue, end, maxEnd }
+    return this.grouped
+  }
+
+  /** The outlines of the selected tasks in the rows in view, per sub-row: within the time
+   * in view only, and a task narrower than MERGE_BELOW_PX merged with its neighbours that it
+   * touches (within 1 px); wider tasks are outlined one by one, as outline() does. */
+  private selectionOutlines(path: Path2D): void {
+    if (!this.selectedTasks.size) return
+    const g = this.selectionGroups()
+    const cpp = this.view.cpp
+    const left = this.timeAtX(GUTTER)
+    const right = this.timeAtX(this.width)
+    const rows = this.model.rows
+    for (let i = Math.max(0, rowAt(this.model, this.scrollY)); i < rows.length; i++) {
+      const y = this.rowTop(i)
+      if (y > this.height) break
+      const row = rows[i]
+      if (row.kind !== 'lane' || row.notRecorded) continue
+      const { pad, subH } = this.laneBox(row)
+      const tick = this.isNeutrinoLane(row.id) ? NEUTRINO_TICK : 0
+      for (let sub = 0; sub < MAX_SUBROWS; sub++) {
+        const a = g.start[row.id * MAX_SUBROWS + sub]
+        const b = g.start[row.id * MAX_SUBROWS + sub + 1]
+        if (a === b) continue
+        const top = y + pad + sub * subH
+        if (top > this.height || top + subH < AXIS) continue
+        // the first position whose largest end so far reaches the left edge
+        let lo = a
+        let hi = b
+        const from = left - tick * cpp
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1
+          if (g.maxEnd[mid] < from) lo = mid + 1
+          else hi = mid
+        }
+        let x0 = NaN
+        let x1 = 0
+        let narrow = false
+        for (let k = lo; k < b && g.issue[k] <= right; k++) {
+          const s = this.xOf(g.issue[k])
+          let e = this.xOf(g.end[k])
+          if (tick) e = Math.max(e, s + tick)
+          if (e < GUTTER) continue
+          const thin = e - s < MERGE_BELOW_PX
+          if (x0 === x0 && s <= x1 + 1 && (thin || narrow)) {
+            x1 = Math.max(x1, e)
+            narrow = thin
+            continue
+          }
+          if (x0 === x0) path.rect(x0 - 0.5, top - 0.5, Math.max(1, x1 - x0) + 1, subH + 1)
+          x0 = s
+          x1 = e
+          narrow = thin
+        }
+        if (x0 === x0) path.rect(x0 - 0.5, top - 0.5, Math.max(1, x1 - x0) + 1, subH + 1)
+      }
+    }
   }
 
   /** The task under the cursor in a lane row, or -1. */
@@ -1928,3 +2032,4 @@ export class TimelineRenderer {
     return { title: p.name || 'program', path: short(String(this.trace.dims.nodes[node]?.path ?? '')), sections: [{ kind: 'rows', rows }] }
   }
 }
+
